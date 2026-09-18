@@ -1,0 +1,54 @@
+name: Dream harness reliability
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tracking:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Check planning and handoff integrity
+        run: python3 scripts/check_project_tracking.py check --ci
+      - name: Verify tracking failure cases
+        run: python3 -m unittest discover -s tests -p 'test_project_tracking.py' -v
+
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      DREAM_SEMANTIC_MEMORY: "0"
+      DREAM_RERANK: "0"
+      DREAM_CONSOLIDATE: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: "0.11.29"
+          python-version: "3.12"
+      - name: Install locked runtime
+        run: uv sync --locked --extra dev
+      - name: Install local verification dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap libseccomp2 ffmpeg
+          uv run --locked playwright install --with-deps chromium
+      - name: Run model-free regression suite
+        run: uv run --locked pytest -q --junitxml=artifacts/harness-validation/regressions.xml
+      - name: Measure deterministic harness fixtures
+        run: uv run --locked python scripts/harness_report.py
+      - name: Build and inspect distribution
+        run: |
+          uv build --wheel --out-dir /tmp/dream-wheel
+          uv run --locked python scripts/audit_distribution.py /tmp/dream-wheel

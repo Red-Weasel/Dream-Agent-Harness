@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"00000000-0000-4000-8000-000000000001"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"dream","tool":"recall","arguments":{"query":"the user"},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"dream","tool":"recall","arguments":{"query":"the user"},"result":{"content":[{"type":"text","text":"Recalled 1 memory(ies) for 'the user':\n\n• [semantic] Synthetic fixture: example project uses four-space indentation"}],"structured_content":null},"error":null,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"The tool call worked and returned 1 result."}}
+{"type":"turn.completed","usage":{"input_tokens":69123,"cached_input_tokens":62720,"output_tokens":242,"reasoning_output_tokens":154}}

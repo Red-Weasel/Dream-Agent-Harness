@@ -1,0 +1,12 @@
+{
+  "format": "dream-skill/v1",
+  "name": "library",
+  "version": "2.0.0",
+  "portable": true,
+  "capabilities": [
+    "library_resolve",
+    "library_read",
+    "library_materialize",
+    "library_replace"
+  ]
+}

@@ -1,0 +1,57 @@
+<!doctype html><html lang="en"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dream animation</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#07191e;color:#f1f6f4;font-family:Arial,Helvetica,sans-serif;overflow:hidden}
+#stage{position:absolute;left:50%;top:50%;transform-origin:center;overflow:hidden}
+.halo{position:absolute;width:75%;height:100%;right:-40%;top:-30%;border:1px solid #ffffff22;border-radius:50%;box-shadow:0 0 0 90px #ffffff05,0 0 0 180px #ffffff03}
+#content{position:absolute;inset:9%;display:flex;flex-direction:column;justify-content:center;gap:28px}
+#label{font-size:22px;letter-spacing:5px;text-transform:uppercase;color:var(--accent)}
+h1{font-size:82px;line-height:1.04;letter-spacing:-3px;max-width:1050px;margin:0;white-space:pre-wrap}
+p{font-size:32px;line-height:1.5;max-width:1050px;color:#d3dedf;margin:0;white-space:pre-wrap}
+.with-media h1{font-size:56px;max-width:670px}.with-media p{font-size:27px;max-width:660px}
+#media{position:absolute;left:53%;right:5%;top:18%;bottom:18%;display:none;align-items:center;justify-content:center}
+#media img,#media video{max-width:100%;max-height:100%;object-fit:contain;border-radius:18px;box-shadow:0 30px 90px #0005}
+.with-media #content{right:50%}.with-media #media{display:flex}
+#rule{width:70px;height:5px;background:var(--accent);border-radius:5px}
+#counter{position:absolute;bottom:5%;left:9%;font-size:19px;color:#ffffff80;letter-spacing:2px}
+#controls{position:fixed;bottom:12px;left:15px;right:15px;display:flex;align-items:center;gap:12px;background:#06161dea;padding:10px;border-radius:10px;font-size:13px}
+button{background:#92e3cf;color:#072129;border:0;border-radius:6px;padding:8px 15px;cursor:pointer}input{flex:1;accent-color:#92e3cf}body.export #controls{display:none}
+</style>
+<div id="stage"><div class="halo"></div><div id="content"><div id="label"></div><div id="rule"></div><h1></h1><p></p></div><div id="media"></div><div id="counter"></div></div>
+<div id="controls"><button id="play">Play</button><input id="seek" aria-label="Animation time" type="range" min="0" step="0.01"><span id="time"></span></div>
+<script>
+const DATA=/*DREAM_DATA*/{};
+const C=DATA.composition, A=DATA.assets, stage=document.getElementById('stage'), content=document.getElementById('content'), media=document.getElementById('media');
+const seek=document.getElementById('seek'), timeLabel=document.getElementById('time'), play=document.getElementById('play');
+let t=0,index=-1,playing=false,last=0,element=null,pending=null;
+const duration=C.scenes.reduce((n,s)=>n+s.duration,0);window.dreamDuration=duration;
+const designWidth=1920,designHeight=1920*C.height/C.width;
+stage.style.width=designWidth+'px';stage.style.height=designHeight+'px';seek.max=duration;
+function fit(){const s=Math.min(innerWidth/designWidth,innerHeight/designHeight);stage.style.transform=`translate(-50%,-50%) scale(${s})`}
+addEventListener('resize',fit);fit();
+function eventReady(el,name){return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{clean();reject(Error('Media readiness timed out'))},15000);const good=()=>{clean();resolve()};const bad=()=>{clean();reject(Error('Media could not load'))};function clean(){clearTimeout(timer);el.removeEventListener(name,good);el.removeEventListener('error',bad)}el.addEventListener(name,good,{once:true});el.addEventListener('error',bad,{once:true})})}
+window.dreamSeek=async function(value){
+ if(!Number.isFinite(value))throw Error('Invalid time');t=Math.max(0,Math.min(duration,value));
+ let start=0,at=C.scenes.length-1;for(let i=0;i<C.scenes.length;i++){if(t<start+C.scenes[i].duration||i===C.scenes.length-1){at=i;break}start+=C.scenes[i].duration}
+ const scene=C.scenes[at],local=t-start,p=Math.min(1,local/.7),e=1-Math.pow(1-p,3);
+ if(index!==at){index=at;stage.style.background=scene.background;stage.style.setProperty('--accent',scene.accent);stage.classList.toggle('with-media',!!scene.asset_id);
+ document.querySelector('h1').textContent=scene.title;document.querySelector('p').textContent=scene.body;
+ document.getElementById('label').textContent=scene.label||'Made with Dream';document.getElementById('counter').textContent=String(at+1).padStart(2,'0')+' / '+String(C.scenes.length).padStart(2,'0');
+ media.replaceChildren();element=null;if(scene.asset_id){element=document.createElement(scene.asset_type==='video'?'video':'img');element.src=A[scene.asset_id];if(scene.asset_type==='video'){element.muted=true;element.preload='auto';element.playsInline=true}media.append(element);pending=scene.asset_type==='video'?(element.readyState>=1?Promise.resolve():eventReady(element,'loadedmetadata')):element.decode()}else pending=Promise.resolve();
+ }
+ await pending;await document.fonts.ready;
+ if(element&&scene.asset_type==='video'){const target=Math.min(local,Math.max(0,element.duration-.001));if(Math.abs(element.currentTime-target)>.001){const ready=eventReady(element,'seeked');element.currentTime=target;await ready}}
+ content.style.opacity=scene.animation==='none'?1:e;
+ content.style.transform=scene.animation==='slide'?`translateY(${(1-e)*50}px)`:scene.animation==='zoom'?`scale(${.94+.06*e})`:'none';
+ media.style.opacity=scene.animation==='none'?1:e;seek.value=t;timeLabel.textContent=t.toFixed(1)+' / '+duration.toFixed(1)+'s';
+ await new Promise(requestAnimationFrame);return {time:t,scene:scene.id};
+};
+let audio=null;if(C.audio_asset_id){audio=new Audio(A[C.audio_asset_id]);audio.preload='auto'}
+function pause(){playing=false;play.textContent='Play';if(audio)audio.pause()}window.dreamPause=pause;
+async function tick(now){if(!playing)return;const next=t+(now-last)/1000;last=now;try{await window.dreamSeek(next);if(t>=duration){pause();return}requestAnimationFrame(tick)}catch(e){pause();timeLabel.textContent=e.message}}
+play.onclick=async()=>{if(playing){pause();return}if(t>=duration)await window.dreamSeek(0);playing=true;play.textContent='Pause';last=performance.now();if(audio){audio.currentTime=t;audio.play().catch(e=>{timeLabel.textContent=e.message})}requestAnimationFrame(tick)};
+seek.oninput=async()=>{pause();await window.dreamSeek(Number(seek.value));if(audio)audio.currentTime=t};
+// Show a readable poster before playback; export seeks explicit frame times.
+window.dreamReady=window.dreamSeek(Math.min(.8,duration/2));
+</script></html>

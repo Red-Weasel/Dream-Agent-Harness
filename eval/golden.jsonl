@@ -1,0 +1,20 @@
+{"query": "what IDE does Alex like to code in", "expect": ["alex-editor"]}
+{"query": "caffeine habits", "expect": ["alex-caffeine"]}
+{"query": "any food restrictions to keep in mind when planning dinner", "expect": ["alex-diet"]}
+{"query": "background sound for concentrating", "expect": ["alex-music-focus"]}
+{"query": "what timezone should I use when scheduling for Alex", "expect": ["alex-timezone"]}
+{"query": "Gaggia OPV", "expect": ["kitchen-inventory"]}
+{"query": "metasearch port", "expect": ["searxng-endpoint"]}
+{"query": "which model does the local inference server run", "expect": ["machx-server"]}
+{"query": "stealth browser for bot-protected pages", "expect": ["camoufox-browser"]}
+{"query": "where does Dream keep its runtime state", "expect": ["dream-db-layout"]}
+{"query": "how do I ship a release", "expect": ["deploy-playbook"], "kind": "procedural"}
+{"query": "deep work routine", "expect": ["focus-block-playbook"], "kind": "procedural"}
+{"query": "how do I verify backups before pruning", "expect": ["backup-playbook"]}
+{"query": "what stack is the finance dashboard rebuild using", "expect": ["project-aurora"]}
+{"query": "finance dashboard", "expect": ["aurora-auth-decision"]}
+{"query": "how to stop the graphics card from thermal throttling", "expect": ["gpu-notes"]}
+{"query": "GPU work", "expect": ["ep-2026-06-20-gpu-upgrade"], "kind": "episodic", "since": "2026-06-01", "until": "2026-06-30"}
+{"query": "aurora", "expect": ["ep-2026-06-03-aurora-kickoff"], "kind": "episodic", "since": "2026-06-01", "until": "2026-06-10"}
+{"query": "server relocation downtime", "expect": ["ep-2026-05-12-server-move"]}
+{"query": "what happened in early July", "expect": ["ep-2026-07-01-dream-vision"], "kind": "episodic", "since": "2026-07-01"}

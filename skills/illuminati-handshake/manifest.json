@@ -1,0 +1,13 @@
+{
+  "format": "dream-skill/v1",
+  "name": "illuminati-handshake",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "extension-discovery",
+    "primary-source-research",
+    "isolated-experiments",
+    "held-out-evaluation",
+    "reviewed-capability-promotion"
+  ]
+}

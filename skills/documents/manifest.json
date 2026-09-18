@@ -1,0 +1,12 @@
+{
+  "format": "dream-skill/v1",
+  "name": "documents",
+  "version": "2.0.0",
+  "portable": true,
+  "capabilities": [
+    "read_file",
+    "run_bash",
+    "open_for_print",
+    "gen_pptx"
+  ]
+}

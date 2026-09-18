@@ -1,0 +1,11 @@
+{
+  "format": "dream-skill/v1",
+  "name": "data-analysis",
+  "version": "2.0.0",
+  "portable": true,
+  "capabilities": [
+    "read_file",
+    "run_bash",
+    "write_file"
+  ]
+}

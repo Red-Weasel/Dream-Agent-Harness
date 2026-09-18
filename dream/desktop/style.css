@@ -1,0 +1,47 @@
+window { background: #070B16; color: #EBF0FA; }
+headerbar { background: #0D1322; border-bottom: 1px solid #28334A; box-shadow: none; min-height: 56px; padding: 6px 14px; }
+headerbar .title { font-size: 16px; font-weight: bold; }
+headerbar .subtitle { color: #A6B3CD; font-size: 11px; }
+button { background: #172238; color: #EBF0FA; border: 1px solid #33405A; box-shadow: none; text-shadow: none; border-radius: 7px; padding: 6px 10px; min-height: 24px; }
+button:hover { background: #25324B; color: #ffffff; }
+button:checked { background: #302A48; color: #E0D7FF; border-color: #AA94FF; }
+button:disabled { color: #718095; background: #1c2430; border-color: #2a3442; }
+button:focus, entry:focus { border-color: #AA94FF; outline-color: #AA94FF; outline-offset: 2px; }
+button.flat { background: transparent; border-color: transparent; }
+button.suggested-action { background: #6751A8; border-color: #AA94FF; color: #fff; }
+entry { color: #EBF0FA; background: #111A2B; border: 1px solid #354256; border-radius: 7px; box-shadow: none; min-height: 30px; padding: 3px 10px; caret-color: #AA94FF; }
+entry selection { background: #514477; color: #ffffff; }
+label.muted { color: #A6B3CD; font-size: 11px; }
+label.brand { font-size: 23px; font-weight: 500; color: #DCE1FF; letter-spacing: 5px; }
+label.brand-tagline { font-size: 8px; letter-spacing: 1.6px; color: #9CAFD6; }
+label.pill { background: #172238; border: 1px solid #3a4859; border-radius: 12px; padding: 5px 11px; color: #A6B3CD; font-size: 11px; }
+label.connected { background: #203137; color: #9BD2BF; border-color: #27524d; }
+label.error { color: #ffc1b3; }
+box.toolbar { background: #111A2B; border-bottom: 1px solid #2c3849; padding: 9px 12px; }
+box.terminalbar { background: #111A2B; border-bottom: 1px solid #28334A; }
+box.statusbar { background: #0D1322; border-top: 1px solid #28334A; padding: 7px 14px; }
+box.empty { background: #111A2B; padding: 24px; border-radius: 16px; margin: 20px; }
+box.council-startup { padding: 12px 0; }
+checkbutton:focus, expander:focus { outline-color: #AA94FF; outline-offset: 2px; }
+checkbutton:disabled { color: #718095; }
+label.headline { font-size: 29px; font-weight: 600; color: #EBF0FA; }
+label.description { font-size: 14px; color: #A6B3CD; }
+label.kicker { font-size: 12px; color: #F6A06A; }
+label.shortcut { font-family: monospace; color: #b2c2d5; background: #202c3b; border-radius: 5px; padding: 4px 8px; }
+paned > separator { background: #2c3b4b; min-width: 6px; min-height: 6px; }
+paned > separator:hover { background: #AA94FF; }
+scrollbar { background: #070B16; }
+scrollbar slider { background: #415667; border-radius: 4px; min-width: 5px; min-height: 30px; }
+progressbar trough { background: #111A2B; min-height: 2px; border: none; }
+progressbar progress { background: #AA94FF; min-height: 2px; border: none; }
+infobar { background: #402d29; color: #ffe3d5; }
+menu, popover, dialog { background: #111A2B; color: #EBF0FA; }
+menuitem:hover { background: #304359; }
+textview, textview text { background: #111A2B; color: #EBF0FA; }
+
+/* Native matches the web palette; opaque panels keep transcripts readable. */
+box.sidebar { background: #0D1322; border-right: 1px solid #28334A; padding: 12px 8px; }
+button.nav-item { background: transparent; border: 1px solid transparent; border-radius: 9px; padding: 6px 12px; color: #A6B3CD; }
+button.nav-item:hover { background: #172238; color: #EBF0FA; }
+button.nav-item.selected { background: linear-gradient(105deg, #493583, #28213F 65%, #714333); border-color: #A08ABF; color: #F2ECFF; box-shadow: inset 2px 0 #BCABFF; }
+button.nav-item:focus { outline-color: #F6A06A; outline-width: 2px; outline-style: solid; outline-offset: -3px; }

@@ -1,0 +1,5 @@
+{"type":"init","timestamp":"2026-07-05T12:02:00.000Z","session_id":"00000000-0000-4000-8000-000000000004","model":"gemini-2.5-pro"}
+{"type":"message","role":"user","content":"keep going forever","timestamp":"2026-07-05T12:02:00.100Z"}
+{"type":"message","role":"assistant","content":"working on it","delta":true,"timestamp":"2026-07-05T12:02:01.000Z"}
+{"type":"error","severity":"warning","message":"Loop detected, stopping execution","timestamp":"2026-07-05T12:02:05.000Z"}
+{"type":"result","status":"error","error":{"type":"MaxSessionTurnsError","message":"Maximum session turns exceeded"},"stats":{"total_tokens":9000,"input_tokens":8600,"output_tokens":400,"cached":0,"input":8600,"duration_ms":8000,"tool_calls":0,"models":{"gemini-2.5-pro":{"total_tokens":9000,"input_tokens":8600,"output_tokens":400,"cached":0,"input":8600}}},"timestamp":"2026-07-05T12:02:05.500Z"}

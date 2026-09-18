@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"00000000-0000-4000-8000-000000000003"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"I'll run `ls -a` once in the current directory and report the output."}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -lc 'ls -a'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -lc 'ls -a'","aggregated_output":".\n..\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"The directory contains only `.` and `..` — no files."}}
+{"type":"turn.completed","usage":{"input_tokens":40970,"cached_input_tokens":29184,"output_tokens":141,"reasoning_output_tokens":0}}

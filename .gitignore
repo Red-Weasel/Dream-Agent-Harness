@@ -1,0 +1,47 @@
+# Dream runtime state (the agent's private data — not versioned)
+.venv/
+__pycache__/
+*.pyc
+data/dream.db
+data/dream.db-*
+data/sessions/
+var/
+*.log
+.env
+
+# Long-term memory is the agent's own — keep it local, not in git history
+memory/semantic/*.md
+memory/procedural/*.md
+!memory/semantic/.gitkeep
+!memory/procedural/.gitkeep
+
+# Flat memory, databases, recordings, learning traces and extension observations
+# are private runtime state. Existing tracked files still require release review.
+data/
+/memory/
+.dream/
+.remember/
+.codebase-memory/
+dist/
+build/
+
+# Local credentials, agent configuration and generated exports
+.env.*
+!.env.example
+/.claude/
+/.agents/
+/.codex/
+/mcp.json
+/artifacts/
+/uploads/
+/recordings/
+/backups/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+*.gguf
+*.safetensors
+*.zip

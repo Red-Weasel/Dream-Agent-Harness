@@ -1,0 +1,12 @@
+{
+  "format": "dream-skill/v1",
+  "name": "media",
+  "version": "2.0.0",
+  "portable": true,
+  "capabilities": [
+    "media_read",
+    "media_create",
+    "see",
+    "image_metadata"
+  ]
+}

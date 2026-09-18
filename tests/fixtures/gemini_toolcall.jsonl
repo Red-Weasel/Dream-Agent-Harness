@@ -1,0 +1,8 @@
+{"type":"init","timestamp":"2026-07-05T12:01:00.000Z","session_id":"00000000-0000-4000-8000-000000000006","model":"gemini-2.5-pro"}
+{"type":"message","role":"user","content":"List files in the current directory","timestamp":"2026-07-05T12:01:00.100Z"}
+{"type":"message","role":"assistant","content":"I'll run ","delta":true,"timestamp":"2026-07-05T12:01:01.000Z"}
+{"type":"message","role":"assistant","content":"`ls -a`.","delta":true,"timestamp":"2026-07-05T12:01:01.050Z"}
+{"type":"tool_use","tool_name":"Shell","tool_id":"shell-1","parameters":{"command":"ls -a"},"timestamp":"2026-07-05T12:01:01.200Z"}
+{"type":"tool_result","tool_id":"shell-1","status":"success","output":".\n..\n","timestamp":"2026-07-05T12:01:01.900Z"}
+{"type":"message","role":"assistant","content":"Only `.` and `..` exist.","delta":true,"timestamp":"2026-07-05T12:01:02.400Z"}
+{"type":"result","status":"success","stats":{"total_tokens":4110,"input_tokens":3900,"output_tokens":210,"cached":1280,"input":2620,"duration_ms":3400,"tool_calls":1,"models":{"gemini-2.5-pro":{"total_tokens":4110,"input_tokens":3900,"output_tokens":210,"cached":1280,"input":2620}}},"timestamp":"2026-07-05T12:01:03.000Z"}

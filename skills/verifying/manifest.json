@@ -1,0 +1,12 @@
+{
+  "format": "dream-skill/v1",
+  "name": "verifying",
+  "version": "2.0.0",
+  "portable": true,
+  "capabilities": [
+    "read_file",
+    "run_bash",
+    "read_notes",
+    "note"
+  ]
+}

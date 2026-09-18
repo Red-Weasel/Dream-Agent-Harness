@@ -1,0 +1,21 @@
+.project-panel { padding: 22px; max-width: 1280px; margin: auto; color: var(--text, #dedee5); }
+.project-panel h2, .project-panel h3 { margin: 0 0 10px; }
+.project-panel p { font-size: 13px; line-height: 1.5; color: var(--muted, #9d9dad); overflow-wrap: anywhere; }
+.project-top { display: flex; justify-content: space-between; gap: 16px; align-items: start; }
+.project-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+.project-panel section { margin: 16px 0 26px; min-width: 0; }
+.project-panel label { display: grid; gap: 6px; margin: 10px 0; font-size: 13px; }
+.project-panel input, .project-panel select, .project-panel textarea { width: 100%; box-sizing: border-box; background: var(--bg, #17171c); color: inherit; border: 1px solid var(--border, #3c3c49); border-radius: 7px; padding: 10px; font: inherit; }
+.project-panel button { background: var(--panel, #272731); color: inherit; border: 1px solid var(--border, #444451); border-radius: 7px; padding: 8px 12px; margin: 3px 6px 3px 0; cursor: pointer; text-align: left; overflow-wrap: anywhere; }
+.project-panel button:disabled { opacity: .45; cursor: default; }
+.project-panel button:focus-visible, .project-panel input:focus-visible, .project-panel textarea:focus-visible { outline: 2px solid var(--accent, #acafff); outline-offset: 2px; }
+.project-card { border: 1px solid var(--border, #363642); border-radius: 9px; padding: 12px; margin: 10px 0; overflow-wrap: anywhere; }
+.project-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; background: var(--bg, #15151b); border-radius: 7px; padding: 12px; font-size: 12px; line-height: 1.5; }
+.project-panel [role=status] { min-height: 20px; }
+@media (max-width: 760px) { .project-columns { grid-template-columns: 1fr; gap: 0; } .project-panel { padding: 14px; } }
+
+.project-dialog { width: min(1200px, calc(100vw - 36px)); max-height: calc(100vh - 40px); padding: 12px; border: 1px solid var(--line, #3c3c49); border-radius: 12px; background: var(--bg, #17171c); color: var(--fg, #dedee5); box-sizing: border-box; }
+.project-dialog::backdrop { background: #0009; }
+.project-close { display: block; margin-left: auto; padding: 8px 12px; background: var(--panel, #272731); color: inherit; border: 1px solid var(--line, #444451); border-radius: 7px; cursor: pointer; }
+.project-top > div { min-width: 0; }
+.project-top > button { flex-shrink: 0; white-space: nowrap; }
