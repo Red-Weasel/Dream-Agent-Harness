@@ -1,0 +1,57 @@
+/* Dream: quiet work surfaces, an ember eclipse for identity. Presentation only. */
+html.dream-design{--bg:#070b16;--bg2:#0b1220;--panel:#111a2b;--line:#2b3650;--fg:#ebf0fa;--dim:#a6b3cd;--faint:#93a1bd;--violet:#aa94ff;--cyan:#b4c8ff;--ember:#f6a06a;--grad:linear-gradient(115deg,#aa94ff,#f6a06a);--sans:Cantarell,"Noto Sans",system-ui,sans-serif}
+.dream-design body{background:var(--bg);font-family:var(--sans)}
+.dream-design header{background:#0b1220;border-color:var(--line)}
+.dream-design .wordmark{color:var(--fg);letter-spacing:.22em;text-transform:uppercase}
+.dream-design .wordmark svg{display:none}
+.dream-design .wordmark:before{content:"";display:inline-block;width:25px;height:25px;border:2px solid var(--ember);border-radius:50%;box-shadow:0 0 13px #f67f514d;vertical-align:middle;margin-right:10px}
+.dream-design .msg{margin-bottom:26px}.dream-design .body{line-height:1.75}
+.dream-design .you .body{background:#162138;border:1px solid #35415b;border-radius:12px;padding:14px 18px}
+.dream-design .dream .who{color:var(--violet);background:none;-webkit-text-fill-color:currentColor}
+.dream-design .tool{background:#101827;border-color:#2b3650}.dream-design .tool pre{color:#c1cde0}
+.dream-design .composer{background:#141e32;border:1px solid #756394;border-radius:15px;box-shadow:0 -6px 28px #080b160d}
+.dream-design footer{background:#0b1220}.dream-design button:focus-visible,.dream-design a:focus-visible,.dream-design select:focus-visible{outline:2px solid var(--ember);outline-offset:3px}
+.dream-design .permission-card{background:#241f35;border-color:#af8b68}.dream-design .permission-card button{min-height:34px;white-space:normal}
+.dream-design dialog{background:#111a2b;color:var(--fg);border-color:#46516a}
+.dream-design .studio-nav{background:#0b1220}.dream-design .studio-nav button[aria-current=page]{background:#30274e;color:#ede7ff;border-color:#8070b6}
+.dream-design #artpanel{background:#0b1220}.dream-design #artbody{min-height:0}
+.dream-design .body pre{background:#080f1c}.dream-design .think{color:#a6b3cd}
+/* Keep the eclipse present while working. Backgrounds never cover controls. */
+html.dream-design{--dream-art:url('/assets/dream-eclipse-v2.png');--dream-glass:#0b1220ed}
+.dream-design[data-atmosphere=quiet]{--dream-art:none}
+.dream-design .split{background:#070b16 var(--dream-art) right center/auto 100% no-repeat}
+.dream-design #main{background:linear-gradient(90deg,#070b16e8,#070b1680);border-color:#50415b}
+.dream-design .msg{animation:none}
+.dream-design .dream{padding:18px 20px;border:1px solid #65627a66;border-radius:4px 18px 18px 18px;background:var(--dream-glass);box-shadow:0 8px 24px #02040a26}
+.dream-design .dream .who{color:#d4c5ff;min-height:28px;margin-bottom:12px}
+.dream-design .dream .who:before{content:"";width:25px;height:25px;flex:0 0 25px;border:1px solid #ffc38e;border-radius:50%;background:radial-gradient(circle at 40% 45%,#090d1b 48%,#8f533e 61%,#ffb677 66%,#422b50 74%);box-shadow:0 0 12px #f69b6433}
+.dream-design .you .body{background:#211e36f2;border:1px solid #82719380;border-radius:16px 4px 16px 16px}
+.dream-design .tool,.dream-design .agent-card{background:#0c1526f5}
+.dream-design .composer{background:linear-gradient(120deg,#211e36,#131d30);border-color:#a184a3;box-shadow:0 0 0 4px #ad8af508,0 8px 32px #0003}
+.dream-design .composer:focus-within{border-color:#ffc38e;box-shadow:0 0 0 3px #f6a06a20}
+.dream-design #send{background:#f6b17f;border-color:#ffcfa7;color:#201522}
+.dream-design #send:hover:not(:disabled){background:#ffcca4;border-color:#ffe0c4}
+.dream-design footer{background:linear-gradient(180deg,#0d1120,#101525);border-top:1px solid #6a52644d}
+.dream-design :is(button,a,select,input,textarea,summary,[tabindex]):focus-visible{outline:2px solid #ffc38e;outline-offset:3px}
+.dream-design #artpanel{background:linear-gradient(#0b1220b8,#0b1220e8),var(--dream-art) right center/auto 100% no-repeat}
+.dream-design .artbar,.dream-design .artnote{background:#0b1220c9}
+.dream-design #artbody{border-color:#82718e;box-shadow:0 0 0 3px #0b12204d}
+.dream-design .studio-empty{background:#0b122070}
+.dream-design .studio-empty h2{font:32px/1.2 Georgia,serif;color:#f4effa}
+.dream-design #studio-interactions-empty{background:#0b1220d9;border:1px solid #75647e80;border-radius:18px;padding:30px 24px;margin:36px auto}
+.dream-design #studio-interactions-empty h2{font:34px/1.2 Georgia,serif}
+@media(max-width:700px){.dream-design .dream{padding:14px}.dream-design #main{background:linear-gradient(90deg,#070b16dc,#070b1680)}.dream-design #studio-interactions-empty{margin:18px auto;padding:24px 16px}.dream-design #studio-interactions-empty h2{font-size:28px}}
+@media(prefers-reduced-motion:reduce){.dream-design *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+
+/* Reading and editing share a calm type scale; artwork remains around the content. */
+.dream-design .body :is(p,ul,ol){max-width:76ch}
+.dream-design .body :is(h1,h2,h3){line-height:1.35;letter-spacing:-.015em}
+.dream-design .body pre{border:1px solid #35415b;line-height:1.65}
+.dream-design .think{line-height:1.6}
+.dream-design button:disabled{cursor:default}
+
+/* Compact spacing preserves text size and approval controls. */
+.dream-design[data-density=compact] .msg{margin-bottom:16px}
+.dream-design[data-density=compact] .dream{padding:12px 16px}
+.dream-design[data-density=compact] .dream .who{margin-bottom:6px}
+.dream-design[data-density=compact] .you .body{padding:10px 14px}

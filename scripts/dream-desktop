@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Native launcher for the desktop menu and direct use from a checkout.
+set -euo pipefail
+dream_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ ! -x "$dream_root/.venv/bin/python" ]]; then
+    printf '%s\n' 'Dream needs its Python environment. Install the project dependencies first.' >&2
+    exit 1
+fi
+cd -- "$dream_root"
+exec "$dream_root/.venv/bin/python" -m dream desktop "$@"

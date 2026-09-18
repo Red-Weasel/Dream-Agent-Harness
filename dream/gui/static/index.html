@@ -1,0 +1,1592 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dream Studio</title>
+<link rel="icon" href="/assets/dream-app-icon.png" type="image/png">
+<link rel="stylesheet" href="/assets/media.css">
+<script>document.documentElement.classList.toggle('companion', new URLSearchParams(location.search).get('companion') === '1');</script>
+<style>
+:root{
+  --violet:#8b5cf6; --cyan:#22d3ee;
+  --bg:#0b0d12; --bg2:#11141c; --panel:#141824; --line:#232838;
+  --fg:#e6e9f2; --dim:#8b93a7; --faint:#5b6377;
+  --ok:#34d399; --err:#f87171; --warn:#fbbf24;
+  --grad:linear-gradient(100deg,var(--violet),var(--cyan));
+  --mono:ui-monospace,"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Inter,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font:14px/1.6 var(--sans);display:flex;flex-direction:column;overflow:hidden}
+
+/* header */
+header{display:flex;align-items:center;gap:14px;padding:10px 16px;background:var(--bg2);
+  border-bottom:1px solid var(--line);flex:0 0 auto}
+.wordmark{font:700 15px/1 var(--mono);letter-spacing:.28em;background:var(--grad);
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+.meta{display:flex;gap:14px;color:var(--dim);font:11px/1 var(--mono);flex-wrap:wrap}
+.meta b{color:var(--fg);font-weight:500}
+.status{margin-left:auto;display:flex;align-items:center;gap:7px;font:11px/1 var(--mono);color:var(--dim)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--faint);transition:.3s}
+.dot.on{background:var(--ok);box-shadow:0 0 9px var(--ok)}
+.dot.off{background:var(--err)}
+.dot.busy{background:var(--warn);animation:pulse 1s infinite}
+@keyframes pulse{50%{opacity:.35}}
+
+/* stream */
+main{flex:1;min-width:380px;overflow-y:auto;padding:22px 20px 8px;scroll-behavior:auto}
+.wrap{max-width:860px;margin:0 auto}
+.msg{margin-bottom:20px;animation:in .18s ease-out}
+@keyframes in{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+.who{font:600 10px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;
+  margin-bottom:7px;display:flex;align-items:center;gap:7px}
+.you .who{color:var(--cyan)}
+.dream .who{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.body{padding-left:2px}
+.you .body{background:var(--panel);border-left:2px solid var(--cyan);
+  padding:10px 14px;border-radius:0 7px 7px 0;white-space:pre-wrap}
+
+/* markdown */
+.body p{margin:0 0 10px}
+.body h1,.body h2,.body h3{margin:16px 0 8px;line-height:1.3}
+.body h1{font-size:1.35em}.body h2{font-size:1.18em}.body h3{font-size:1.05em}
+.body ul,.body ol{margin:0 0 10px;padding-left:22px}
+.body li{margin:3px 0}
+.body a{color:var(--cyan)}
+.body code{font:.88em var(--mono);background:#1b2030;padding:1.5px 5px;border-radius:4px;color:#c4b5fd}
+.body pre{background:#0d1017;border:1px solid var(--line);border-radius:8px;
+  padding:12px 14px;overflow-x:auto;margin:0 0 12px}
+.body pre code{background:none;padding:0;color:#cbd5e1;font-size:12.5px;line-height:1.55}
+.body blockquote{border-left:2px solid var(--line);margin:0 0 10px;padding-left:12px;color:var(--dim)}
+.body table{border-collapse:collapse;margin:0 0 12px;font-size:13px}
+.body th,.body td{border:1px solid var(--line);padding:5px 10px;text-align:left}
+.body th{background:var(--panel)}
+.cursor{display:inline-block;width:7px;height:15px;background:var(--cyan);
+  vertical-align:-2px;animation:blink 1.1s step-end infinite}
+@keyframes blink{50%{opacity:0}}
+
+/* tools */
+.tool{border:1px solid var(--line);border-radius:8px;margin:0 0 8px;background:var(--panel);overflow:hidden}
+.tool>summary{cursor:pointer;padding:8px 12px;font:12px/1.4 var(--mono);color:var(--dim);
+  display:flex;align-items:center;gap:9px;list-style:none}
+.tool>summary::-webkit-details-marker{display:none}
+.tool>summary:hover{color:var(--fg)}
+.tool .tname{color:var(--violet);font-weight:600}
+.tool .targ{color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.tool .badge{margin-left:auto;font-size:10px;padding:1px 7px;border-radius:99px;
+  background:#1b2030;color:var(--dim);flex:0 0 auto}
+.tool.err{border-color:#4a2226}
+.tool.err .badge{background:#3b1d21;color:var(--err)}
+.tool pre{margin:0;padding:11px 13px;background:#0d1017;border-top:1px solid var(--line);
+  font:11.5px/1.5 var(--mono);color:#9fb0c9;max-height:340px;overflow:auto;white-space:pre-wrap;
+  word-break:break-word}
+
+/* thinking + system */
+.think{border-left:2px solid var(--violet);padding:2px 0 2px 12px;margin:0 0 10px;
+  color:var(--faint);font-size:13px;font-style:italic;white-space:pre-wrap}
+.sys{font:11.5px/1.5 var(--mono);color:var(--faint);padding:5px 0;border-top:1px dashed var(--line);
+  border-bottom:1px dashed var(--line);margin:0 0 10px}
+.sys.error{color:var(--err);border-color:#3b1d21}
+
+/* composer */
+footer{flex:0 0 auto;background:var(--bg2);border-top:1px solid var(--line);padding:12px 20px 14px}
+.composer{max-width:860px;margin:0 auto;display:flex;gap:10px;align-items:flex-end;
+  background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:9px 11px;
+  transition:border-color .18s}
+.composer:focus-within{border-color:var(--violet)}
+textarea{flex:1;background:none;border:0;outline:0;color:var(--fg);font:14px/1.55 var(--sans);
+  resize:none;max-height:190px;min-height:23px}
+textarea::placeholder{color:var(--faint)}
+button{background:var(--grad);border:0;border-radius:8px;color:#0b0d12;font:600 12px var(--sans);
+  padding:8px 15px;cursor:pointer;flex:0 0 auto}
+button:disabled{opacity:.35;cursor:default}
+.hint{max-width:860px;margin:7px auto 0;color:var(--faint);font:10.5px var(--mono);display:flex;gap:16px}
+main::-webkit-scrollbar,.tool pre::-webkit-scrollbar{width:9px;height:9px}
+main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252b3d;border-radius:6px}
+
+/* telemetry rail — the thing no other app in this space does properly */
+.split{flex:1;display:flex;min-height:0}
+#rail{width:262px;flex:0 0 auto;background:var(--bg2);border-left:1px solid var(--line);
+  overflow-y:auto;padding:14px 13px;font:11px/1.5 var(--mono)}
+#rail.hide{display:none}
+.rail-h{font:600 9.5px/1 var(--mono);letter-spacing:.17em;text-transform:uppercase;
+  color:var(--faint);margin:0 0 9px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+  padding:10px 11px;margin:0 0 10px}
+.card .nm{color:var(--fg);font-size:11.5px;margin-bottom:2px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.card .bdf{color:var(--faint);font-size:9.5px;margin-bottom:8px}
+.bar{height:5px;border-radius:99px;background:#0d1017;overflow:hidden;margin:5px 0 3px}
+.bar>i{display:block;height:100%;background:var(--grad);width:0;transition:width .45s ease}
+.bar.hot>i{background:linear-gradient(90deg,var(--warn),var(--err))}
+.kv{display:flex;justify-content:space-between;color:var(--dim);font-size:10.5px;padding:1.5px 0}
+.kv b{color:var(--fg);font-weight:500}
+.big{font:600 21px/1.15 var(--mono);background:var(--grad);-webkit-background-clip:text;
+  background-clip:text;color:transparent}
+.big small{font:400 10px var(--mono);color:var(--faint);-webkit-text-fill-color:var(--faint)}
+.pill{display:inline-block;font-size:9.5px;padding:1px 7px;border-radius:99px;
+  background:#1b2030;color:var(--dim);margin-left:6px}
+.pill.live{background:#12301f;color:var(--ok)}
+#railtoggle,.tabs button{background:none;border:1px solid var(--line);color:var(--dim);
+  padding:4px 9px;font:10px var(--mono);border-radius:6px;cursor:pointer}
+#railtoggle:hover,.tabs button:hover{color:var(--fg);border-color:var(--violet)}
+.tabs{display:flex;gap:6px;margin:0 0 11px}
+.tabs button.on{color:var(--fg);border-color:var(--violet);background:#1b1630}
+
+/* checkpoints */
+.cp{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+  padding:9px 10px;margin:0 0 8px}
+.cp .id{color:var(--cyan);font-weight:600}
+.cp .lbl{color:var(--fg);font-size:11px;margin:3px 0;word-break:break-word}
+.cp .when{color:var(--faint);font-size:9.5px}
+.cp .warn{color:var(--warn);font-size:9.5px;margin-top:3px}
+.cp .acts{display:flex;gap:6px;margin-top:8px}
+.cp .acts button{flex:1;padding:4px 0;font-size:10px}
+.cp .acts button.danger{border-color:#4a2226;color:#fca5a5}
+.cp .acts button.danger:hover{background:#2a1417;border-color:var(--err)}
+.cpdiff{background:#0d1017;border:1px solid var(--line);border-radius:7px;margin-top:7px;
+  padding:8px 9px;font:10.5px/1.5 var(--mono);max-height:280px;overflow:auto;white-space:pre-wrap}
+.cpdiff .a{color:var(--ok)}.cpdiff .d{color:var(--err)}.cpdiff .h{color:var(--violet)}
+
+/* artifacts */
+.artchip{display:flex;align-items:center;gap:9px;border:1px solid var(--line);
+  border-radius:9px;background:var(--panel);padding:9px 12px;margin:0 0 10px;cursor:pointer;
+  transition:border-color .15s}
+.artchip:hover{border-color:var(--violet)}
+.artchip .ic{width:23px;height:23px;border-radius:6px;background:var(--grad);flex:0 0 auto;
+  display:grid;place-items:center;font:600 10px var(--mono);color:#0b0d12}
+.artchip .t{flex:1;min-width:0}
+.artchip .t b{display:block;font-size:12.5px;font-weight:500;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.artchip .t span{color:var(--faint);font:10px var(--mono);display:block;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.artchip .go{color:var(--faint);font:10px var(--mono)}
+
+#artpanel{width:min(52vw,760px);flex:0 0 auto;background:var(--bg2);
+  border-left:1px solid var(--line);display:none;flex-direction:column;min-width:0}
+#artpanel.open{display:flex}
+.artbar{display:flex;align-items:center;gap:9px;padding:9px 12px;border-bottom:1px solid var(--line);
+  flex:0 0 auto}
+.artbar .nm{flex:1;min-width:0;font:12px var(--mono);overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+.artbar select{background:var(--panel);border:1px solid var(--line);color:var(--dim);
+  border-radius:6px;font:10px var(--mono);padding:3px 6px}
+.seg{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{background:none;border:0;color:var(--dim);font:10px var(--mono);padding:4px 10px;cursor:pointer}
+.seg button.on{background:#1b1630;color:var(--fg)}
+.artclose{background:none;border:0;color:var(--faint);font-size:17px;cursor:pointer;padding:0 4px}
+.artclose:hover{color:var(--fg)}
+#artbody{flex:1;min-height:0;overflow:auto;background:#fff}
+#artbody.code{background:#0d1017}
+#artbody iframe{width:100%;height:100%;border:0;display:block}
+#artbody pre{margin:0;padding:14px;font:12px/1.6 var(--mono);color:#cbd5e1;white-space:pre-wrap;
+  word-break:break-word}
+.artnote{padding:7px 12px;font:10px var(--mono);color:var(--faint);border-top:1px solid var(--line);
+  background:var(--bg2);flex:0 0 auto}
+/* Phase 6: forms, tweaks, point mode */
+.artmode{all:unset;cursor:pointer;font:12px system-ui,sans-serif;padding:3px 8px;border-radius:6px;background:rgba(255,255,255,.08);margin-left:6px;opacity:.85}
+.artmode.on{background:rgba(120,90,255,.45);opacity:1}
+.mention{display:flex;gap:8px;align-items:center;margin:0 0 6px;padding:6px 10px;border-radius:8px;background:rgba(120,90,255,.18);font:12px/1.4 ui-monospace,monospace;white-space:pre-wrap}
+.mention button{all:unset;cursor:pointer;padding:0 6px;opacity:.7}
+.qform{margin:10px 0;padding:14px 16px;border-radius:10px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1)}
+.qform .qtitle{font-weight:600;margin-bottom:8px}
+.qform fieldset{border:0;padding:8px 0;margin:0;border-top:1px solid rgba(255,255,255,.07)}
+.qform legend{font-weight:500;padding:0}
+.qform .qsub{opacity:.6;font-size:12px;margin:2px 0 6px}
+.qform .qopt{display:block;padding:3px 0}
+.qform .qother{margin-top:4px;width:60%}
+.qform .qsvg{display:inline-block;margin:4px 8px 4px 0;text-align:center}
+.qform .qsvg .qsvgbox{display:block;width:96px;height:68px;border:1px solid rgba(255,255,255,.15);border-radius:6px;overflow:hidden;background:#fff}
+.qform .qsvg iframe{width:96px;height:68px;border:0;pointer-events:none}
+.qform .qsvg input:checked + .qsvgbox{outline:2px solid rgba(120,90,255,.9)}
+.qform textarea{width:100%;min-height:56px}
+.qform input[type=range]{width:60%;vertical-align:middle}
+.qform output{margin-left:8px;font:12px ui-monospace,monospace}
+.qform .qacts{padding-top:10px}
+.qform .qacts button{all:unset;cursor:pointer;padding:6px 12px;border-radius:8px;background:rgba(120,90,255,.6);font-weight:500}
+.dlcard{display:flex;gap:12px;align-items:center;margin:10px 0;padding:10px 14px;border-radius:10px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1)}
+.dlcard .ic{font-size:20px}.dlcard .t{flex:1;display:flex;flex-direction:column}.dlcard .t span{opacity:.6;font-size:12px}
+.dlcard a.go{all:unset;cursor:pointer;padding:6px 12px;border-radius:8px;background:rgba(120,90,255,.6);font-weight:500}
+/* Phase 8: visual answers */
+.vcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:0 0 12px;animation:in .18s ease-out}
+.vcard .vh{font:600 10px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--dim);margin:0 0 9px}
+.vcard .vh b{color:var(--fg);letter-spacing:0;text-transform:none;font:500 12.5px var(--sans)}
+.vcard .vs{color:var(--dim);font-size:12.5px;font-style:italic;margin-top:8px}
+.vcard p{margin:4px 0 6px}.vcard ul{margin:4px 0;padding-left:18px}
+.vcard a{color:var(--cyan)}
+.vcard .dom{color:var(--faint);font:10.5px var(--mono);margin-left:8px}
+.vcard .price{color:var(--ok);font:600 12px var(--mono);margin-left:8px}
+.vcard .pill{display:inline-block;font-size:10.5px;padding:1px 8px;border-radius:99px;background:#1b2030;color:var(--dim);margin:4px 6px 0 0}
+.vcard .tscroll{overflow-x:auto}
+.vcard table.cmp{border-collapse:collapse;width:100%;font-size:13px}
+.vcard table.cmp th,.vcard table.cmp td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}
+.vcard table.cmp thead th{background:#1b2030}
+.vcard table.cmp tbody th{color:var(--dim);font-weight:500;white-space:nowrap}
+.vcard .prow{display:flex;gap:10px;overflow-x:auto;padding-bottom:4px}
+.vcard .ptile{flex:0 0 240px;background:#0d1017;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.vcard .ogrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+.vcard .opt{background:#0d1017;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.vcard .place,.vcard .lnk{padding:7px 0;border-top:1px solid var(--line)}
+.vcard .place:first-of-type,.vcard .lnk:first-of-type{border-top:0}
+.vcard details.day,.vcard details.q,.vcard ol.steps details{border:1px solid var(--line);border-radius:8px;padding:6px 10px;margin:0 0 6px;background:#0d1017}
+.vcard summary{cursor:pointer;font-weight:500}
+.vcard .time{color:var(--cyan);font:11px var(--mono);margin-right:8px}
+.vcard ol.steps{padding-left:22px}.vcard ol.steps li{margin:4px 0}
+.vcard .tr2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.vcard .tr2>div{background:#0d1017;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.vcard .tr2 p{font-size:15px}.vcard .tr2 i{color:var(--dim);display:block;margin-bottom:6px}
+.vcard button.opt,.vcard button.copy{all:unset;cursor:pointer;display:block;padding:6px 10px;border-radius:7px;border:1px solid var(--line);margin:4px 0;font-size:13px}
+.vcard button.copy{display:inline-block;font:11px var(--mono);color:var(--dim);padding:3px 8px}
+.vcard button.opt:hover{border-color:var(--violet)}
+.vcard .opt.right{border-color:var(--ok);color:var(--ok)}.vcard button.opt.wrong{border-color:var(--err);color:var(--err)}
+.vcard .expl{margin-top:8px;color:var(--dim);font-size:13px}.vcard .hint{color:var(--faint);font-size:12px}
+.vcard .fb{margin-top:4px;font-size:13px}.vcard .fb.ok{color:var(--ok)}.vcard .fb.bad{color:var(--err)}
+.vcard .irow{display:flex;gap:8px;flex-wrap:wrap}
+.vcard .irow a{display:flex;flex-direction:column;gap:3px;font:10.5px var(--mono);color:var(--faint);text-decoration:none}
+.vcard .irow img{display:block;height:120px;min-width:90px;max-width:220px;object-fit:cover;border-radius:7px;border:1px solid var(--line);background:#0d1017;color:var(--faint);font:10px var(--mono)}
+.vcard .rs{display:flex;gap:12px;align-items:center}.vcard .rs p{flex:1;margin:0}
+.vcard .rs button{background:var(--grad);border:0;border-radius:8px;color:#0b0d12;font:600 12px var(--sans);padding:8px 14px;cursor:pointer}
+.vcard svg.chart{width:100%;height:auto;display:block}
+.vcard svg.chart .grid{stroke:var(--line);stroke-width:1}.vcard svg.chart .tick{fill:var(--dim);font:11px var(--mono)}
+.vcard .legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font:11px var(--mono);color:var(--dim)}
+.vcard .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+</style>
+<link rel="stylesheet" href="/assets/companion.css">
+<link rel="stylesheet" href="/assets/attachments.css">
+<link rel="stylesheet" href="/assets/controls.css">
+<link rel="stylesheet" href="/assets/council.css">
+<link rel="stylesheet" href="/assets/turn-timing.css">
+<script src="/assets/turn-timing.js"></script>
+<link rel="stylesheet" href="/assets/feed.css">
+<script src="/assets/feed.js"></script>
+</head>
+<body>
+<header>
+  <span class="wordmark">DREAM</span>
+  <div class="meta" id="meta"></div>
+  <div class="status">
+    <button id="railtoggle" title="toggle telemetry">metrics</button>
+    <span class="dot" id="dot"></span><span id="stat">connecting</span>
+  </div>
+</header>
+
+<div class="split">
+  <main id="main"><div class="wrap" id="stream"></div></main>
+  <aside id="rail">
+    <div class="tabs">
+      <button id="tab-metrics" class="on">metrics</button>
+      <button id="tab-undo">undo</button>
+      <button id="tab-design">design</button>
+    </div>
+    <div id="railbody"><div class="kv" style="color:var(--faint)">waiting for a sample…</div></div>
+    <div id="undobody" style="display:none"></div>
+    <div id="designbody" style="display:none"></div>
+  </aside>
+  <section id="artpanel">
+    <div class="artbar">
+      <span class="nm" id="artname"></span>
+      <select id="artver" title="version"></select>
+      <div class="seg">
+        <button id="artprev" class="on">preview</button>
+        <button id="artcode">code</button>
+      </div>
+      <button id="arttweaks" class="artmode" style="display:none" title="show the page's Tweaks panel">Tweaks</button>
+      <button id="artpoint" class="artmode" title="point at an element; your next message names it">point</button>
+      <button class="artclose" id="artclose" title="close">&times;</button>
+    </div>
+    <div id="artbody"></div>
+    <div class="artnote" id="artnote"></div>
+  </section>
+</div>
+
+<footer>
+  <div id="mention" class="mention" style="display:none"><span id="mentiontext"></span><button id="mentionclear" title="clear">&times;</button></div>
+  <div class="composer">
+    <textarea id="input" rows="1" placeholder="Ask Dream…  (this drives the same session as the terminal)"></textarea>
+    <button id="send">Send</button>
+    <button id="steer" hidden title="Ordinary HTTP chat: send a correction at the next model request after current tools finish. Native agents and autonomous runs use the after-turn queue.">Steer</button>
+  </div>
+  <div class="hint">
+    <span>⏎ send · ⇧⏎ newline</span><span>one session, two views</span>
+    <span id="counts"></span>
+  </div>
+</footer>
+
+<script>
+const TOKEN = new URLSearchParams(location.search).get('token') || '';
+const COMPANION = document.documentElement.classList.contains('companion');
+let companion = null;
+const $ = id => document.getElementById(id);
+const stream = $('stream'), main = $('main');
+const feed = DreamFeed.mount(stream);
+let replayingHistory = false, working = false, sending = false;
+let socket, current = null, thinking = null, tools = new Map(), nTool = 0, nMsg = 0, retry = 0, replayOnConnect = false;
+
+/* ---------- rendering ---------------------------------------------------- */
+// Model output is untrusted: escape FIRST, then apply markup to the escaped
+// text. Nothing here ever inserts raw model text as HTML.
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function md(src){
+  const blocks = [];
+  let t = esc(src);
+  // fenced code first, stashed so inline rules can't touch it
+  t = t.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
+    ` ${blocks.push(`<pre><code data-lang="${lang}">${code.replace(/\n$/,'')}</code></pre>`) - 1} `);
+  t = t.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  t = t.replace(/^###### (.*)$/gm,'<h3>$1</h3>').replace(/^##### (.*)$/gm,'<h3>$1</h3>')
+       .replace(/^#### (.*)$/gm,'<h3>$1</h3>').replace(/^### (.*)$/gm,'<h3>$1</h3>')
+       .replace(/^## (.*)$/gm,'<h2>$1</h2>').replace(/^# (.*)$/gm,'<h1>$1</h1>');
+  t = t.replace(/^&gt; (.*)$/gm,'<blockquote>$1</blockquote>');
+  t = t.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>')
+       .replace(/(^|\W)\*([^*\n]+)\*(?=\W|$)/g,'$1<em>$2</em>');
+  t = t.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+  t = t.replace(/^[-*] (.*)$/gm,'<li>$1</li>').replace(/^\d+\. (.*)$/gm,'<li>$1</li>');
+  t = t.replace(/(<li>[\s\S]*?<\/li>)(?!\s*<li>)/g,'<ul>$1</ul>');
+  t = t.split(/\n{2,}/).map(p =>
+        /^<(h\d|ul|ol|pre|blockquote|table)/.test(p.trim()) ? p : (p.trim() ? `<p>${p}</p>` : '')
+      ).join('');
+  return t.replace(/ (\d+) /g, (_, i) => blocks[+i]);
+}
+
+const atBottom = () => main.scrollHeight - main.scrollTop - main.clientHeight < 120;
+let followingFeed = true, scrollFrame = null, lastScrollTop = main.scrollTop;
+function syncFeedPosition(){
+  const top = main.scrollTop;
+  // Content growth alone must not disable following. Only moving back through
+  // the feed pauses it; returning to the bottom resumes it.
+  if(atBottom()) followingFeed = true;
+  else if(top < lastScrollTop) followingFeed = false;
+  lastScrollTop = top;
+}
+main.addEventListener('scroll', syncFeedPosition, {passive:true});
+function scroll(force){
+  if(force) followingFeed = true;
+  if(!followingFeed || scrollFrame !== null) return;
+  scrollFrame = requestAnimationFrame(() => {
+    scrollFrame = null;
+    if(!followingFeed) return;
+    main.scrollTop = main.scrollHeight;
+    lastScrollTop = main.scrollTop;
+  });
+}
+// Text wrapping, expanded tool cards and viewport changes can move the bottom
+// even without another server event.
+const feedResize = new ResizeObserver(() => scroll());
+feedResize.observe(stream);
+feedResize.observe(main);
+
+function block(role, label){
+  const d = document.createElement('div');
+  d.className = `msg ${role}`;
+  d.innerHTML = `<div class="who">${esc(label)}</div><div class="body"></div>`;
+  stream.appendChild(d);
+  companion?.message?.();
+  scroll();
+  return d.querySelector('.body');
+}
+function sysline(text, kind){
+  if(kind === 'error') companion?.error(text);
+  const d = document.createElement('div');
+  d.className = 'sys' + (kind ? ' ' + kind : '');
+  d.textContent = text; stream.appendChild(d); scroll();
+}
+function renderPermission(data){
+  if(companion){ companion.permission(data); return; }
+  if(!data?.id || document.getElementById('permission-' + data.id)) return;
+  const el = document.createElement('section'); el.className = 'permission-card'; el.id = 'permission-' + data.id;
+  el.innerHTML = `<h3>Dream needs your permission</h3><p>${esc(data.reason)}</p><pre>${esc(data.tool)}\n${esc(JSON.stringify(data.input, null, 2))}</pre><div></div>`;
+  for(const [choice, label] of Object.entries(data.choices || {})){
+    const button = document.createElement('button'); button.textContent = label;
+    button.onclick = async () => {
+      el.querySelectorAll('button').forEach(b => b.disabled = true);
+      try {
+        const response = await fetch('/api/permission', {method:'POST', headers:{'Content-Type':'application/json','X-Dream-Token':TOKEN}, body:JSON.stringify({id:data.id, choice})});
+        const body = await response.json(); if(!response.ok) throw new Error(body.error);
+        el.remove();
+      } catch(e){ sysline(e.message, 'error'); el.querySelectorAll('button').forEach(b => b.disabled = false); }
+    };
+    el.querySelector('div').appendChild(button);
+  }
+  stream.appendChild(el); scroll(true);
+}
+function finishPermission(id){
+  if(companion) companion.permissionDone(id);
+  else document.getElementById('permission-' + id)?.remove();
+}
+function endTurn(){
+  if(current){
+    current.el.innerHTML = md(current.raw);
+    // Scan only on completion: a half-streamed fence is not an artifact yet.
+    if(!replayingHistory) try{ scanForArtifacts(current.raw, current.seq); }catch(e){ console.error(e); }
+    current = null;
+  }
+  thinking = null; scroll();
+}
+
+/* ---------- event handling ---------------------------------------------- */
+function handle(m){
+  // A server event can arrive after the reader moves but before the browser's
+  // queued scroll event. Capture that movement before adding more content.
+  syncFeedPosition();
+  const replay = replayOnConnect;
+  if(!['hello','history','permission'].includes(m.kind) && !replayingHistory) replayOnConnect = false;
+  if(COMPANION && ['text_delta', 'thinking_delta', 'tool_use'].includes(m.kind)) busy(true);
+  switch(m.kind){
+    case 'project_view_reset': {
+      artifacts.clear(); artOpen = null; artVerIdx = 0; frameReady = false;
+      artbody.replaceChildren(); panel.classList.remove('open');
+      companion?.closeArtifact(); companion?.artifacts();
+      window.dispatchEvent(new Event('dream:project-reset'));
+      break;
+    }
+    case 'history': {
+      const liveSteeringTarget = steeringTarget;
+      replayingHistory = true; endTurn(); current = null; thinking = null; tools.clear(); feed.reset(); nTool = 0; nMsg = 0;
+      stream.querySelectorAll('.msg,.tool,.think,.sys,.permission-card,.turn-timing').forEach(el => el.remove());
+      busy(false); replayingHistory = true;
+      try {
+        if(m.data?.trimmed) sysline('Showing recent conversation. Earlier messages remain in the saved session.');
+        for(const event of m.data?.events || []) handle(event);
+      } finally { replayingHistory = false; steeringTarget = liveSteeringTarget; }
+      for(const receipt of steeringSnapshot) steeringNotice(receipt);
+      companion?.message?.(); counts(); scroll(true);
+      break;
+    }
+    case 'user': endTurn(); block('you','You').textContent = String(m.data || ''); nMsg++; counts(); scroll(true); break;
+    case 'turn_start': busy(true); break;
+    case 'turn_end': steeringTarget = null; endTurn(); finishTools(m.data?.interrupted ? 'Interrupted' : 'No result returned'); busy(false); break;
+    case 'steering': steeringNotice(m.data); break;
+    case 'steering_ready': steeringTarget = m.data; break;
+    case 'permission': renderPermission(m.data); break;
+    case 'permission_done': finishPermission(m.data?.id); break;
+    case 'council_activity': window.dispatchEvent(new CustomEvent('dream:council-activity',{detail:m.data})); break;
+    case 'hello': {
+      const s = m.data || {};
+      steeringTarget = s.steering_target || null;
+      steeringSnapshot = Array.isArray(s.steering_receipts) ? s.steering_receipts : [];
+      $('meta').innerHTML = [
+        s.provider && `<span><b>${esc(s.provider)}</b></span>`,
+        s.model && `<span>${esc(s.model)}</span>`,
+        s.workspace && `<span>${esc(String(s.workspace).replace(/^.*\//,'📁 '))}</span>`,
+        s.session_id && `<span>${esc(s.session_id)}</span>`,
+      ].filter(Boolean).join('');
+      companion?.session(s);
+      break;
+    }
+    case 'text_delta': {
+      thinking = null;
+      if(!current){ current = {el: block('dream','Dream'), raw: '', seq: ++nMsg}; }
+      current.raw += m.data;
+      current.el.innerHTML = md(current.raw) + '<span class="cursor"></span>';
+      scroll();
+      break;
+    }
+    case 'thinking_delta': {
+      if(!thinking){
+        thinking = feed.thinking(stream);
+      }
+      feed.appendText(thinking.querySelector('div'), m.data); scroll();
+      break;
+    }
+    case 'assistant_done': endTurn(); break;
+    case 'tool_use': {
+      endTurn();
+      const d = m.data || {}, name = String(d.name||'tool').split('__').pop();
+      if(!replayingHistory && /^(write_file|Write|Edit|MultiEdit)$/.test(name)){
+        try{ artifactFromWrite(d.input || {}); }catch(e){ console.error(e); }
+      }
+      const el = feed.tool(stream, d); companion?.message?.();
+      if(d.id) tools.set(d.id, el);
+      nTool++; counts(); scroll();
+      break;
+    }
+    case 'tool_result': {
+      const d = m.data || {}, el = tools.get(d.id);
+      if(!el) break;
+      tools.delete(d.id);
+      feed.result(el, d);
+      scroll();
+      break;
+    }
+    case 'agent_activity': feed.activity(m.data); companion?.message?.(); scroll(); break;
+    case 'studio': {
+      // Dream asked to show a file (show_to_user / done). Same pipeline as a
+      // written file, so the chip write_file made is reused, not duplicated.
+      const d = m.data || {};
+      if(d.op === 'show'){
+        // Reconnect replays the same explicit show. Keep live form values and
+        // the user's chosen view when that exact preview is already open.
+        const shown = COMPANION && artifacts.get(artOpen);
+        if(replay && shown && artOpen === `file:${d.path}` && shown.versions[shown.versions.length-1] === d.content
+            && (artView === 'code' || artbody.querySelector('iframe'))) break;
+        if(COMPANION) artView = 'preview';
+        try{ const a = artifactFromWrite({path: d.path, content: d.content});
+          if(a) openArtifact(a.key); else companion?.error('This file cannot be previewed. Ask Dream to show an HTML or SVG version.'); }
+        catch(e){ console.error(e); companion?.error('The preview could not be opened. Ask Dream to show it again.'); }
+      } else if(d.op === 'eval' || d.op === 'snapshot'){
+        askFrame(d);
+      } else if(d.op === 'ask'){
+        try{ renderForm(d.form || {}); }catch(e){ console.error(e); }
+      } else if(d.op === 'download'){
+        try{ renderDownload(d); }catch(e){ console.error(e); }
+      } else if(d.op === 'widget'){
+        try{ renderWidget(d); }catch(e){ console.error(e); }
+      }
+      break;
+    }
+    case 'turn_timing':
+      stream.appendChild(DreamTurnTiming.render(m.data)); companion?.message?.(); scroll(); break;
+    case 'background_work': {
+      const status = DreamTurnTiming.background(m.data);
+      if(status) sysline(status);
+      break;
+    }
+    case 'system': sysline(String(m.data ?? '')); break;
+    case 'error':  sysline(String(m.data ?? ''), 'error'); busy(false); break;
+    case 'result': {
+      endTurn(); busy(false);
+      if(m.data?.subtype === 'length'){
+        const notice = document.createElement('div'); notice.className = 'sys incomplete-answer';
+        notice.textContent = 'This answer reached the output limit and may be incomplete. ';
+        const more = document.createElement('button'); more.textContent = 'Continue answer';
+        more.onclick = async () => {
+          more.disabled = true;
+          const sent = await postPrompt('Continue the interrupted answer from where you stopped. Check existing results first; do not repeat completed actions.');
+          if(!sent) more.disabled = false;
+        };
+        notice.appendChild(more); stream.appendChild(notice); scroll();
+      } else if(m.data?.is_error) {
+        sysline('The turn did not complete successfully. Review the reported error and partial results before retrying.', 'error');
+      }
+      const st = (m.data && m.data.stats) || {};
+      if(st.gen_tps) sysline(`${st.gen_tps.toFixed(1)} tok/s · ${(st.duration_s||0).toFixed(1)}s`);
+      break;
+    }
+  }
+}
+
+function finishTools(label){
+  for(const el of tools.values()){ el.querySelector('.badge').textContent = label; el.classList.add('incomplete'); }
+  tools.clear();
+}
+
+function counts(){ $('counts').textContent = `${nMsg} replies · ${nTool} tool calls`; }
+function busy(on){ working = on; if($('send')) $('send').textContent = on ? 'Queue' : 'Send'; if($('steer')) $('steer').hidden = !on; if($('stop')) $('stop').hidden = !on; $('dot').className = 'dot ' + (on ? 'busy' : (socket && socket.readyState===1 ? 'on':'off'));
+  $('stat').textContent = on ? 'working' : (socket && socket.readyState===1 ? 'live' : 'offline');
+  companion?.status(on);
+}
+
+/* ---------- transport ---------------------------------------------------- */
+let reconnectTimer;
+function connect(){
+  clearTimeout(reconnectTimer);
+  if(socket && socket.readyState < 2) return;
+  socket = new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}&history=1`);
+  socket.onopen = () => { retry = 0; replayOnConnect = true; busy(false); companion?.connection(true); };
+  socket.onmessage = e => { try{ handle(JSON.parse(e.data)); }catch(err){ console.error(err); } };
+  socket.onclose = () => {
+    busy(false); $('dot').className='dot off'; $('stat').textContent='reconnecting';
+    // The terminal session outlives this page; back off and rejoin it.
+    retry = Math.min(retry + 1, 6);
+    companion?.connection(false);
+    reconnectTimer = setTimeout(connect, 250 * 2 ** retry);
+  };
+}
+
+/* ---------- composer ----------------------------------------------------- */
+const input = $('input'), send = $('send');
+let steeringDraft = null, steeringTarget = null, steeringSnapshot = [];
+function steeringNotice(receipt){
+  if(!receipt || typeof receipt.status !== 'string') return;
+  const messages = {pending:'Correction saved; waiting for the next model request after current tools finish.',
+    included:'Correction added to the next request context; it has not yet been sent.',
+    submitted:'Correction sent with a model request. This does not confirm that the model followed it.',
+    retained:'Correction retained without a confirmed submission. Inspect the saved session, receipt and existing effects before resubmitting.',
+    queued_after_turn:'This agent or run does not support live steering. Message queued after the active turn or run.'};
+  if(messages[receipt.status]) sysline(messages[receipt.status] + (receipt.warning ? ' ' + receipt.warning : '') +
+    (receipt.status === 'retained' && receipt.recovery_path ? ' Receipt: ' + receipt.recovery_path : ''));
+}
+function grow(){ input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,190)+'px'; }
+async function submit(delivery = 'queue'){
+  const typed = input.value.trim(), fileIds = draftAttachments.ids();
+  if((!typed && !fileIds.length) || sending) return;
+  if(!draftAttachments.ready()){ sysline('Finish uploading, retry, or remove failed attachments before sending.', 'error'); return; }
+  sending = true; draftAttachments.render();
+  const savedInput = input.value, savedMention = mention;
+  const text = mention ? mentionBlock(mention) + '\n' + typed : typed;
+  const fingerprint = JSON.stringify([text, fileIds]);
+  if(delivery === 'steer' && steeringDraft?.fingerprint !== fingerprint)
+    steeringDraft = {fingerprint, id:crypto.randomUUID().replaceAll('-', ''), target:steeringTarget};
+  const sent = await postPrompt(text, fileIds, delivery, delivery === 'steer' ? steeringDraft : undefined);
+  sending = false;
+  if(sent){
+    if(input.value === savedInput) input.value = '';
+    if(mention === savedMention) clearMention();
+    draftAttachments.sent(fileIds); grow(); companion?.submitted();
+    steeringDraft = null;
+  } else { companion?.compose(); draftAttachments.render(); }
+  draftAttachments.save();
+}
+// The one place this page speaks to Dream in the user's name: their typed message,
+// or a card's button he pressed. Nothing a page or widget does reaches here.
+async function postPrompt(text, attachments = [], delivery = 'queue', steering){
+  const wasWorking = working;
+  busy(true);
+  try{
+    const r = await fetch('/api/prompt', {method:'POST',
+      headers:{'Content-Type':'application/json','X-Dream-Token':TOKEN},
+      body: JSON.stringify({prompt:text, attachments, ...(delivery === 'steer' ? {delivery, steering_id:steering.id, steering_target:steering.target} : {})})});
+    if(!r.ok) { const data = await r.json().catch(() => ({})); sysline(data.error || `Could not send (HTTP ${r.status})`,'error'); busy(wasWorking); return false; }
+    if(delivery === 'steer') steeringNotice((await r.json()).steering);
+    if($('studio-error')) $('studio-error').hidden = true;
+    return true;
+  }catch(e){ sysline('Could not reach Dream. Reconnect and send your message again.','error'); busy(wasWorking); return false; }
+}
+send.onclick = () => submit();
+$('steer').onclick = () => submit('steer');
+input.addEventListener('input', grow);
+input.addEventListener('keydown', e => {
+  if(e.key==='Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); submit(); }
+});
+/* ---------- telemetry rail ---------------------------------------------- */
+// Polled, not pushed: a sensor read has nothing to do with whether the model
+// happens to be talking, and shouldn't stall when it isn't.
+const rail = $('rail'), railbody = $('railbody');
+$('railtoggle').onclick = () => rail.classList.toggle('hide');
+
+const n1 = v => (v == null ? null : (+v).toFixed(1));
+const gb = mib => (mib == null ? null : (mib / 1024).toFixed(1));
+
+function gpuCard(d){
+  const used = d.vram_used_mib, total = d.vram_total_mib;
+  const pct = (used != null && total) ? Math.min(100, used / total * 100) : null;
+  const hot = (d.temp_c != null && d.temp_c >= 80) || (pct != null && pct >= 92);
+  const rows = [
+    (used != null && total) && `<div class="kv"><span>vram</span><b>${gb(used)} / ${gb(total)} GB</b></div>`,
+    d.power_w != null && `<div class="kv"><span>power</span><b>${Math.round(d.power_w)}${d.power_cap_w?` / ${Math.round(d.power_cap_w)}`:''} W</b></div>`,
+    d.temp_c != null && `<div class="kv"><span>temp</span><b>${Math.round(d.temp_c)}°C${d.vram_temp_c!=null?` · vram ${Math.round(d.vram_temp_c)}°`:''}</b></div>`,
+    d.freq_mhz != null && `<div class="kv"><span>clock</span><b>${d.freq_mhz}${d.freq_max_mhz?` / ${d.freq_max_mhz}`:''} MHz</b></div>`,
+    d.fan_rpm != null && `<div class="kv"><span>fan</span><b>${d.fan_rpm} rpm</b></div>`,
+    d.util_pct != null && `<div class="kv"><span>util</span><b>${Math.round(d.util_pct)}%</b></div>`,
+  ].filter(Boolean).join('');
+  return `<div class="card">
+    <div class="nm">${esc(d.name || 'GPU ' + d.index)}</div>
+    <div class="bdf">${esc(d.bdf || '')}${d.integrated ? ' · integrated' : ''}</div>
+    ${pct != null ? `<div class="bar${hot?' hot':''}"><i style="width:${pct}%"></i></div>` : ''}
+    ${rows}</div>`;
+}
+
+function renderTelemetry(t){
+  if(!t || t.available === false){
+    railbody.innerHTML = `<div class="rail-h">telemetry</div>
+      <div class="kv" style="color:var(--faint)">${esc(t && t.error ? t.error : 'unavailable')}</div>`;
+    return;
+  }
+  const inf = t.inference || {}, sess = inf.session || {};
+  const live = inf.live_tps ?? inf.gen_tps;
+  const decoding = inf.state && inf.state !== 'idle';
+  let html = '<div class="rail-h">inference</div><div class="card">';
+  html += `<div class="big">${live != null ? n1(live) : '—'}<small> tok/s</small>
+    ${decoding ? `<span class="pill live">${esc(inf.state)}</span>` : ''}</div>`;
+  const irows = [
+    inf.ttft_s != null && `<div class="kv"><span>ttft</span><b>${n1(inf.ttft_s)} s</b></div>`,
+    inf.pp_tps != null && `<div class="kv"><span>prefill</span><b>${n1(inf.pp_tps)} tok/s</b></div>`,
+    inf.pp_time_s != null && `<div class="kv"><span>prompt time</span><b>${n1(inf.pp_time_s)} s</b></div>`,
+    inf.prompt_tokens != null && `<div class="kv"><span>prompt</span><b>${(+inf.prompt_tokens).toLocaleString()} tok</b></div>`,
+  ].filter(Boolean).join('');
+  html += (irows ? `<div style="margin-top:8px">${irows}</div>` : '') + '</div>';
+  if(sess.turns){
+    html += `<div class="card">
+      <div class="kv"><span>turns</span><b>${sess.turns}</b></div>
+      <div class="kv"><span>in / out</span><b>${(sess.in_tokens||0).toLocaleString()} / ${(sess.out_tokens||0).toLocaleString()}</b></div>
+      ${sess.avg_tps != null ? `<div class="kv"><span>session avg</span><b>${n1(sess.avg_tps)} tok/s</b></div>` : ''}</div>`;
+  }
+  const g = t.gpu;
+  if(g && g.ok && (g.devices||[]).length){
+    html += '<div class="rail-h" style="margin-top:14px">gpu</div>';
+    html += g.devices.filter(d => !d.integrated || g.devices.length === 1).map(gpuCard).join('');
+  } else if(g && !g.ok){
+    html += `<div class="rail-h" style="margin-top:14px">gpu</div>
+      <div class="kv" style="color:var(--faint)">${esc(g.reason || 'no devices')}</div>`;
+  }
+  railbody.innerHTML = html;
+}
+
+async function pollTelemetry(){
+  try{
+    if(COMPANION && !working && (rail.classList.contains('hide') || tab !== 'metrics')) return;
+    const r = await fetch(`/api/telemetry`, {headers:{'X-Dream-Token':TOKEN}});
+    if(r.ok){ const data = await r.json(); renderTelemetry(data); companion?.progress?.(data.inference); }
+  }catch(e){ /* the terminal may be gone; the reconnect loop reports that */ }
+  finally{ setTimeout(pollTelemetry, 1000); }
+}
+
+/* ---------- undo (checkpoints) ------------------------------------------- */
+// Dream snapshots FILES, not conversation state, so this offers exactly that.
+// Restoring overwrites what's on disk, so it confirms — and a checkpoint that
+// can't prove Dream wrote a file last refuses it unless you force.
+const undobody = $('undobody');
+let tab = 'metrics';
+
+function showTab(which){
+  tab = which;
+  $('tab-metrics').classList.toggle('on', which === 'metrics');
+  $('tab-undo').classList.toggle('on', which === 'undo');
+  $('tab-design').classList.toggle('on', which === 'design');
+  railbody.style.display = which === 'metrics' ? '' : 'none';
+  undobody.style.display = which === 'undo' ? '' : 'none';
+  designbody.style.display = which === 'design' ? '' : 'none';
+  if(which === 'undo') loadCheckpoints();
+  if(which === 'design') loadAssets();
+  companion?.inspectorTab(which);
+}
+$('tab-metrics').onclick = () => showTab('metrics');
+$('tab-undo').onclick = () => showTab('undo');
+$('tab-design').onclick = () => showTab('design');
+
+/* ---------- design system (assets) --------------------------------------- */
+// The review manifest register_assets keeps: which files are versions of which
+// named asset, with a status and a group. Names and subtitles are model text —
+// escaped like everything else. "open" renders the filed version in the same
+// sandboxed artifact frame a written file gets.
+const designbody = $('designbody');
+const ASSET_GROUPS = ['Type', 'Colors', 'Spacing', 'Components', 'Brand'];
+
+async function loadAssets(){
+  designbody.innerHTML = '<div class="rail-h">design system</div><div class="kv" style="color:var(--faint)">loading…</div>';
+  let rows = [];
+  try{
+    const r = await fetch('/api/assets', {headers:{'X-Dream-Token':TOKEN}});
+    if(COMPANION && !r.ok) throw new Error(`HTTP ${r.status}`);
+    rows = (await r.json()).assets || [];
+  }catch(e){ if(COMPANION){ companion.loadError(designbody, 'design system', loadAssets); return; } }
+  if(!rows.length){
+    designbody.innerHTML = `<div class="rail-h">design system</div>
+      <div class="kv" style="color:var(--faint)">Nothing registered yet — register_assets
+      (or write_file with an asset name) files a page as a reviewable asset.</div>`;
+    if(COMPANION) companion.empty(designbody, 'Build a shared design language', 'Ask Dream to register your colors, type, and components. Review each version here.');
+    return;
+  }
+  designbody.innerHTML = '<div class="rail-h">design system · assets</div>' + ASSET_GROUPS.map(g => {
+    const rs = rows.map((r, i) => [r, i]).filter(([r]) => r.group === g);
+    if(!rs.length) return '';
+    return `<div class="rail-h" style="opacity:.7">${esc(g)}</div>` + rs.map(([r, i]) => `
+      <div class="cp" data-i="${i}">
+        <div><b>${esc(r.asset)}</b>
+          <span class="when">· v${(r.version|0)} · ${esc(r.status || '')}</span></div>
+        <div class="lbl">${esc(r.subtitle || r.path || '')}</div>
+        <div class="acts">${r.content ? '<button data-act="open">open</button>' : ''}</div>
+      </div>`).join('');
+  }).join('');
+  designbody.querySelectorAll('button[data-act="open"]').forEach(b => b.onclick = () => {
+    const r = rows[+b.closest('.cp').dataset.i];
+    const kind = artKind('', r.content) || (String(r.path).toLowerCase().endsWith('.svg') ? 'svg' : 'html');
+    const a = addArtifact(`asset:${r.asset}:${r.path}`, r.asset, kind, r.content);
+    openArtifact(a.key);
+  });
+}
+
+const ago = iso => {
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if(!isFinite(s)) return '';
+  if(s < 60) return `${s|0}s ago`;
+  if(s < 3600) return `${s/60|0}m ago`;
+  if(s < 86400) return `${s/3600|0}h ago`;
+  return `${s/86400|0}d ago`;
+};
+
+async function loadCheckpoints(){
+  undobody.innerHTML = '<div class="rail-h">undo</div><div class="kv" style="color:var(--faint)">loading…</div>';
+  let rows = [];
+  try{
+    const r = await fetch('/api/checkpoints', {headers:{'X-Dream-Token':TOKEN}});
+    if(COMPANION && !r.ok) throw new Error(`HTTP ${r.status}`);
+    rows = (await r.json()).checkpoints || [];
+  }catch(e){ if(COMPANION){ companion.loadError(undobody, 'checkpoints', loadCheckpoints); return; } }
+  if(!rows.length){
+    undobody.innerHTML = `<div class="rail-h">undo</div>
+      <div class="kv" style="color:var(--faint)">No checkpoints yet — one is taken
+      the first time a turn writes a file.</div>`;
+    if(COMPANION) companion.empty(undobody, 'A place to return to', 'Checkpoints appear when Dream edits files. Compare changes or restore an earlier version here.');
+    return;
+  }
+  undobody.innerHTML = '<div class="rail-h">undo · file snapshots</div>' + rows.map(c => `
+    <div class="cp" data-id="${esc(c.id)}">
+      <div><span class="id">${esc(c.id)}</span>
+        <span class="when">· ${esc(ago(c.created_at))} · ${c.files} file(s)</span></div>
+      <div class="lbl">${esc(c.label || '(no label)')}</div>
+      ${c.sealed ? '' : '<div class="warn">unsealed — that turn didn\'t finish</div>'}
+      <div class="acts">
+        <button data-act="diff">diff</button>
+        <button data-act="restore" class="danger">restore</button>
+      </div>
+      <div class="cpdiff" style="display:none"></div>
+    </div>`).join('');
+}
+
+function paintDiff(el, text){
+  el.innerHTML = esc(text).split('\n').map(l =>
+    l.startsWith('+') ? `<span class="a">${l}</span>` :
+    l.startsWith('-') ? `<span class="d">${l}</span>` :
+    l.startsWith('@@') || l.startsWith('#') ? `<span class="h">${l}</span>` : l
+  ).join('\n');
+}
+
+undobody.addEventListener('click', async e => {
+  const btn = e.target.closest('button[data-act]'); if(!btn) return;
+  const card = btn.closest('.cp'), id = card.dataset.id, pane = card.querySelector('.cpdiff');
+  if(btn.dataset.act === 'diff'){
+    if(pane.style.display !== 'none'){ pane.style.display = 'none'; return; }
+    pane.style.display = ''; pane.textContent = 'loading…';
+    try{
+      const r = await fetch(`/api/checkpoints/${encodeURIComponent(id)}/diff`,
+        {headers:{'X-Dream-Token':TOKEN}});
+      const j = await r.json();
+      if(!r.ok) pane.textContent = j.error || 'could not diff';
+      else paintDiff(pane, j.diff || '(nothing has changed since)');
+    }catch(err){ pane.textContent = 'could not reach Dream'; }
+    return;
+  }
+  // restore — writes to disk, so confirm, and offer force only as a follow-up
+  if(!confirm(`Roll ${id} back to its pre-turn state?\n\nThis overwrites the current files on disk.`)) return;
+  btn.disabled = true; btn.textContent = 'restoring…';
+  try{
+    const r = await fetch(`/api/checkpoints/${encodeURIComponent(id)}/restore`,
+      {method:'POST', headers:{'Content-Type':'application/json','X-Dream-Token':TOKEN},
+       body: JSON.stringify({})});
+    const rep = await r.json();
+    pane.style.display = '';
+    const lines = [];
+    (rep.restored||[]).forEach(p => lines.push(`+ restored ${p}`));
+    (rep.deleted||[]).forEach(p => lines.push(`- deleted ${p}`));
+    (rep.unchanged||[]).forEach(p => lines.push(`  unchanged ${p}`));
+    (rep.skipped||[]).forEach(s => lines.push(`# SKIPPED ${s[0]} — ${s[1]}`));
+    paintDiff(pane, lines.join('\n') || '(nothing to do)');
+    sysline(`checkpoint ${id}: restored ${(rep.restored||[]).length}, skipped ${(rep.skipped||[]).length}`);
+    if((rep.skipped||[]).length && confirm(
+        `${rep.skipped.length} file(s) were skipped because Dream can't prove it wrote them last.\n\nForce the restore anyway?`)){
+      const f = await fetch(`/api/checkpoints/${encodeURIComponent(id)}/restore`,
+        {method:'POST', headers:{'Content-Type':'application/json','X-Dream-Token':TOKEN},
+         body: JSON.stringify({force:true})});
+      const rep2 = await f.json();
+      paintDiff(pane, (rep2.restored||[]).map(p => `+ restored ${p}`).join('\n') || '(nothing)');
+    }
+  }catch(err){ sysline('restore failed — is the terminal still running?','error'); }
+  btn.disabled = false; btn.textContent = 'restore';
+});
+
+/* ---------- artifacts ----------------------------------------------------- */
+/* Renderable output — a page, a diagram, a chart — gets a panel instead of
+   scrolling past as 200 lines of markup.
+
+   THE SECURITY MODEL, because this renders text a model wrote:
+   - `sandbox="allow-scripts"` WITHOUT `allow-same-origin`. That pair together
+     would defeat the sandbox entirely: the frame would share this origin and
+     could reach the parent DOM and the session token in the URL. Apart, the
+     frame gets a unique opaque origin and can do neither.
+   - srcdoc, never a src URL, so nothing is fetched to build the frame.
+   - a CSP inside the document that blocks every network destination, so a
+     generated page cannot phone home with what it can see.
+   - no allow-top-navigation, no allow-popups, no allow-forms.
+   Together: scripts run so a page is actually testable, and that is all. */
+
+// 'unsafe-eval' is the one addition for the bridge below (eval_js_user_view).
+// Inside a sandboxed, network-less, opaque-origin frame that already runs the
+// artifact's own inline scripts, eval adds no reach the frame did not have.
+const ART_CSP = "default-src 'none'; style-src 'unsafe-inline'; " +
+                "img-src data: blob:; media-src data: blob:; font-src data:; script-src 'unsafe-inline' 'unsafe-eval'";
+
+// Injected ahead of every artifact body. Answers Dream's questions about the
+// page the user is looking at: __dream_eval (run code; an expression returns its
+// value, a block returns what it returns) and __dream_snapshot (the live DOM as
+// HTML with form values baked in). Replies go to the parent by postMessage; the
+// parent, not the frame, holds the token and talks to Dream.
+const ART_BRIDGE = `<script>(function(){
+  function safe(v){
+    if(v instanceof Node){ var el = v.nodeType === 1 ? v : null;
+      return el ? ('<' + el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\\s+/).join('.') : '') + '> ' + (el.textContent || '').trim().slice(0, 120)) : v.nodeName; }
+    if(v instanceof Map) v = Object.fromEntries(v); else if(v instanceof Set) v = Array.from(v);
+    if(typeof v === 'number' && !isFinite(v)) return String(v);
+    try{ return JSON.parse(JSON.stringify(v === undefined ? null : v)); }catch(e){ return String(v); } }
+  function run(code){ var f; try{ f = new Function('return (' + code + '\\n)'); }catch(e){ f = new Function(code); } return f(); }
+  function snapshot(){
+    document.querySelectorAll('input, textarea, select').forEach(function(el){
+      if(el.tagName === 'TEXTAREA'){ el.textContent = el.value; }
+      else if(el.tagName === 'SELECT'){ Array.prototype.forEach.call(el.options, function(o){ if(o.selected) o.setAttribute('selected',''); else o.removeAttribute('selected'); }); }
+      else if(el.type === 'checkbox' || el.type === 'radio'){ if(el.checked) el.setAttribute('checked',''); else el.removeAttribute('checked'); }
+      else { el.setAttribute('value', el.value); }
+    });
+    return '<!doctype html>' + document.documentElement.outerHTML;
+  }
+  // A widget's sendPrompt: text lands in the user's composer; only the user sends it.
+  window.sendPrompt = function(t){ if(navigator.userActivation && !navigator.userActivation.isActive) return; parent.postMessage({type:'__dream_send_prompt', text:String(t == null ? '' : t).slice(0, 4000)}, '*'); };
+  var mediaLast = 0;
+  ['error','loadedmetadata','playing','timeupdate'].forEach(function(kind){
+    document.addEventListener(kind,function(e){
+      var m=e.target;if(!m||!['VIDEO','AUDIO'].includes(m.tagName))return;
+      if(kind==='timeupdate'&&Date.now()-mediaLast<1500)return;
+      mediaLast=Date.now();
+      parent.postMessage({type:'__dream_media_state',state:kind,time:Number(m.currentTime)||0,
+        error:m.error?m.error.code:null},'*');
+    },true);
+  });
+  var pointing = false, ccN = 0;
+  function reactChain(el){
+    var key = Object.keys(el).find(function(k){ return k.indexOf('__reactFiber') === 0; });
+    var out = [], f = key ? el[key] : null, guard = 0;
+    while(f && guard++ < 40){ var t = f.type; if(typeof t === 'function' && t.name) out.unshift(t.name); f = f.return; }
+    return out.join(' > ');
+  }
+  function domPath(el){
+    var parts = [], n = el, guard = 0;
+    while(n && n.nodeType === 1 && n !== document.documentElement && guard++ < 8){
+      var s = n.tagName.toLowerCase();
+      if(n.id) s += '#' + n.id;
+      else if(n.className && typeof n.className === 'string') s += '.' + n.className.trim().split(/\\s+/).slice(0,2).join('.');
+      parts.unshift(s); n = n.parentElement;
+    }
+    return parts.join(' > ');
+  }
+  function onPoint(e){
+    if(!pointing) return;
+    e.preventDefault(); e.stopPropagation();
+    var el = e.target; if(!el || el.nodeType !== 1) return;
+    var id = 'cc-' + (++ccN); el.setAttribute('data-cc-id', id);
+    var lab = el.closest('[data-screen-label]');
+    parent.postMessage({type:'__dream_mention', id:id, dom: domPath(el), react: reactChain(el),
+      label: lab ? lab.getAttribute('data-screen-label') : '', text: (el.textContent || '').trim().slice(0, 80)}, '*');
+  }
+  document.addEventListener('click', onPoint, true);
+  window.addEventListener('message', function(e){
+    var d = e.data || {};
+    if(d.type === '__dream_point_on'){ pointing = true; document.documentElement.style.cursor = 'crosshair'; return; }
+    if(d.type === '__dream_point_off'){ pointing = false; document.documentElement.style.cursor = ''; return; }
+    if(d.type === '__dream_ping'){ parent.postMessage({type:'__dream_pong'}, '*'); return; }
+    if(d.type !== '__dream_eval' && d.type !== '__dream_snapshot') return;
+    var reply = function(ok, value){ parent.postMessage({type:'__dream_reply', id:d.id, ok:ok, value:value}, '*'); };
+    try{
+      var out = d.type === '__dream_snapshot' ? snapshot() : run(String(d.code || ''));
+      Promise.resolve(out).then(function(v){ reply(true, safe(v)); }, function(err){ reply(false, String(err && err.message || err)); });
+    }catch(err){ reply(false, String(err && err.message || err)); }
+  });
+})();<\/script>`;
+
+const artifacts = new Map();       // key -> {key,title,kind,versions:[str]}
+let artOpen = null, artVerIdx = 0, artView = 'preview';
+const panel = $('artpanel'), artbody = $('artbody');
+
+const RENDERABLE = {html:'HTML', svg:'SVG', xml:'SVG'};
+
+function artKind(lang, body){
+  const l = (lang||'').toLowerCase();
+  if(RENDERABLE[l]) return l === 'xml' ? 'svg' : l;
+  if(/^\s*<svg[\s>]/i.test(body)) return 'svg';
+  if(/^\s*(<!doctype html|<html[\s>])/i.test(body)) return 'html';
+  return null;
+}
+
+function addArtifact(key, title, kind, body){
+  let a = artifacts.get(key);
+  if(!a){ a = {key, title, kind, versions:[]}; artifacts.set(key, a); }
+  // Identical re-emission isn't a new version — streaming re-renders the same
+  // block many times as it completes.
+  if(a.versions[a.versions.length-1] === body) return a;
+  a.versions.push(body);
+  a.kind = kind;
+  renderChip(a);
+  companion?.artifacts();
+  if(artOpen === key){ artVerIdx = a.versions.length - 1; paintArtifact(); }
+  return a;
+}
+
+function renderChip(a){
+  if(COMPANION) return;
+  let chip = document.querySelector(`.artchip[data-k="${CSS.escape(a.key)}"]`);
+  const n = a.versions.length;
+  const html = `<div class="ic">${a.kind === 'svg' ? 'SVG' : '&lt;/&gt;'}</div>
+    <div class="t"><b>${esc(a.title)}</b>
+      <span>${a.kind.toUpperCase()} · ${n} version${n>1?'s':''} · click to open</span></div>
+    <div class="go">open →</div>`;
+  if(chip){ chip.innerHTML = html; return; }
+  chip = document.createElement('div');
+  chip.className = 'artchip'; chip.dataset.k = a.key; chip.innerHTML = html;
+  chip.onclick = () => openArtifact(a.key);
+  stream.appendChild(chip); scroll();
+}
+
+function openArtifact(key){
+  const a = artifacts.get(key); if(!a) return;
+  artOpen = key; artVerIdx = a.versions.length - 1;
+  // Three columns is one too many at laptop widths — the transcript ends up
+  // narrower than either thing flanking it. The rail steps aside; the toggle
+  // brings it back if you want both.
+  if(window.innerWidth < 1500) rail.classList.add('hide');
+  panel.classList.add('open');
+  companion?.openArtifact();
+  paintArtifact();
+}
+
+function paintArtifact(){
+  const a = artifacts.get(artOpen); if(!a) return;
+  $('artname').textContent = a.title;
+  const sel = $('artver');
+  sel.innerHTML = a.versions.map((_, i) =>
+    `<option value="${i}"${i===artVerIdx?' selected':''}>v${i+1}${i===a.versions.length-1?' (latest)':''}</option>`
+  ).join('');
+  sel.style.display = a.versions.length > 1 ? '' : 'none';
+  $('artprev').classList.toggle('on', artView === 'preview');
+  $('artcode').classList.toggle('on', artView === 'code');
+  companion?.paintArtifact(a);
+  window.dispatchEvent(new Event("dream:artifact"));
+  const body = a.versions[artVerIdx] || '';
+  if(artView === 'code'){
+    artbody.className = 'code';
+    artbody.innerHTML = `<pre>${esc(body)}</pre>`;
+    $('artnote').textContent = `${body.length.toLocaleString()} chars`;
+    return;
+  }
+  artbody.className = '';
+  const csp = `<meta http-equiv="Content-Security-Policy" content="${ART_CSP}">`;
+  // A widget (visualize_show_widget) gets the tokens visualize_read_me promised.
+  const tokens = a.widget ? WIDGET_STYLE : '';
+  // Dream's own head goes FIRST, before a single byte of the artifact, for every
+  // kind of body: the parser puts a leading meta and script into the implied
+  // <head>, and whatever the artifact says later — its own doctype, <html>,
+  // <head> — is merged or ignored, never moved ahead of ours. The old version
+  // spliced the CSP in at the first "<head"/"<html" match, so a page with
+  // '<head>' inside a script string or a comment got the meta in its BODY,
+  // where Chromium ignores it and the frame ran with no CSP at all (Gate 8).
+  const doc = `<!doctype html>${csp}${ART_BRIDGE}${tokens}` + (a.kind === 'svg'
+    ? `<style>html,body{margin:0;height:100%;background:#fff}body{display:flex;align-items:center;justify-content:center}
+       svg{width:100%;height:auto;max-height:100%}</style>${body}`
+    : body);
+  tweaksAvail = false; $('arttweaks').style.display = 'none';
+  const f = document.createElement('iframe');
+  // allow-scripts WITHOUT allow-same-origin — see the note above.
+  f.setAttribute('sandbox', 'allow-scripts');
+  f.setAttribute('referrerpolicy', 'no-referrer');
+  f.title = a.title + ' preview';
+  f.srcdoc = doc;
+  artbody.innerHTML = ''; artbody.appendChild(f);
+  $('artnote').textContent = (a.widget ? 'widget · ' : '') + 'sandboxed · no network, no access to this page';
+  frameReady = false;
+  f.addEventListener('load', () => {
+    frameReady = true;
+    companion?.frameLoaded();
+    if(!f.contentWindow) return;
+    // Is the document in the frame still the one Dream gave it? A page can
+    // navigate itself away (location.href, <meta refresh>) — no sandbox flag or
+    // CSP directive stops that in Chromium; what can be stopped is it staying.
+    // A load counter misses a page that navigates while still parsing (one
+    // load: the destination's), so every load is asked: the bridge answers a
+    // ping, and a document without the bridge is not Dream's.
+    f._pong = setTimeout(() => {
+      if(!f.isConnected) return;   // already replaced by a newer paint
+      f.remove();
+      $('artnote').textContent = 'closed — the page navigated away from its own document';
+      sysline('artifact closed — it navigated away from its own document', 'error');
+      companion?.frameClosed();
+    }, 3000);
+    f.contentWindow.postMessage({type:'__dream_ping'}, '*');
+    if(pointOn) f.contentWindow.postMessage({type:'__dream_point_on'}, '*');
+  });
+}
+
+window.addEventListener('message', e => {
+  const f=artbody.querySelector('iframe'),d=e.data;
+  if(!f || e.source!==f.contentWindow || !d || d.type!=='__dream_media_state') return;
+  if(!['error','loadedmetadata','playing','timeupdate'].includes(d.state))return;
+  window.dispatchEvent(new CustomEvent('dream:media-state',{detail:{state:d.state,time:Number.isFinite(d.time)?d.time:0,error:d.error}}));
+});
+
+/* ---------- download cards (present_fs_item_for_download) ------------------- */
+// A link straight to the file (or a zip of the folder). The token has to ride in
+// the query — a link carries no headers — and it is already in this page's URL.
+function renderDownload(d){
+  endTurn();
+  const el = document.createElement('div');
+  el.className = 'dlcard';
+  const href = '/api/download?path=' + encodeURIComponent(String(d.path || '')) + '&token=' + encodeURIComponent(TOKEN);
+  el.innerHTML = `<div class="ic">⬇</div>
+    <div class="t"><b>${esc(d.label || d.path || 'Project')}</b><span>${esc(d.kind || '')}</span></div>
+    <a class="go" download>download</a>`;
+  el.querySelector('a').href = href;
+  stream.appendChild(el); scroll(true);
+  companion?.interaction(el, 'download');
+}
+
+/* ---------- visual answers (Phase 8) ---------------------------------------- */
+// Typed cards from the *_display_v0 tools, the image row, the research offer,
+// and a widget in the sandboxed artifact frame. Every string is model text:
+// escaped before it touches the DOM; a link is only ever http(s); a color is
+// only ever a hex literal. Nothing here fetches — except the image thumbnails,
+// and only when the user asked for pictures.
+const WIDGET_STYLE = `<style>:root{--bg:#ffffff;--surface:#f4f5f9;--line:#d8dce6;--text:#0b0d12;--muted:#5b6377;
+  --accent:#8b5cf6;--accent-2:#22d3ee;--ok:#059669;--warn:#d97706;--danger:#dc2626;--radius:10px;
+  --font:system-ui,-apple-system,"Segoe UI",Inter,sans-serif}
+  html,body{margin:0}body{background:var(--bg);color:var(--text);font:14px/1.5 var(--font);padding:12px}</style>`;
+const httpUrl = u => /^https?:\/\/[^\s"'<>]+$/.test(String(u || '')) ? String(u) : '';
+const hexColor = c => /^#[0-9a-f]{3,8}$/i.test(String(c || '')) ? String(c) : '';
+const PALETTE = ['#8b5cf6', '#22d3ee', '#34d399', '#fbbf24', '#f87171', '#a78bfa', '#67e8f9', '#6ee7b7'];
+
+function renderWidget(d){
+  const name = String(d.widget || ''), data = (d.data && typeof d.data === 'object') ? d.data : {};
+  if(name === 'visualize_show_widget'){
+    if(COMPANION) artView = 'preview';
+    // Same frame, same sandbox, same CSP as a written page — plus the tokens.
+    const title = String(data.title || 'widget').slice(0, 80);
+    const a = addArtifact('widget:' + title, title, data.kind === 'svg' ? 'svg' : 'html', String(data.code || ''));
+    a.widget = true;
+    openArtifact(a.key);
+    return;
+  }
+  endTurn();
+  const el = document.createElement('div');
+  const cls = {image_search: 'images', suggest_research: 'research'}[name] || name.replace(/_display_v0$/, '');
+  el.className = 'vcard ' + cls.replace(/[^a-z0-9_]/gi, '');
+  el.innerHTML = renderCard(name, data, d.text);
+  wireCard(el);
+  stream.appendChild(el); scroll(true);
+  companion?.interaction(el, 'widget');
+}
+
+function renderCard(name, a, text){
+  const head = (label, title) => `<div class="vh">${esc(label)}${title ? ` · <b>${esc(title)}</b>` : ''}</div>`;
+  const summary = a.summary ? `<div class="vs">${esc(a.summary)}</div>` : '';
+  const link = (u, t) => { const h = httpUrl(u); return h ? `<a href="${esc(h)}" target="_blank" rel="noopener noreferrer">${esc(t || h)}</a>` : esc(t || ''); };
+  const products = ps => `<div class="prow">${(ps || []).map(p => `<div class="ptile">
+      <b>${esc(p.name)}</b>${p.price ? `<span class="price">${esc(p.price)}</span>` : ''}
+      ${p.blurb ? `<p>${esc(p.blurb)}</p>` : ''}
+      ${(p.attributes || []).map(at => `<div class="kv"><span>${esc(at.label)}</span><b>${esc(at.value)}</b></div>`).join('')}
+      ${httpUrl(p.url) ? `<div>${link(p.url, 'open →')}</div>` : ''}</div>`).join('')}</div>`;
+  switch(name){
+    case 'chart_display_v0':
+      return head(String(a.style || '') + ' chart', a.title) + chartSvg(a) + summary;
+    case 'comparison_card_display_v0': {
+      const ps = a.products || [], labels = [];
+      ps.forEach(p => (p.attributes || []).forEach(at => { if(!labels.includes(at.label)) labels.push(at.label); }));
+      const cell = (p, l) => { const at = (p.attributes || []).find(x => x.label === l); return esc(at ? at.value : '—'); };
+      return head('comparison') + `<div class="tscroll"><table class="cmp"><thead><tr><th></th>${ps.map(p =>
+          `<th><b>${esc(p.name)}</b>${p.price ? `<span class="price">${esc(p.price)}</span>` : ''}${httpUrl(p.url) ? `<div>${link(p.url, 'open →')}</div>` : ''}</th>`).join('')}</tr></thead>
+        <tbody>${labels.map(l => `<tr><th>${esc(l)}</th>${ps.map(p => `<td>${cell(p, l)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` + summary;
+    }
+    case 'featured_card_display_v0': return head('pick') + products(a.products) + summary;
+    case 'product_carousel_display_v0': return head('products') + products(a.products) + summary;
+    case 'itinerary_display_v0':
+      return head('itinerary', a.title) + (a.days || []).map((d, i) => `<details class="day"${i === 0 ? ' open' : ''}><summary>${esc(d.day_label)}</summary>
+        <ul>${(d.stops || []).map(s => `<li>${s.time ? `<span class="time">${esc(s.time)}</span>` : ''}<b>${esc(s.name)}</b>${s.blurb ? ` — ${esc(s.blurb)}` : ''}</li>`).join('')}</ul></details>`).join('') + summary;
+    case 'link_preview_display_v0':
+      return head('links') + (a.links || []).map(l => { const dom = l.domain || String(l.url || '').replace(/^https?:\/\/([^/]+).*$/, '$1');
+        return `<div class="lnk">${link(l.url, l.title)}<span class="dom">${esc(dom)}</span>${l.snippet ? `<p>${esc(l.snippet)}</p>` : ''}</div>`; }).join('') + summary;
+    case 'options_card_display_v0':
+      return head('options', a.title) + `<div class="ogrid">${(a.options || []).map(o => `<div class="opt"><b>${esc(o.title)}</b><p>${esc(o.description)}</p>
+        <ul>${(o.bullets || []).map(b => `<li>${esc(b)}</li>`).join('')}</ul></div>`).join('')}</div>` + summary;
+    case 'places_list_display_v0':
+      return head('places') + (a.places || []).map(p => `<div class="place"><b>${esc(p.name)}</b>${p.description ? `<p>${esc(p.description)}</p>` : ''}
+        ${(p.tips || []).map(t => `<span class="pill">${esc(t)}</span>`).join('')}</div>`).join('') + summary;
+    case 'quiz_display_v0':
+      return head('quiz', a.title) + (a.description ? `<div class="vs">${esc(a.description)}</div>` : '') + quizHtml(a);
+    case 'step_card_display_v0': {
+      const list = a.view === 'list';
+      return head('steps') + `<ol class="steps">${(a.steps || []).map((s, i) => list
+        ? `<li><b>${esc(s.title)}</b><p>${esc(s.description)}</p></li>`
+        : `<li><details${i === 0 ? ' open' : ''}><summary>${esc(s.title)}</summary><p>${esc(s.description)}</p></details></li>`).join('')}</ol>` + summary;
+    }
+    case 'translation_display_v0':
+      return head('translation', `${a.source_language} → ${a.target_language}`) + `<div class="tr2">
+        <div><span class="dom">${esc(a.source_language)}</span><p>${esc(a.source_text)}</p><button type="button" class="copy" data-copy="${esc(a.source_text)}">copy</button></div>
+        <div><span class="dom">${esc(a.target_language)}</span><p lang="${esc(a.target_lang || '')}">${esc(a.translation)}</p>${a.pronunciation ? `<i>${esc(a.pronunciation)}</i>` : ''}<button type="button" class="copy" data-copy="${esc(a.translation)}">copy</button></div></div>` + summary;
+    case 'image_search':
+      return head('images', a.query) + `<div class="irow">${(a.images || []).map(im => {
+        const page = httpUrl(im.page) || httpUrl(im.src), thumb = httpUrl(im.thumb) || httpUrl(im.src);
+        if(!thumb) return '';
+        const dims = (im.width && im.height) ? `${+im.width}×${+im.height}` : '';
+        return `<a href="${esc(page)}" target="_blank" rel="noopener noreferrer" title="${esc(im.title)}"><img src="${esc(thumb)}" alt="${esc(im.title)}" referrerpolicy="no-referrer" loading="lazy"><span>${esc(dims)}</span></a>`; }).join('')}</div>`;
+    case 'suggest_research':
+      return head('research') + `<div class="rs"><p>${esc(a.rationale)}</p><button type="button" data-rationale="${esc(a.rationale)}">Start research</button></div>`;
+    case 'suggest_plugins':
+    case 'suggest_skills': {
+      // Phase 12: an offer. Each button fills the user's composer; only the user sends.
+      const verb = name === 'suggest_plugins' ? 'Enable plugin' : 'Use skill';
+      const items = Array.isArray(a.items) ? a.items.slice(0, 6) : [];
+      return head(name === 'suggest_plugins' ? 'plugins to enable' : 'skills to try') + `<div class="rs">${items.map(it =>
+        `<p><b>${esc(it.id)}</b> — <span class="what">${esc(it.what)}</span> <button type="button" class="offer" data-fill="${esc(verb + ' ' + String(it.id || '').slice(0, 80))}">${esc(verb)}</button></p>`).join('')}${
+        name === 'suggest_plugins' ? '<p class="vs">Enabling is a plugin.yaml edit; it takes effect at the next boot.</p>' : ''}</div>`;
+    }
+    default:
+      // A card this page does not know yet: its text form, never its markup.
+      return head(name.replace(/_/g, ' ')) + `<pre>${esc(text || JSON.stringify(a, null, 2))}</pre>`;
+  }
+}
+
+function chartSvg(a){
+  const W = 640, H = 300, L = 48, R = 16, T = 28, B = 40;
+  const style = a.style || 'bar', series = (a.series || []).filter(s => s && typeof s === 'object');
+  const cats = ((a.x_axis || {}).categories || []).map(String), ya = a.y_axis || {}, xa = a.x_axis || {};
+  const pts = series.map(s => Array.isArray(s.points) && s.points.length
+    ? s.points.map(p => [+p.x, +p.y]) : (s.values || []).map((v, i) => [i, +v]));
+  const all = pts.flat().filter(p => isFinite(p[0]) && isFinite(p[1]));
+  if(!all.length) return '<div class="vs">no data</div>';
+  let x0 = Math.min(...all.map(p => p[0])), x1 = Math.max(...all.map(p => p[0]));
+  let y0 = isFinite(+ya.min) && ya.min !== undefined ? +ya.min : Math.min(0, ...all.map(p => p[1]));
+  let y1 = isFinite(+ya.max) && ya.max !== undefined ? +ya.max : Math.max(...all.map(p => p[1]));
+  if(x1 === x0) x1 = x0 + 1;
+  if(y1 === y0) y1 = y0 + 1;
+  const n = Math.max(cats.length, ...pts.map(p => p.length), 1);
+  const sx = x => L + (style === 'bar' ? (x + 0.5) / n : (x - x0) / (x1 - x0)) * (W - L - R);
+  const sy = y => T + (1 - (y - y0) / (y1 - y0)) * (H - T - B);
+  const col = (s, i) => hexColor(s.color) || PALETTE[i % PALETTE.length];
+  const fmt = v => (+v).toLocaleString(undefined, {maximumFractionDigits: 2});
+  let out = `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(a.title || style + ' chart')}">`;
+  for(let i = 0; i <= 4; i++){ const v = y0 + (y1 - y0) * i / 4, y = sy(v);
+    out += `<line x1="${L}" x2="${W - R}" y1="${y}" y2="${y}" class="grid"/><text x="${L - 6}" y="${y + 4}" class="tick" text-anchor="end">${esc(fmt(v))}</text>`; }
+  if(style === 'bar' || cats.length){
+    const step = Math.max(1, Math.ceil(n / 12));
+    for(let i = 0; i < n; i += step) out += `<text x="${sx(i)}" y="${H - B + 16}" class="tick" text-anchor="middle">${esc(String(cats[i] ?? i + 1).slice(0, 14))}</text>`;
+  } else {
+    for(let i = 0; i <= 4; i++){ const v = x0 + (x1 - x0) * i / 4; out += `<text x="${sx(v)}" y="${H - B + 16}" class="tick" text-anchor="middle">${esc(fmt(v))}</text>`; }
+  }
+  const zero = sy(Math.max(y0, Math.min(y1, 0)));
+  series.forEach((s, si) => {
+    const c = col(s, si), P = pts[si], label = s.name ? s.name + ': ' : '';
+    if(style === 'bar'){
+      const bw = (W - L - R) / n / series.length * 0.7, off = (si - (series.length - 1) / 2) * bw / 0.7;
+      P.forEach(([, y], i) => { if(!isFinite(y)) return; const yy = sy(y);
+        out += `<rect x="${sx(i) + off - bw / 2}" y="${Math.min(yy, zero)}" width="${bw}" height="${Math.abs(zero - yy)}" fill="${c}" rx="2"><title>${esc(label + fmt(y))}</title></rect>`; });
+    } else {
+      const ok = P.filter(p => isFinite(p[0]) && isFinite(p[1]));
+      if(style === 'line') out += `<polyline points="${ok.map(([x, y]) => `${sx(x)},${sy(y)}`).join(' ')}" fill="none" stroke="${c}" stroke-width="2"/>`;
+      ok.forEach(([x, y]) => { out += `<circle cx="${sx(x)}" cy="${sy(y)}" r="${style === 'line' ? 3 : 4}" fill="${c}"><title>${esc(label + fmt(x) + ', ' + fmt(y))}</title></circle>`; });
+    }
+  });
+  if(xa.label) out += `<text x="${(L + W - R) / 2}" y="${H - 6}" class="tick" text-anchor="middle">${esc(xa.label)}</text>`;
+  if(ya.label) out += `<text transform="translate(12 ${(T + H - B) / 2}) rotate(-90)" class="tick" text-anchor="middle">${esc(ya.label)}</text>`;
+  out += '</svg>';
+  const legend = (series.length > 1 || series.some(s => s.name))
+    ? `<div class="legend">${series.map((s, i) => `<span><i style="background:${col(s, i)}"></i>${esc(s.name || 'series ' + (i + 1))}</span>`).join('')}</div>` : '';
+  return out + legend;
+}
+
+function quizHtml(a){
+  const flash = a.initial_mode === 'flashcards';
+  return `<div class="qz">${(a.questions || []).map((q, i) => `<details class="q"${i === 0 ? ' open' : ''} data-correct="${esc(q.correct_option_id)}">
+    <summary>${i + 1}. ${esc(q.question)}</summary>
+    ${q.hint ? `<div class="hint">hint: ${esc(q.hint)}</div>` : ''}
+    <div class="opts">${(q.options || []).map(o => flash
+      ? `<div class="opt${o.id === q.correct_option_id ? ' right' : ''}">${esc(o.text)}</div>`
+      : `<button type="button" class="opt" data-id="${esc(o.id)}">${esc(o.text)}</button>`).join('')}</div>
+    <div class="expl"${flash ? '' : ' hidden'}>${esc(q.explanation)}</div>
+    ${!flash && q.correct_feedback ? `<div class="fb ok" hidden>${esc(q.correct_feedback)}</div>` : ''}
+    ${!flash && q.incorrect_feedback ? `<div class="fb bad" hidden>${esc(q.incorrect_feedback)}</div>` : ''}
+  </details>`).join('')}</div>`;
+}
+
+// One listener per card: quiz answers, copy buttons, the research button.
+function wireCard(el){
+  el.addEventListener('click', async e => {
+    const opt = e.target.closest('button.opt');
+    if(opt){
+      const q = opt.closest('details.q'); if(!q || q.dataset.done) return;
+      q.dataset.done = '1';
+      const right = opt.dataset.id === q.dataset.correct;
+      opt.classList.add(right ? 'right' : 'wrong');
+      q.querySelectorAll('button.opt').forEach(b => { b.disabled = true; if(b.dataset.id === q.dataset.correct) b.classList.add('right'); });
+      q.querySelector('.expl').hidden = false;
+      const fb = q.querySelector(right ? '.fb.ok' : '.fb.bad'); if(fb) fb.hidden = false;
+      return;
+    }
+    const cp = e.target.closest('button.copy');
+    if(cp){
+      try{ await navigator.clipboard.writeText(cp.dataset.copy || ''); cp.textContent = 'copied'; }
+      catch(err){ cp.textContent = 'copy failed'; }
+      setTimeout(() => { cp.textContent = 'copy'; }, 1200);
+      return;
+    }
+    const offer = e.target.closest('button.offer');
+    if(offer){
+      // An offer fills the composer and never sends: the user's message is the user's.
+      const t = String(offer.dataset.fill || '').slice(0, 200), had = input.value.trim();
+      input.value = had ? had + '\n' + t : t; companion?.compose(); grow(); input.focus();
+      return;
+    }
+    const go = e.target.closest('.rs button');
+    if(go){
+      // The user pressed it: this is their message, sent the way their typed ones are.
+      go.disabled = true; go.textContent = 'started';
+      postPrompt(`Research it: ${go.dataset.rationale}. Delegate to the researcher subagent and report back with sources.`);
+    }
+  });
+}
+
+/* ---------- question forms (questions_v2) ----------------------------------- */
+// The model's form, as native controls. Option text is model text — escaped.
+// An svg-options swatch is model markup — it renders inside its own fully
+// sandboxed frame (no scripts), never inline in this page.
+const SWATCH_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:";
+function swatchFrame(svg){
+  const sv = document.createElement('iframe');
+  sv.setAttribute('sandbox', '');
+  sv.setAttribute('referrerpolicy', 'no-referrer');
+  sv.srcdoc = `<!doctype html><meta http-equiv="Content-Security-Policy" content="${SWATCH_CSP}">
+    <style>html,body{margin:0;height:100%;display:grid;place-items:center;background:#fff}svg{max-width:100%;max-height:100%}</style>${svg}`;
+  return sv;
+}
+function renderForm(form){
+  endTurn();
+  const qs = Array.isArray(form.questions) ? form.questions : [];
+  const el = document.createElement('form');
+  el.className = 'qform';
+  el.innerHTML = `<div class="qtitle">${esc(form.title || 'Questions')}</div>` + qs.map((q, i) => {
+    const id = esc(String(q.id || ('q' + i))), kind = esc(String(q.kind || 'freeform'));
+    const sub = q.subtitle ? `<div class="qsub">${esc(q.subtitle)}</div>` : '';
+    let body = '';
+    if(q.kind === 'text-options'){
+      const type = q.multi ? 'checkbox' : 'radio';
+      body = (q.options || []).map(o => `<label class="qopt"><input type="${type}" name="${id}" value="${esc(o)}"> ${esc(o)}</label>`).join('')
+        + `<input type="text" class="qother" name="${id}__other" placeholder="Other…">`;
+    } else if(q.kind === 'svg-options'){
+      const type = q.multi ? 'checkbox' : 'radio';
+      body = (q.options || []).map((_, j) => `<label class="qsvg"><input type="${type}" name="${id}" value="${j}" hidden><span class="qsvgbox" data-svg="${j}"></span></label>`).join('');
+    } else if(q.kind === 'slider'){
+      const lo = +q.min || 0, hi = isFinite(+q.max) ? +q.max : 100, st = +q.step || 1, dv = isFinite(+q.default) ? +q.default : lo;
+      body = `<input type="range" name="${id}" min="${lo}" max="${hi}" step="${st}" value="${dv}"><output>${dv}</output>`;
+    } else if(q.kind === 'file'){
+      body = `<input type="file" name="${id}"${q.accept ? ` accept="${esc(q.accept)}"` : ''}>`;
+    } else {
+      body = `<textarea name="${id}"></textarea>`;
+    }
+    return `<fieldset class="q" data-kind="${kind}" data-id="${id}"><legend>${esc(q.title || '')}</legend>${sub}${body}</fieldset>`;
+  }).join('') + `<div class="qacts"><button type="submit">Send answers</button></div>`;
+  // swatches go into sandboxed frames after the markup is in place
+  qs.forEach((q, i) => { if(q.kind !== 'svg-options') return;
+    const fs = el.querySelector(`fieldset[data-id="${CSS.escape(String(q.id || ('q' + i)))}"]`);
+    (q.options || []).forEach((svg, j) => { const box = fs && fs.querySelector(`.qsvgbox[data-svg="${j}"]`); if(box) box.appendChild(swatchFrame(String(svg))); });
+  });
+  el.querySelectorAll('input[type=range]').forEach(r => r.oninput = () => { r.nextElementSibling.textContent = r.value; });
+  el.onsubmit = async e => { e.preventDefault(); await submitForm(el, form); };
+  stream.appendChild(el); scroll(true);
+  companion?.interaction(el, 'question');
+}
+async function submitForm(el, form){
+  if(el.dataset.submitting === 'true') return;
+  el.dataset.submitting = 'true';
+  const buttons = [...el.querySelectorAll('button')]; buttons.forEach(b => b.disabled = true);
+  try {
+  const answers = {};
+  for(const fs of el.querySelectorAll('fieldset.q')){
+    const id = fs.dataset.id, kind = fs.dataset.kind;
+    if(kind === 'text-options' || kind === 'svg-options'){
+      const picked = [...fs.querySelectorAll(`input[name="${CSS.escape(id)}"]:checked`)].map(i => i.value);
+      const other = fs.querySelector('.qother');
+      const vals = picked.map(v => (kind === 'svg-options') ? ('option ' + (+v + 1)) : v);
+      if(other && other.value.trim()) vals.push(other.value.trim());
+      if(!vals.length) continue;
+      answers[id] = vals.length === 1 ? vals[0] : vals;
+    } else if(kind === 'slider'){
+      answers[id] = +fs.querySelector('input[type=range]').value;
+    } else if(kind === 'file'){
+      const inp = fs.querySelector('input[type=file]');
+      if(inp && inp.files && inp.files[0]){
+        const fd = new FormData(); fd.append('file', inp.files[0]);
+        try{
+          const r = await fetch('/api/upload', {method:'POST', headers:{'X-Dream-Token':TOKEN}, body: fd});
+          const j = await r.json();
+          if(!r.ok || !j.path){ sysline('Upload failed: ' + (j.error || r.status) + '. Your answers are kept. Retry or choose another file.', 'error'); return; }
+          answers[id] = j.path;
+        }catch(e){ sysline('Upload failed. Your answers are kept; reconnect and try again.', 'error'); return; }
+      }
+    } else {
+      const t = fs.querySelector('textarea'); if(t && t.value.trim()) answers[id] = t.value.trim();
+    }
+  }
+  if(!Object.keys(answers).length){ sysline('answer at least one question', 'error'); return; }
+  try{
+    const r = await fetch('/api/answer', {method:'POST', headers:{'Content-Type':'application/json','X-Dream-Token':TOKEN},
+      body: JSON.stringify({title: form.title || 'the form', answers})});
+    const j = await r.json();
+    if(!r.ok){ sysline('could not send answers — ' + (j.error || r.status), 'error'); return; }
+    el.remove();
+    companion?.interactions();
+    // Accepted user messages arrive through the shared server event once.
+    busy(true); scroll(true);
+  }catch(e){ sysline('could not reach Dream — is the terminal still running?', 'error'); }
+  } finally { el.dataset.submitting = 'false'; buttons.forEach(b => b.disabled = false); }
+}
+
+/* ---------- tweaks (edit mode) ---------------------------------------------- */
+// A page that registers for edit mode gets a Tweaks toggle. Its edits are
+// persisted into the file on disk — only an artifact that IS a file.
+let tweaksOn = false, tweaksAvail = false;
+const tweakBtn = $('arttweaks');
+function artifactFilePath(){ return (artOpen && artOpen.startsWith('file:')) ? artOpen.slice(5) : null; }
+tweakBtn.onclick = () => {
+  tweaksOn = !tweaksOn; tweakBtn.classList.toggle('on', tweaksOn);
+  const f = artbody.querySelector('iframe');
+  if(f && f.contentWindow) f.contentWindow.postMessage({type: tweaksOn ? '__activate_edit_mode' : '__deactivate_edit_mode'}, '*');
+};
+
+/* ---------- point mode (mentioned-element) ---------------------------------- */
+// Click an element in the open artifact; the next message carries a
+// <mentioned-element> block naming it, the way a comment on it would.
+let pointOn = false, mention = null;
+const pointBtn = $('artpoint'), mentionEl = $('mention');
+function mentionBlock(m){
+  return ['<mentioned-element>',
+    m.label ? `screen: ${m.label}` : null,
+    m.react ? `react: ${m.react}` : null,
+    `dom: ${m.dom}`,
+    `id: data-cc-id="${m.id}"`,
+    m.text ? `text: ${m.text}` : null,
+    '</mentioned-element>'].filter(Boolean).join('\n');
+}
+function clearMention(){ mention = null; mentionEl.style.display = 'none'; }
+$('mentionclear').onclick = clearMention;
+pointBtn.onclick = () => {
+  pointOn = !pointOn; pointBtn.classList.toggle('on', pointOn);
+  const f = artbody.querySelector('iframe');
+  if(f && f.contentWindow) f.contentWindow.postMessage({type: pointOn ? '__dream_point_on' : '__dream_point_off'}, '*');
+};
+window.addEventListener('message', e => {
+  const f = artbody.querySelector('iframe');
+  if(!f || e.source !== f.contentWindow) return;   // only the open artifact frame
+  const d = e.data || {};
+  if(d.type === '__edit_mode_available'){
+    tweaksAvail = true; tweakBtn.style.display = '';
+    if(tweaksOn) f.contentWindow.postMessage({type:'__activate_edit_mode'}, '*');
+  } else if(d.type === '__edit_mode_set_keys'){
+    const path = artifactFilePath();
+    if(!path){ sysline('tweak not saved — this artifact is not a file on disk', 'error'); return; }
+    if(!d.edits || typeof d.edits !== 'object') return;
+    fetch('/api/tweak', {method:'POST', headers:{'Content-Type':'application/json','X-Dream-Token':TOKEN},
+      body: JSON.stringify({path, edits: d.edits})})
+      .then(r => r.json()).then(j => { if(j.error) sysline('tweak not saved — ' + j.error, 'error'); }).catch(() => {});
+  } else if(d.type === '__dream_pong'){
+    clearTimeout(f._pong);
+  } else if(d.type === '__dream_send_prompt'){
+    // A widget fills the user's composer; only the user sends. Never submitted here,
+    // and never over what he was typing: the text joins on a new line.
+    const t = String(d.text || '').slice(0, 4000), had = input.value.trim();
+    if(had.length + t.length > 8000) return;   // a page cannot grow the composer without bound
+    input.value = had ? had + '\n' + t : t; companion?.compose(); grow(); input.focus();
+  } else if(d.type === '__dream_mention'){
+    // Only while pointing, and only so much: a page can post this itself, and
+    // whatever it says rides into the user's own message.
+    if(!pointOn) return;
+    const cap = (v, n) => String(v || '').slice(0, n);
+    mention = {id: cap(d.id, 16), dom: cap(d.dom, 300), react: cap(d.react, 200),
+               label: cap(d.label, 80), text: cap(d.text, 80)};
+    $('mentiontext').textContent = 'pointing at: ' + (mention.label ? mention.label + ' · ' : '')
+      + mention.dom + (mention.text ? ' — “' + mention.text + '”' : '');
+    mentionEl.style.display = '';
+    companion?.compose();
+    input.focus();
+  }
+});
+
+/* ---------- the user's view: Dream asks the open artifact ------------------ */
+// Dream's eval_js_user_view / screenshot_user_view. The question comes in as a
+// studio event with an id; it is posted into the open frame; the frame's reply
+// is POSTed back. With nothing open, this page answers "no" itself, so the tool
+// on the other end never waits on a frame that does not exist.
+function frameReply(id, ok, value){
+  fetch('/api/frame_reply', {method:'POST',
+    headers:{'Content-Type':'application/json','X-Dream-Token':TOKEN},
+    body: JSON.stringify({id, ok, value})}).catch(() => {});
+}
+let frameReady = false;   // the open frame has fired load (its bridge is listening)
+function askFrame(d){
+  const f = artbody.querySelector('iframe');
+  if(!artOpen){ frameReply(d.id, false, 'no artifact is open in the Studio panel'); return; }
+  if(!f || !f.contentWindow){
+    frameReply(d.id, false, artView === 'code'
+      ? 'the artifact is open in code view — the preview must be showing for this'
+      : 'no artifact frame is showing in the Studio panel');
+    return;
+  }
+  const msg = d.op === 'snapshot' ? {type:'__dream_snapshot', id:d.id}
+                                  : {type:'__dream_eval', id:d.id, code:String(d.code || '')};
+  const post = () => { try{ f.contentWindow.postMessage(msg, '*'); }catch(e){ frameReply(d.id, false, String(e)); } };
+  // An ask that lands while the frame is still loading would reach a bridge
+  // that is not listening yet; wait for load instead of losing it.
+  if(frameReady) post(); else f.addEventListener('load', post, {once: true});
+}
+window.addEventListener('message', e => {
+  const d = e.data || {};
+  if(d.type !== '__dream_reply' || !d.id) return;
+  // Only the open artifact frame may answer — never another window.
+  const f = artbody.querySelector('iframe');
+  if(!f || e.source !== f.contentWindow) return;
+  frameReply(String(d.id), !!d.ok, d.value);
+});
+
+$('artver').onchange = e => { artVerIdx = +e.target.value; paintArtifact(); };
+$('artprev').onclick = () => { artView = 'preview'; paintArtifact(); };
+$('artcode').onclick = () => { artView = 'code'; paintArtifact(); };
+$('artclose').onclick = () => {
+  panel.classList.remove('open'); artOpen = null; rail.classList.remove('hide');
+  companion?.closeArtifact();
+};
+
+// Detection 1: renderable fenced blocks in what Dream says.
+function scanForArtifacts(text, seq){
+  const re = /```(\w*)\n([\s\S]*?)```/g;
+  let m, i = 0;
+  while((m = re.exec(text))){
+    const kind = artKind(m[1], m[2]);
+    if(!kind) { i++; continue; }
+    addArtifact(`msg${seq}:${i}`, `${kind === 'svg' ? 'Diagram' : 'Page'} ${seq}.${i+1}`, kind, m[2].trim());
+    i++;
+  }
+}
+
+// Detection 2: a file Dream WROTE that a browser can render.
+function artifactFromWrite(input){
+  const path = String(input.file_path || input.path || '');
+  const body = input.content;
+  if(typeof body !== 'string' || !path) return;
+  const ext = path.split('.').pop().toLowerCase();
+  const kind = (ext === 'html' || ext === 'htm') ? 'html' : (ext === 'svg' ? 'svg' : artKind('', body));
+  if(!kind) return;
+  return addArtifact(`file:${path}`, path.split('/').pop(), kind, body);
+}
+
+</script>
+<script src="/assets/attachments.js"></script>
+<script src="/assets/companion.js"></script>
+<script src="/assets/controls.js"></script>
+<script src="/assets/council.js"></script>
+<link rel="stylesheet" href="/assets/projects.css">
+<link rel="stylesheet" href="/assets/workflows.css">
+<script src="/assets/projects.js"></script>
+<script src="/assets/media.js"></script>
+<script src="/assets/workflows.js"></script>
+<script>
+(() => {
+  const openProject = document.createElement('button');
+  openProject.id = 'studio-project'; openProject.textContent = 'Projects';
+  openProject.setAttribute('aria-controls', 'dream-projects-page');
+  openProject.onclick = () => window.DreamLibrary?.show('projects');
+  const navigation = document.querySelector('.studio-nav');
+  if(navigation) navigation.insertBefore(openProject, $('studio-skills'));
+  else document.querySelector('header .status').before(openProject);
+})();
+</script>
+<link rel="stylesheet" href="/assets/theme.css">
+<link rel="stylesheet" href="/assets/workspace.css">
+<link rel="stylesheet" href="/assets/prompt_optimizer.css">
+<script src="/assets/prompt_optimizer.js"></script>
+<script src="/assets/workspace.js"></script>
+<link rel="stylesheet" href="/assets/library.css">
+<script src="/assets/library.js"></script>
+<link rel="stylesheet" href="/assets/branding.css">
+<script>
+// All frame constants, listeners, and companion controls must exist before a
+// socket can deliver hello followed immediately by the retained Studio show.
+counts(); connect(); pollTelemetry(); if(!COMPANION) input.focus();
+</script>
+</body>
+</html>

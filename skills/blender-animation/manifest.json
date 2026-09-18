@@ -1,0 +1,12 @@
+{
+  "format": "dream-skill/v1",
+  "name": "blender-animation",
+  "version": "1.0.1",
+  "portable": true,
+  "capabilities": [
+    "media_read",
+    "media_create",
+    "run_bash",
+    "see"
+  ]
+}

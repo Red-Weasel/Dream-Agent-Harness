@@ -1,0 +1,49 @@
+#dream-prompt-optimizer{--po-ink:#edf0fb;--po-muted:#b3bcd3;--po-line:#625279;--po-panel:#11172a;display:flex;flex-direction:column;position:relative;order:10;flex:0 0 46%;min-width:390px;max-width:560px;background:var(--po-panel);color:var(--po-ink);border-left:1px solid var(--po-line);z-index:9;min-height:0;text-align:left;font-family:var(--sans);box-shadow:-12px 0 32px #0003}
+#dream-prompt-optimizer[hidden]{display:none!important}
+.prompt-optimizer-open #artpanel{display:none!important}
+.prompt-optimizer-open #main{display:block!important;flex:1 1 0!important;min-width:0!important}
+#dream-prompt-optimizer .po-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:22px 22px 17px;border-bottom:1px solid #66547780;background:linear-gradient(120deg,#26223d,#141b30)}
+#dream-prompt-optimizer h2{font:500 23px/1.25 var(--sans);letter-spacing:-.4px;margin:0 0 6px}
+#dream-prompt-optimizer h3{font-size:15px;font-weight:500;margin:12px 0 6px}
+#dream-prompt-optimizer p{margin:4px 0 12px;line-height:1.5;overflow-wrap:anywhere}
+#dream-prompt-optimizer .po-header p{font-size:12px;color:var(--po-muted);margin:0}
+#dream-prompt-optimizer .po-body{padding:20px 22px 28px;overflow:auto;overscroll-behavior:contain;min-height:0;scrollbar-gutter:stable}
+#dream-prompt-optimizer label{display:block;font-size:13px;font-weight:500;margin:0 0 8px;line-height:1.5}
+#dream-prompt-optimizer label>span{font-size:11px;font-weight:400;color:var(--po-muted);margin-left:6px}
+#dream-prompt-optimizer label .po-required{color:#efbc97}
+#dream-prompt-optimizer textarea,#dream-prompt-optimizer select{display:block;width:100%;min-width:0;box-sizing:border-box;background:#0b1120;color:var(--po-ink);border:1px solid #53617d;border-radius:8px;font:13px/1.6 var(--sans);padding:10px 12px;margin:0 0 16px}
+#dream-prompt-optimizer textarea{resize:vertical;min-height:64px;max-height:none}
+#dream-prompt-optimizer textarea::placeholder{color:#96a3be}
+#dream-prompt-optimizer select{margin:6px 0 0;padding:9px 8px}
+#dream-prompt-optimizer button{font:12px/1.4 var(--sans);border:1px solid #726381;background:#28223e;color:var(--po-ink);border-radius:7px;padding:9px 12px;cursor:pointer}
+#dream-prompt-optimizer button:hover{background:#39304f}
+#dream-prompt-optimizer button.po-primary{background:#f6b17f;color:#1b1724;border-color:#f6b17f;font-weight:600}
+#dream-prompt-optimizer button.po-primary:hover{background:#ffc59d}
+#dream-prompt-optimizer button:disabled{opacity:.45;cursor:not-allowed}
+#dream-prompt-optimizer :focus-visible{outline:2px solid #f6b17f;outline-offset:3px}
+#dream-prompt-optimizer #po-close{font-size:23px;line-height:1;padding:3px 8px;border-color:transparent;background:transparent}
+#dream-prompt-optimizer .po-options{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:16px}
+#dream-prompt-optimizer .po-help,#dream-prompt-optimizer .po-private{font-size:11px;color:var(--po-muted)}
+#dream-prompt-optimizer .po-private{margin:20px 0 0;border-top:1px solid #62527977;padding-top:12px}
+#dream-prompt-optimizer details{margin:12px 0 16px;font-size:12px}
+#dream-prompt-optimizer summary{cursor:pointer;color:#d7c6ee;line-height:1.6;margin-bottom:12px}
+#dream-prompt-optimizer .po-checkbox{display:flex;align-items:center;gap:9px;font-size:12px;font-weight:400;margin:16px 0}
+#dream-prompt-optimizer .po-checkbox input{accent-color:#f6b17f;width:16px;height:16px;flex-shrink:0}
+#dream-prompt-optimizer .po-actions{display:flex;flex-wrap:wrap;gap:9px;margin:14px 0 10px}
+#dream-prompt-optimizer #po-status{font-size:12px;color:#cfb5ef;white-space:pre-wrap}
+#dream-prompt-optimizer #po-status.po-error{color:#ffc2b8}
+#dream-prompt-optimizer .po-warning{background:#30243b;border-left:3px solid #f6b17f;padding:12px;margin-bottom:18px;font-size:12px}
+#dream-prompt-optimizer [hidden]{display:none!important}
+#dream-prompt-optimizer .po-files>span{display:block;font-size:10px;color:var(--po-muted);margin-top:6px}
+#dream-prompt-optimizer ul{padding-left:18px;font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+#dream-prompt-optimizer #po-files{list-style:none;padding:0;margin:10px 0}
+#dream-prompt-optimizer #po-files li{display:flex;flex-wrap:wrap;gap:7px;align-items:center;padding:8px 0;border-bottom:1px solid #53617d66}
+#dream-prompt-optimizer #po-files li>span{flex:1 1 150px;overflow-wrap:anywhere}
+#dream-prompt-optimizer #po-files small{color:var(--po-muted)}
+#dream-prompt-optimizer #po-files button{font-size:10px;padding:4px 6px}
+#dream-prompt-optimizer #po-questions{border-top:1px solid #62527988;padding-top:8px}
+#dream-prompt-optimizer #po-question-fields p{color:var(--po-muted);font-size:11px}
+#dream-prompt-optimizer #po-output{border-top:1px solid #8d6aa1;margin-top:20px;padding-top:20px}
+#dream-prompt-optimizer #po-result{background:#10192a;min-height:230px}
+@media(max-width:999px){#dream-prompt-optimizer{position:absolute;inset:0;width:100%;max-width:none;min-width:0;border-left:0;z-index:12}#dream-prompt-optimizer .po-header{padding:16px}#dream-prompt-optimizer .po-body{padding:16px}#dream-prompt-optimizer h2{font-size:21px}}
+@media(prefers-reduced-motion:reduce){#dream-prompt-optimizer *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

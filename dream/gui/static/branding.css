@@ -1,0 +1,68 @@
+/* Dream's reference identity. Loaded after the functional workspace styles. */
+.dream-design body{background:#050b18}
+.dream-design #dream-nav{background:linear-gradient(180deg,#060d1bf5,#091126ed 65%,#161329);border-right:1px solid #7182b12e}
+.dream-design .dream-nav-brand{display:flex;align-items:center;gap:7px;padding:0 0 28px;font-size:22px;font-weight:500;letter-spacing:.24em;color:#dce1ff}
+.dream-design .dream-nav-brand:before{display:none}
+.dream-nav-brand img{width:46px;height:46px;flex-shrink:0}
+.dream-design .dream-nav-brand small{font-size:7px;letter-spacing:.16em;white-space:nowrap;color:#9cafd6;margin-top:7px}
+.dream-design #dream-nav button[aria-current=page]{background:linear-gradient(105deg,#5d43b985,#272044 65%,#b75c3b70);border-color:#a08abf;box-shadow:inset 2px 0 #bcabff,0 0 16px #9464dd20}
+.dream-design #dream-nav button i{color:#c0b4fb}
+@media(min-width:1200px){.dream-design header .wordmark{display:none}}
+.dream-design header{background:#060d1bf0;border-color:#667eac30}
+.dream-design .wordmark:before{width:36px;height:36px;border:0;border-radius:0;box-shadow:none;background:url('/assets/dream-mark.svg') center/contain no-repeat}
+.dream-design #dream-workbar{background:linear-gradient(90deg,#0a1326,#10152a);border-color:#667eac30;padding-block:9px}
+.dream-design .split{background:#050b18 var(--dream-art) center right/cover no-repeat;border:1px solid #6c78ad42;border-radius:16px 16px 0 0;margin:12px 16px 0;isolation:isolate}
+.dream-design.companion #main{background:linear-gradient(90deg,#050b1830,#050b1800);padding:28px clamp(20px,5vw,92px) 20px;border:0}
+.dream-design.companion #main .wrap{max-width:860px}
+.dream-design.companion #studio-interactions-empty{display:flex;align-items:center;min-height:300px;height:100%;max-width:none;margin:0;padding:24px 0 60px;text-align:left;border:0;border-radius:0;background:none;box-shadow:none}
+.dream-design #studio-interactions-empty[hidden]{display:none!important}
+.dream-design #main:has(#studio-interactions-empty:not([hidden])) .feed-toolbar{display:none}
+.dream-welcome-copy{max-width:470px;padding:24px 0;text-shadow:0 2px 24px #020614}
+.dream-design.companion #studio-interactions-empty h2{font:clamp(36px,4.3vw,64px)/1.13 Georgia,serif;letter-spacing:-.035em;color:#f3f0ff;margin:22px 0}
+.dream-design.companion #studio-interactions-empty p{font:17px/1.8 var(--sans);color:#b9c9e6;margin:0;max-width:34ch}
+.dream-design .dream-eyebrow{color:#ffb699;font-size:10px;letter-spacing:.25em}
+.dream-welcome-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:32px}
+.dream-design .dream-welcome-actions button{background:#111a329c;color:#ded9ff;border:1px solid #817aaa70;border-radius:8px;padding:9px 20px;backdrop-filter:blur(12px)}
+.dream-design .dream-welcome-actions button:hover{background:#352955;border-color:#ba9edd}
+.dream-design.companion .dream{background:linear-gradient(120deg,#10172bf5,#0a1326ed);border:1px solid #6676a459;border-radius:16px;box-shadow:0 12px 30px #0003;padding:22px 26px}
+.dream-design .dream .who:before{border:0;border-radius:0;background:url('/assets/dream-mark.svg') center/contain no-repeat;box-shadow:none;width:32px;height:32px;flex-basis:32px}
+.dream-design.companion .you .body{background:linear-gradient(120deg,#21233ded,#141d33f2);border:1px solid #8379a85e;border-radius:16px 4px 16px 16px}
+.dream-design .sys{background:#091225eb;padding:10px 14px;border:1px solid #52648855;border-radius:8px}
+.dream-design.companion footer{padding:16px 32px 12px;background:linear-gradient(180deg,#101427,#070d1b);border:1px solid #6c78ad42;border-top:0;border-radius:0 0 16px 16px;margin:0 16px 12px}
+.dream-design.companion .composer{max-width:940px;min-height:76px;padding:16px 18px;border-radius:15px;background:linear-gradient(115deg,#342542df,#111d33f5 60%,#252040);border:1px solid #a487ad;box-shadow:inset 0 1px #e3b0a122,0 0 26px #9c65e015}
+.dream-design.companion .composer:focus-within{border-color:#ffc38e;box-shadow:0 0 0 3px #f6a06a20}
+.dream-design.companion #send{background:linear-gradient(135deg,#9777fc,#6541ce 60%,#df8e96);color:#fff;border:1px solid #b7a0fc;border-radius:10px;min-width:44px;min-height:40px;box-shadow:0 0 18px #a47cf43b}
+.dream-design.companion #send:hover:not(:disabled){background:linear-gradient(135deg,#ad94ff,#8056e5 60%,#ffb68b);color:#fff}
+.dream-design.companion footer .hint{max-width:920px;color:#a8b5d1}
+.dream-design #dream-inspector{background:linear-gradient(160deg,#111b32f7,#080f20fc);border-color:#7d78a380}
+.dream-design .dream-hero{border-color:#7d78a380}
+.dream-design[data-atmosphere=quiet] .split{background:#080f20}
+html:not(.dream-design) .dream-welcome-copy .dream-eyebrow{display:none}
+html:not(.dream-design) .dream-welcome-actions{justify-content:center}
+@media(max-width:1199px){
+ .dream-design .dream-nav-brand{display:none}
+ .dream-design.companion #studio-interactions-empty h2{font-size:46px}
+ .dream-welcome-copy{max-width:370px}
+}
+@media(max-width:700px){
+ .dream-design .split{margin:6px 6px 0;border-radius:12px 12px 0 0;background-position:65% center}
+ .dream-design.companion #main{padding:18px 14px 12px}
+ .dream-design.companion #studio-interactions-empty{min-height:230px;padding:14px 0;align-items:flex-start}
+ .dream-welcome-copy{padding:20px 14px;background:linear-gradient(90deg,#060d1bd9,#060d1b60);border-radius:12px}
+ .dream-design.companion #studio-interactions-empty h2{font-size:36px;margin:16px 0}
+ .dream-design.companion #studio-interactions-empty p{font-size:14px}
+ .dream-welcome-actions{gap:7px;margin-top:20px}
+ .dream-design .dream-welcome-actions button{padding:7px 12px}
+ .dream-design.companion footer{padding:10px 10px 8px;margin:0 6px 6px}
+ .dream-design.companion .composer{padding:10px;min-height:66px}
+ .dream-design.companion .dream{padding:16px}
+}
+@media(max-height:600px){
+ .dream-design.companion #studio-interactions-empty{height:auto;min-height:0;padding:0}
+ .dream-welcome-copy{padding:0 8px}
+ .dream-welcome-copy .dream-eyebrow{display:none}
+ .dream-design.companion #studio-interactions-empty h2{font-size:28px;margin:8px 0}
+ .dream-design.companion #studio-interactions-empty p{font-size:12px;line-height:1.5}
+ .dream-welcome-actions{margin-top:12px}
+ .dream-design .dream-welcome-actions button{padding:5px 10px;font-size:11px}
+}

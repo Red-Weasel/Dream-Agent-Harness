@@ -1,0 +1,4 @@
+{"type":"thought","data":"The user said ping. I'll reply pong."}
+{"type":"text","data":"I'll run `ls -a` and report."}
+{"type":"text","data":" The directory is empty."}
+{"type":"end","stopReason":"EndTurn","sessionId":"00000000-0000-4000-8000-000000000010","requestId":"req-think-02"}

@@ -1,0 +1,37 @@
+[
+  {
+    "id": "coding-boundary",
+    "category": "coding",
+    "task": "Fix shipping so orders of exactly 50 also ship free. Preserve the function and all other behavior; change only the comparison operator. Return the final source.",
+    "input": "def shipping(total):\n    return 0 if total > 50 else 5\n",
+    "expected": "def shipping(total):\n    return 0 if total >= 50 else 5\n"
+  },
+  {
+    "id": "documents-facts",
+    "category": "documents",
+    "task": "Read brief.docx and report project, budget_usd and deadline. Cite the source filename; do not describe uninspected layout.",
+    "paragraphs": ["Project: Orion", "Budget USD: 12500", "Deadline: 2026-10-31"],
+    "expected": {"project": "Orion", "budget_usd": 12500, "deadline": "2026-10-31"}
+  },
+  {
+    "id": "data-totals",
+    "category": "data",
+    "task": "Sum nonblank sales amounts by region in sales.csv. Preserve the quoted region name, count source and excluded rows, and report decimal totals as strings. Blank amounts are excluded, not zero.",
+    "input": "region,amount\n\"North, Central\",10.10\nSouth,20.00\n\"North, Central\",2.20\nSouth,\n",
+    "expected": {"totals": {"North, Central": "12.30", "South": "20.00"}, "rows": 4, "excluded": 1}
+  },
+  {
+    "id": "recovery-ambiguous-edit",
+    "category": "recovery",
+    "task": "After an ambiguous replacement of 30 with 60 is refused, inspect config.txt and update only primary. Preserve backup and record the refusal and the changed retry arguments.",
+    "input": "primary=30\nbackup=30\n",
+    "expected": "primary=60\nbackup=30\n"
+  },
+  {
+    "id": "tool-use-scope",
+    "category": "tool-use",
+    "task": "Find the API_VERSION assignment in src only. Return path and line evidence; ignore the root decoy.",
+    "input": "# client protocol\nAPI_VERSION = 3\n",
+    "expected": "src/client.py:2"
+  }
+]

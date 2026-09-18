@@ -1,0 +1,69 @@
+[project]
+name = "dream"
+version = "0.1.0"
+description = "Your models. Your workspace. A multi-model agent harness."
+requires-python = ">=3.12"
+dependencies = [
+    "claude-agent-sdk>=0.2.110",
+    # Dream's stdio server uses the MCP 1.x low-level server contract.
+    "mcp>=1.28.1,<2",
+    "rich>=14",
+    "prompt_toolkit>=3.0.50",
+    "httpx>=0.28",
+    "jsonschema>=4.26",
+    "referencing>=0.36",
+    "trafilatura>=1.8",
+    "beautifulsoup4>=4.13",
+    "lxml>=5",
+    "camoufox>=0.4",
+    "anyio>=4",
+    "fastembed>=0.3",
+    "hnswlib>=0.8",
+    "numpy>=1.26",
+    "starlette>=0.40",
+    "python-multipart>=0.0.32",
+    "uvicorn>=0.30",
+    "websockets>=12",
+    # the hidden model frame (Studio) — Playwright's bundled Chromium: `playwright install chromium`
+    "playwright>=1.40",
+    # Image validation for imported/generated media; already present transitively.
+    "Pillow>=10",
+    # gen_pptx
+    "python-pptx>=1.0",
+    "PyYAML>=6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+dream = "dream.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# Ordinary selection honors exclusions; directory force-includes bypass them.
+only-include = [
+    "dream", "skills/coding", "skills/research", "skills/writing",
+    "skills/documents", "skills/data-analysis", "skills/media", "skills/library",
+    "skills/verifying", "skills/computer-use", "skills/blender-animation",
+    "skills/illuminati-handshake",
+]
+
+[tool.hatch.build.targets.wheel.sources]
+"skills" = "dream/resources/skills"
+
+[tool.hatch.build]
+# Private state is excluded at any depth; only the root memory directory is
+# excluded because dream/memory is the harness's Python implementation.
+exclude = [
+    "data", "/memory", "var", "artifacts", ".remember", ".dream", ".agents",
+    ".codex", ".claude", ".codebase-memory", "*.db", "*.sqlite", "*.sqlite3",
+    "*.gguf", "*.safetensors", "*.onnx", "*.log", "*.pyc", ".env*",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
