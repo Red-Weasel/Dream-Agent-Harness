@@ -1,9 +1,9 @@
 # Current state and handoff
 
-Updated: `2026-09-16T13:07:05-05:00`
+Updated: `2026-09-18T19:10:38-05:00`
 Current work: `none`
 
-Latest handoff: [V4.1 native tool repair](updates/2026-09-16-v41-native-tools.md)
+Latest handoff: [README screenshot and support link](updates/2026-09-18-readme-screenshot-support.md)
 
 ## Latest result
 

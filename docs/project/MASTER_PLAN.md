@@ -34,6 +34,7 @@ not permission to start an external action or to load a model.
 
 | ID | Work item | Status | Priority | Dependency / evidence |
 |---|---|---|---|---|
+| DREAM-080 | README screenshot and Ko-fi support link | implemented | owner request | Screenshot of Dream + DeepSeek-V4.1 in the README, Support section and FUNDING.yml; [record](updates/2026-09-18-readme-screenshot-support.md). |
 | DREAM-079 | V4.1 native tool-call support | blocked | owner repair request | Engine repair built; 654 reference/protocol checks, 50 upstream encoder tests, 15 prompt/token goldens and 22 Dream checks pass. Existing server remains on old executable; awaiting owner-approved reload and live tool loop. [Handoff](updates/2026-09-16-v41-native-tools.md). |
 | DREAM-078 | Dream eclipse branding and immersive chat | implemented | owner visual acceptance | Original-inspired eclipse artwork, logo and circular silhouette icon integrated; bottom composer and artwork-framed messages verified in Chromium and native WebKit. [Evidence](updates/2026-09-15-dream-branding.md). |
 | DREAM-077 | Readable model picker and V4.1 loading | blocked | engine qualification | Picker/discovery and RAM preflight repaired;186 focused tests pass. Actual32768-context load succeeded, reply timed out;4096-context comparison hit engine GPU OOM. [Evidence and next action](updates/2026-09-14-v41-loading-preflight.md). |
