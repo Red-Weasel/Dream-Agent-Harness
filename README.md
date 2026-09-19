@@ -8,6 +8,9 @@ terminal, streaming chat, browser, Studio previews, tools, and optional memory.
 
 ![Dream eclipse artwork](dream/gui/static/dream-eclipse.png)
 
+![Dream running DeepSeek-V4.1-Flash locally through the MachX engine](docs/public/images/dream-deepseek-v41.png)
+<sub>Dream running DeepSeek-V4.1-Flash locally through the [MachX inference engine](https://github.com/Red-Weasel/machx-inference-engine) on two Intel Arc Pro B70 cards — reasoning shown, 11.7 tok/s.</sub>
+
 ## What you can do
 
 - **Choose your main agent.** Connect Claude through the Agent SDK, authenticated
@@ -180,6 +183,15 @@ GTK/WebKit fixtures checked video playback, reconnect, Stop and Prompt Optimizer
 drafts. These are scoped engineering checks, not a claim of universal model
 compatibility or benchmark superiority.
 [Development and validation](docs/public/development.md).
+
+## Support
+
+☕ **Buy me a coffee.** If Dream is useful to you, donations are welcome, one-time or monthly. All donations go
+straight back into the project.
+
+[![Buy me a coffee on Ko-fi](https://img.shields.io/badge/Buy%20me%20a%20coffee-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/redweasel)
+
+**[ko-fi.com/redweasel](https://ko-fi.com/redweasel)**
 
 ## License
 
