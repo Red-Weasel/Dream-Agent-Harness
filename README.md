@@ -186,8 +186,7 @@ compatibility or benchmark superiority.
 
 ## Support
 
-☕ **Buy me a coffee.** If Dream is useful to you, donations are welcome, one-time or monthly. All donations go
-straight back into the project.
+☕ **Buy me a coffee.** -- Unemployed and extremely grateful for any support -- If Dream is useful to you, donations are welcome, one-time or monthly. All donations support the project.
 
 [![Buy me a coffee on Ko-fi](https://img.shields.io/badge/Buy%20me%20a%20coffee-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/redweasel)
 
