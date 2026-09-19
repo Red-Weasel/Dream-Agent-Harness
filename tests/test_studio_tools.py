@@ -111,6 +111,8 @@ async def test_the_page_tools_refuse_missing_and_non_html_files(ws):
     for t in (show_html, show_to_user, done, save_screenshot, multi_screenshot):
         res = await t.handler({"path": "nope.html", "steps": [{"code": "1"}]})
         assert _failed(res) and "No file" in _text(res), t.name
+        if t is done:
+            continue  # done accepts any existing deliverable (Dream fix #20); previewing still needs HTML
         res = await t.handler({"path": "notes.txt", "steps": [{"code": "1"}]})
         assert _failed(res) and "not an HTML" in _text(res), t.name
     assert _failed(await show_html.handler({}))
@@ -286,3 +288,14 @@ async def test_a_model_builds_a_deck_from_the_starter_and_screenshots_three_slid
         with Image.open(f) as im:
             assert im.size == (VIEWPORT["width"], VIEWPORT["height"])
     assert len({f.read_bytes() for f in files}) == 3
+
+
+async def test_done_with_a_non_html_deliverable_is_not_a_failure(ws):
+    """Dream fix #20: a HANDOFF.md passed to done made a finished turn end as
+    delivery_failed. The file is the deliverable; it just is not previewed."""
+    tmp, emitted = ws
+    (tmp / "HANDOFF.md").write_text("# Handoff\n")
+    out = await done.handler({"path": "HANDOFF.md"})
+    assert not out.get("is_error")
+    text = out["content"][0]["text"]
+    assert "Delivered" in text and "not previewed" in text

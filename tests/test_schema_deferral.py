@@ -236,6 +236,7 @@ def _one_fat_tool(calls=None):
 async def test_lookup_returns_the_real_schema_and_pins_it_from_then_on():
     calls: list = []
     b = _backend(_one_fat_tool(calls))
+    b._stable_tool_list = lambda: False  # a remote provider: reveals and per-turn relevance update the list
     b._client = _FakeClient([
         _tool_round(tbs.LOOKUP_TOOL_NAME, '{"name": "fetch_moon_phase"}'),
         _tool_round("fetch_moon_phase", '{"p0": "x"}'),
@@ -369,3 +370,38 @@ async def test_a_used_tool_earns_its_place_from_the_store(monkeypatch):
     [ev async for ev in b.ask("hi")]
     sent = _sent_names(b._client.payloads[0])
     assert "fat_b" in sent and "fat_a" not in sent  # usage beat the name tie-break
+
+
+
+async def test_a_local_backend_keeps_one_tool_list_for_the_session():
+    """Dream fix #1/#15: on a local server (prompt cache) the tools render right
+    after the system text, so the sent list must not change between requests:
+    per-turn relevance, and a schema fetched with tool_schema, would re-read the
+    whole conversation. The fetched tool stays callable through its result."""
+    calls: list = []
+    b = _backend(_one_fat_tool(calls))
+    assert b._stable_tool_list()
+    b._client = _FakeClient([
+        _tool_round(tbs.LOOKUP_TOOL_NAME, '{"name": "fetch_moon_phase"}'),
+        _tool_round("fetch_moon_phase", '{"p0": "x"}'),
+        _text_round(),
+    ])
+    [ev async for ev in b.ask("what phase is the moon in?")]
+    first = _sent_names(b._client.payloads[0])
+    assert "fetch_moon_phase" not in first
+    assert all(_sent_names(p) == first for p in b._client.payloads)   # byte-stable across rounds
+    assert calls, "the revealed tool still ran"
+    b.prepare_turn(["fetch_moon_phase"])                                 # next turn's relevance
+    b._client = _FakeClient([_text_round()])
+    [ev async for ev in b.ask("and tomorrow?")]
+    assert _sent_names(b._client.payloads[0]) == first
+
+
+def test_a_local_list_is_rechosen_only_when_its_inputs_change():
+    b = _backend(_fat_toolset(), n_ctx=20000)
+    first = b._request_tools()
+    b._revealed.add(next(s["function"]["name"] for s in b.tool_schemas
+                         if s["function"]["name"] not in _sent_names({"tools": first})))
+    assert b._request_tools() == first
+    b.n_ctx = 60000
+    assert b._request_tools() != first    # a different window is a different budget

@@ -138,6 +138,7 @@ def test_final_catalog_arrays_respect_budget_boundaries(text):
 
 def test_cache_tracks_changed_schema_window_fraction_and_reveals():
     b = backend(description="a" * 1300)
+    b._stable_tool_list = lambda: False  # a remote provider: reveals and per-turn relevance update the list
     # Same number of characters; bytes and membership change.
     b.n_ctx = 8192
     assert b._request_tools() == b.tool_schemas

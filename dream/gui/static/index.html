@@ -310,6 +310,7 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
   </div>
   <div class="hint">
     <span>⏎ send · ⇧⏎ newline</span><span>one session, two views</span>
+    <span id="perf" title="Last request: prompt reading speed, generation speed, and how full the context window is"></span>
     <span id="counts"></span>
   </div>
 </footer>
@@ -489,9 +490,10 @@ function handle(m){
       if(!thinking){
         thinking = feed.thinking(stream);
       }
-      feed.appendText(thinking.querySelector('div'), m.data); scroll();
+      feed.thought(thinking, m.data); scroll();
       break;
     }
+    case 'stats': perf(m.data); break;
     case 'assistant_done': endTurn(); break;
     case 'tool_use': {
       endTurn();
@@ -501,6 +503,7 @@ function handle(m){
       }
       const el = feed.tool(stream, d); companion?.message?.();
       if(d.id) tools.set(d.id, el);
+      if(!replayingHistory) noteFile(name, d.input || {});
       nTool++; counts(); scroll();
       break;
     }
@@ -549,6 +552,12 @@ function handle(m){
     case 'error':  sysline(String(m.data ?? ''), 'error'); busy(false); break;
     case 'result': {
       endTurn(); busy(false);
+      if(!replayingHistory && turnFiles.size){
+        // What this turn changed on disk, in one line (the terminal already tallies it).
+        const list = [...turnFiles].map(([p, how]) => `${how} ${p.split('/').slice(-2).join('/')}`);
+        sysline(`Files this turn: ${list.slice(0, 12).join(', ')}${list.length > 12 ? ` … +${list.length - 12} more` : ''}`);
+        turnFiles.clear();
+      }
       if(m.data?.subtype === 'length'){
         const notice = document.createElement('div'); notice.className = 'sys incomplete-answer';
         notice.textContent = 'This answer reached the output limit and may be incomplete. ';
@@ -556,6 +565,17 @@ function handle(m){
         more.onclick = async () => {
           more.disabled = true;
           const sent = await postPrompt('Continue the interrupted answer from where you stopped. Check existing results first; do not repeat completed actions.');
+          if(!sent) more.disabled = false;
+        };
+        notice.appendChild(more); stream.appendChild(notice); scroll();
+      } else if(m.data?.subtype === 'tool_round_limit'){
+        // The per-turn step budget ran out; the work so far is real (Dream fix #19).
+        const notice = document.createElement('div'); notice.className = 'sys incomplete-answer';
+        notice.textContent = 'This turn used its tool-step budget. ';
+        const more = document.createElement('button'); more.textContent = 'Continue';
+        more.onclick = async () => {
+          more.disabled = true;
+          const sent = await postPrompt('Continue from where you stopped. Check existing results first; do not repeat completed actions.');
           if(!sent) more.disabled = false;
         };
         notice.appendChild(more); stream.appendChild(notice); scroll();
@@ -575,6 +595,27 @@ function finishTools(label){
 }
 
 function counts(){ $('counts').textContent = `${nMsg} replies · ${nTool} tool calls`; }
+const turnFiles = new Map();
+function noteFile(name, input){
+  const how = {write_file: input.append ? 'appended' : 'wrote', Write: 'wrote', str_replace_edit: 'edited', Edit: 'edited',
+               MultiEdit: 'edited', delete_file: 'deleted', copy_files: 'copied'}[name];
+  if(!how) return;
+  const paths = [input.path, input.file_path, ...(Array.isArray(input.paths) ? input.paths : []), input.dest].filter(p => typeof p === 'string' && p);
+  for(const p of paths) if(!turnFiles.has(p)) turnFiles.set(p, how);
+}
+// The last request's speed and context use, like a local runner's status line.
+function perf(s){
+  if(!s) return;
+  const fresh = Math.max(0, (s.prompt_tokens ?? s.pp_n) - (s.cached || 0));
+  const parts = [];
+  if(s.pp_ms > 0 && fresh > 0) parts.push(`prefill ${Math.round(fresh * 1000 / s.pp_ms).toLocaleString()} tok/s`);
+  if(s.gen_ms > 0 && s.gen_n > 0) parts.push(`decode ${(s.gen_n * 1000 / s.gen_ms).toFixed(1)} tok/s`);
+  if(s.prompt_tokens && s.window){
+    const cached = s.cached ? ` (${Math.round(s.cached / 1000)}K cached)` : '';
+    parts.push(`context ${s.prompt_tokens.toLocaleString()} / ${s.window.toLocaleString()}${cached}`);
+  }
+  $('perf').textContent = parts.join(' · ');
+}
 function busy(on){ working = on; if($('send')) $('send').textContent = on ? 'Queue' : 'Send'; if($('steer')) $('steer').hidden = !on; if($('stop')) $('stop').hidden = !on; $('dot').className = 'dot ' + (on ? 'busy' : (socket && socket.readyState===1 ? 'on':'off'));
   $('stat').textContent = on ? 'working' : (socket && socket.readyState===1 ? 'live' : 'offline');
   companion?.status(on);

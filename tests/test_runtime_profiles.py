@@ -55,7 +55,11 @@ def test_small_context_real_tools_and_discovery_fit(window):
     deferred = next(iter(b._deferred_now))
     text, failed = b._lookup_tool_schema(deferred)
     assert not failed and json.loads(text)["name"] == deferred
-    assert deferred in {s["function"]["name"] for s in b._request_tools()}
+    sent_now = {s["function"]["name"] for s in b._request_tools()}
+    if b._stable_tool_list():
+        assert deferred not in sent_now   # local: the list stays fixed; the schema came in the result (Dream fix #15)
+    else:
+        assert deferred in sent_now
     report = b._admit_request(b.messages + [{"role": "user", "content": "Build and verify a web page."}], b._request_tools())
     assert report.remaining >= 0 and report.tools > 0 and report.instructions > 0
 

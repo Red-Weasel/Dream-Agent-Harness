@@ -21,3 +21,8 @@
 .agent-name { min-width:0; overflow-wrap:anywhere; }
 
 .agent-status-detail { margin:6px 0 12px; color:var(--dim); font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; max-height:140px; overflow:auto; }
+
+/* a collapsed thinking block shows its latest line (Dream fix #21) */
+.think > summary .think-live { opacity:.7; font-style:italic; }
+.think:not([open]) > summary { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.think[open] > summary .think-live { display:none; }

@@ -120,8 +120,9 @@ async def show_html(args: dict[str, Any]) -> dict[str, Any]:
         logs = await _load(p)
     except RuntimeError as e:
         return err(str(e))
+    note = get_preview().renderer_note()
     return ok(f"Loaded {p} in the hidden frame ({(time.monotonic() - t0) * 1000:.0f} ms): "
-              + _summarize(logs)
+              + _summarize(logs) + (f"\n{note}" if note else "")
               + "\nThis preview is not shown in the user's Studio. When ready to share it, "
                 "call show_to_user with this HTML path; use done for final delivery. "
                 "If the needed signature is deferred, load it once with tool_schema.")
@@ -177,6 +178,14 @@ async def show_to_user(args: dict[str, Any]) -> dict[str, Any]:
      "required": ["path"]},
 )
 async def done(args: dict[str, Any]) -> dict[str, Any]:
+    raw = args.get("path")
+    other = _resolve(str(raw)) if raw else None
+    if other is not None and other.is_file() and other.suffix.lower() not in _RENDERABLE:
+        # A handoff doc, a script, data: the deliverable is the file on disk. It is
+        # not previewed, and a non-HTML deliverable is not a failed turn (live, a
+        # HANDOFF.md turned a finished turn into "delivery_failed", Dream fix #20).
+        return ok(f"Delivered {other} ({other.stat().st_size:,} bytes). Only HTML/SVG render in "
+                  "the Studio panel, so this file is not previewed; it is on disk for the user.")
     p, bad = _page(args)
     if bad:
         return bad

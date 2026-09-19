@@ -1687,7 +1687,7 @@ class App(CouncilControls):
                 if not capability.available:
                     raise ValueError("Cannot enable red-team scope: " + capability.reason)
             else:
-                scope = ExecutionScope(self.workspace)
+                scope = ExecutionScope(self.workspace, network=True)
                 capability = await probe_sandbox(scope)
             self.engine.execution_scope = scope
             self.engine.execution_capability = capability

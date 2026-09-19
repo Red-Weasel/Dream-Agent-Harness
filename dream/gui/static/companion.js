@@ -100,7 +100,7 @@ if(COMPANION){
     $('studio-new').onclick = () => postPrompt('/new');
     $('studio-skills').onclick = () => window.DreamLibrary?.show('skills');
 
-    document.querySelector('footer .hint').innerHTML = '<span>Enter to send · Shift+Enter for a new line</span><span id="counts"></span>';
+    document.querySelector('footer .hint').innerHTML = '<span>Enter to send · Shift+Enter for a new line</span><span id="perf" title="Last request: prompt reading speed, generation speed, and how full the context window is"></span><span id="counts"></span>';
     document.querySelector('footer .hint').insertAdjacentHTML('afterbegin', '<button id="chat-mode" type="button" title="Shift+Tab cycles permission mode" aria-label="Cycle permission mode" aria-live="polite">Mode unavailable</button>');
     let modePending = false;
     async function permissionMode(cycle = false){

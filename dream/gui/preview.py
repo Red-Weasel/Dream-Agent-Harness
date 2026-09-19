@@ -13,6 +13,7 @@ browser does.
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,28 @@ from typing import Any
 from .. import config
 
 VIEWPORT = {"width": 1280, "height": 800}
+# With GPU rendering a loaded page costs ~0.3 of a core, so it stays loaded across
+# a slow local model's steps (minutes each) instead of reloading for every check.
+GPU_IDLE_S = 1800
+_RENDERER_JS = """() => { const gl = document.createElement('canvas').getContext('webgl');
+  if (!gl) return 'none'; const e = gl.getExtension('WEBGL_debug_renderer_info');
+  return e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER); }"""
+
+
+def display_render_node() -> str | None:
+    """The render node of the GPU that drives the displays (boot_vga), so WebGL in
+    the hidden frame runs on that GPU. Chromium's default is SwiftShader on the CPU:
+    a three.js page took ~13 cores there and halved a local model's decode speed
+    (Dream fix #5). Never a card a local model sits on, unless it is the display's."""
+    if sys.platform != "linux":
+        return None
+    for node in sorted(Path("/dev/dri").glob("renderD*")):
+        try:
+            if (Path("/sys/class/drm") / node.name / "device" / "boot_vga").read_text().strip() == "1":
+                return str(node)
+        except OSError:
+            continue
+    return None
 LOAD_TIMEOUT_MS = 15_000
 # Under Playwright's own 30 s default on purpose: when both fire, ours must win,
 # so the model reads "the page was reset — reload", not a navigation error.
@@ -63,6 +86,9 @@ class Preview:
         self._expecting_page = False
         self.last_used = 0.0
         self.loaded: Path | None = None
+        # What WebGL renders with in this frame, told to the model with every load.
+        self.renderer = ""
+        self.gpu = False
         self.logs: list[str] = []
         self.blocked: list[str] = []
         # PNG captures stashed by key for a later `run_script` (Phase 7).
@@ -89,8 +115,21 @@ class Preview:
             # A page can then read local files into itself — the same reads the
             # model already has for free — but still cannot send them anywhere:
             # the network stays blocked.
-            self._browser = await self._pw.chromium.launch(
-                headless=True, args=["--allow-file-access-from-files"])
+            node = display_render_node()
+            if node:
+                self._browser = await self._pw.chromium.launch(
+                    headless=True, ignore_default_args=["--disable-gpu"],
+                    args=["--allow-file-access-from-files", "--enable-gpu", "--ignore-gpu-blocklist",
+                          "--use-gl=angle", "--use-angle=gl-egl", f"--render-node-override={node}"])
+                self.renderer = await self._probe_renderer()
+                if self.renderer == "none" or "swiftshader" in self.renderer.lower():
+                    await self._browser.close()      # the GPU path did not come up
+                    node = None
+            if not node:
+                self._browser = await self._pw.chromium.launch(
+                    headless=True, args=["--allow-file-access-from-files"])
+                self.renderer = await self._probe_renderer()
+            self.gpu = bool(node)
             self._context = await self._browser.new_context(viewport=VIEWPORT)
             await self._context.route("**/*", self._route)
             # A popup is a second page nothing will ever look at. Close it.
@@ -98,6 +137,26 @@ class Preview:
             self._page = await self._new_page()
         if self._reaper is None or self._reaper.done():
             self._reaper = asyncio.create_task(self._reap_loop())
+
+    async def _probe_renderer(self) -> str:
+        try:
+            page = await self._browser.new_page()
+            try:
+                return str(await page.evaluate(_RENDERER_JS))
+            finally:
+                await page.close()
+        except Exception as e:
+            return f"unknown ({type(e).__name__})"
+
+    def renderer_note(self) -> str:
+        """One line for the model: which GPU the frame's WebGL timings describe."""
+        if not self.renderer:
+            return ""
+        if "swiftshader" in self.renderer.lower():
+            return ("WebGL renderer: SwiftShader — software rendering on the CPU. Frame rates and "
+                    "timings here are far below a real GPU; do not budget quality against them.")
+        return (f"WebGL renderer: {self.renderer} — the preview's GPU, not necessarily the "
+                "viewer's; treat frame rates as a rough guide.")
 
     async def _new_page(self) -> Any:
         self._expecting_page = True
@@ -178,6 +237,8 @@ class Preview:
         idle = config.BROWSER_IDLE_SHUTDOWN_S
         if idle <= 0:
             return
+        if self.gpu:
+            idle = max(idle, GPU_IDLE_S)
         try:
             while self._page is not None:
                 await asyncio.sleep(min(idle, 30))

@@ -57,14 +57,15 @@ async def read_file(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "write_file",
-    "Write (create or overwrite) a text file with the given content. For a design "
-    "deliverable, `asset` registers it as a version of that named asset (see "
-    "register_assets); omit for support files.",
+    "Write (create or overwrite) a text file; `append` adds to its end (write big "
+    "files in ~300-line parts). For a design deliverable, `asset` registers it as a "
+    "version of that named asset (see register_assets); omit for support files.",
     {
         "type": "object",
         "properties": {
             "path": {"type": "string"},
             "content": {"type": "string"},
+            "append": {"type": "boolean"},
             "asset": {"type": "string"},
             "group": {"type": "string", "enum": ["Type", "Colors", "Spacing", "Components", "Brand"]},
         },
@@ -76,13 +77,19 @@ async def write_file(args: dict[str, Any]) -> dict[str, Any]:
     if not raw:
         return err("write_file needs a 'path' argument.")
     content = args.get("content", "")
+    append = args.get("append") is True
     p = _resolve(raw)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
+        if append:
+            with p.open("a", encoding="utf-8") as f:
+                f.write(content)
+        else:
+            p.write_text(content, encoding="utf-8")
     except Exception as e:
         return err(f"{type(e).__name__}: {e}")
-    note = f"Wrote {len(content)} chars to {p}"
+    note = (f"Appended {len(content)} chars to {p} (now {p.stat().st_size:,} bytes)" if append
+            else f"Wrote {len(content)} chars to {p}")
     asset = str(args.get("asset") or "").strip()
     if asset:
         from .context import in_thread
@@ -187,7 +194,9 @@ def _describe_run(command: str, rc: int, text: str) -> str:
     "Run a bash command and return its combined stdout/stderr. Verified workspace "
     "containment is a prerequisite for routine contained commands; consequential actions "
     "require approval. An unavailable execution prerequisite cannot be fixed by rewriting "
-    "the command. "
+    "the command. The sandbox sees only this workspace; it has public internet through "
+    "a proxy (HTTP_PROXY/HTTPS_PROXY are set: curl, wget, pip, npm and git use them), "
+    "while this machine's own services (localhost) and the local network are unreachable. "
     "Avoid '2>/dev/null': suppressing errors hides the reason a "
     "command did nothing, which is the single most common way to get stuck.",
     {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},

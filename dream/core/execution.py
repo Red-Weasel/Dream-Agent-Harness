@@ -6,8 +6,9 @@ their own boundary. Context and approvals are supplied by the harness, never by
 model tool arguments. No environment variable can enable red-team or host access.
 
 Bubblewrap options follow https://github.com/containers/bubblewrap/blob/v0.9.0/bwrap.xml.
-Only explicit filesystem mounts are exposed. Network, host processes, devices,
-agent sockets, and the host home directory are absent by default.
+Only explicit filesystem mounts are exposed. The host network, host processes,
+devices, agent sockets, and the host home directory are absent. A scope with
+network=True reaches the public internet only, through sandbox_net's proxy.
 Each invocation has a private /tmp (including HOME=/tmp/home). Those files vanish
 when its process tree exits; use a workspace path for persistent output.
 """
@@ -20,11 +21,12 @@ import errno
 import math
 import os
 import signal
+import socket
 import stat
 import sys
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -96,7 +98,7 @@ class ExecutionScope:
     red_team: bool = False
     target_roots: tuple[Path, ...] = ()
     expires_at: float | None = None  # time.monotonic(); mandatory for red-team
-    network: bool = False  # target-filtered network access is not implemented
+    network: bool = False  # run_bash reaches public internet hosts via sandbox_net
 
     def __post_init__(self) -> None:
         ws = Path(self.workspace).expanduser().resolve()
@@ -116,8 +118,6 @@ class ExecutionScope:
     def validate(self) -> None:
         if self.expires_at is not None and time.monotonic() >= self.expires_at:
             raise ExecutionRefused("execution scope expired")
-        if self.network:
-            raise ExecutionRefused("scoped network enforcement is unavailable; host network is not a fallback")
         if not self.workspace.is_dir():
             raise ExecutionRefused("execution workspace does not exist")
         # Mounting a host root or credential/runtime socket tree defeats isolation.
@@ -202,7 +202,7 @@ def current_execution(workspace: Path) -> ExecutionContext:
 
 
 def _bwrap_argv(scope: ExecutionScope, executable: str, command: Sequence[str], *,
-                seccomp_fd: int, mount_fds: Mapping[Path, int]) -> list[str]:
+                seccomp_fd: int, mount_fds: Mapping[Path, int], net_fd: int | None = None) -> list[str]:
     scope.validate()
     argv = [executable, "--unshare-user", "--unshare-pid", "--unshare-net", "--unshare-ipc",
             "--unshare-uts", "--disable-userns", "--die-with-parent", "--new-session",
@@ -220,6 +220,14 @@ def _bwrap_argv(scope: ExecutionScope, executable: str, command: Sequence[str], 
         if not _trusted_runtime_directory(alternatives):
             raise ExecutionRefused("untrusted runtime alternatives directory")
         argv += ["--ro-bind", str(alternatives), str(alternatives)]
+    if net_fd is not None:
+        # TLS clients need the CA store; the private key directory stays out.
+        if _trusted_runtime_directory(Path("/etc/ssl/certs")):
+            argv += ["--ro-bind", "/etc/ssl/certs", "/etc/ssl/certs"]
+        if _trusted_system_file(Path("/etc/ssl/openssl.cnf")):
+            argv += ["--ro-bind", "/etc/ssl/openssl.cnf", "/etc/ssl/openssl.cnf"]
+        from .sandbox_net import FORWARDER_SOURCE
+        command = [_SUPERVISOR_PYTHON, "-I", "-c", FORWARDER_SOURCE, str(net_fd), "--", *command]
     argv += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--dir", "/tmp/home"]
     for root in scope.read_roots:
         if scope.workspace.is_relative_to(root):
@@ -270,12 +278,14 @@ def _mount_descriptors(scope: ExecutionScope) -> Iterator[dict[Path, int]]:
 
 
 @contextmanager
-def _socket_filter() -> Iterator[int]:
+def _socket_filter(inet: bool = False) -> Iterator[int]:
     """Block socket creation, including host Unix sockets in a bound workspace.
 
     Network namespaces alone do not stop filesystem Unix sockets. io_uring can
     create sockets without the socket syscall, so that API is disabled too.
     Private socketpair IPC remains available. libseccomp rejects alternate ABIs.
+    inet admits AF_INET/AF_INET6 only: inside the sandbox's own network
+    namespace they reach its loopback and nothing else.
     """
     try:
         # Avoid find_library's fallback to executing PATH-selected compiler tools.
@@ -295,9 +305,19 @@ def _socket_filter() -> Iterator[int]:
     try:
         for syscall in (b"socket", b"io_uring_setup"):
             number = lib.seccomp_syscall_resolve_name(syscall)
-            if number < 0 or lib.seccomp_rule_add_array(context, 0x00050000 | errno.EPERM,
-                                                      number, 0, None) != 0:
+            if number < 0:
                 raise ExecutionRefused("could not enforce the required socket filter")
+            if syscall == b"socket" and inet:
+                # Refuse every domain but 2 and 10 (the whole 64-bit register is
+                # compared, so high bits cannot smuggle AF_UNIX past GT 10).
+                rules = [(_SCMP_CMP_LT, 2), (_SCMP_CMP_GT, 10), *((_SCMP_CMP_EQ, d) for d in range(3, 10))]
+            else:
+                rules = [None]
+            for rule in rules:
+                arg = None if rule is None else ctypes.byref(_ScmpArgCmp(0, rule[0], rule[1], 0))
+                if lib.seccomp_rule_add_array(context, 0x00050000 | errno.EPERM,
+                                              number, 0 if rule is None else 1, arg) != 0:
+                    raise ExecutionRefused("could not enforce the required socket filter")
         with tempfile.TemporaryFile() as file:
             if lib.seccomp_export_bpf(context, file.fileno()) != 0:
                 raise ExecutionRefused("could not export the required syscall filter")
@@ -305,6 +325,36 @@ def _socket_filter() -> Iterator[int]:
             yield file.fileno()
     finally:
         lib.seccomp_release(context)
+
+
+_SCMP_CMP_LT, _SCMP_CMP_EQ, _SCMP_CMP_GT = 2, 4, 6  # enum scmp_compare
+
+
+class _ScmpArgCmp(ctypes.Structure):
+    _fields_ = [("arg", ctypes.c_uint), ("op", ctypes.c_int),
+                ("datum_a", ctypes.c_uint64), ("datum_b", ctypes.c_uint64)]
+
+
+@asynccontextmanager
+async def _network_proxy(enabled: bool):
+    """The sandbox end of sandbox_net's control channel, served while in use."""
+    if not enabled:
+        yield None
+        return
+    from . import sandbox_net
+    ours, theirs = socket.socketpair()
+    ours.setblocking(False)
+    task = asyncio.create_task(sandbox_net.serve(ours))
+    try:
+        yield theirs.fileno()
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        ours.close()
+        theirs.close()
 
 
 @dataclass(frozen=True)
@@ -463,10 +513,14 @@ async def execute_bash(command: str, context: ExecutionContext, *, timeout: floa
         result = await run_owned(argv, cwd=scope.workspace, env=minimal_environment(),
                                  timeout=timeout, max_output=max_output)
     else:
-        with _socket_filter() as fd, _mount_descriptors(scope) as mounts:
-            argv = _bwrap_argv(scope, capability.executable, argv, seccomp_fd=fd, mount_fds=mounts)
-            result = await run_owned(argv, cwd=scope.workspace, env=minimal_environment(),
-                                     timeout=timeout, max_output=max_output, pass_fds=(fd, *mounts.values()))
+        async with _network_proxy(scope.network) as net_fd:
+            with _socket_filter(inet=net_fd is not None) as fd, _mount_descriptors(scope) as mounts:
+                argv = _bwrap_argv(scope, capability.executable, argv, seccomp_fd=fd,
+                                   mount_fds=mounts, net_fd=net_fd)
+                extra = () if net_fd is None else (net_fd,)
+                result = await run_owned(argv, cwd=scope.workspace, env=minimal_environment(),
+                                         timeout=timeout, max_output=max_output,
+                                         pass_fds=(fd, *mounts.values(), *extra))
     return result, not uncontained
 
 

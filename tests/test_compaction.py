@@ -337,9 +337,10 @@ async def test_huge_tool_call_arguments_are_capped_on_the_way_in():
     grew monotonically and compaction could not touch it.
 
     The window is deliberately roomy so compaction never runs: this pins the
-    ENTRY cap alone. `_head` is the fingerprint that separates them — only the
-    entry cap keeps a head, elision drops it — so asserting it is what makes
-    this test fail if the cap is removed and elision picks up the slack."""
+    ENTRY cap alone. The kept head of the long value is the fingerprint that
+    separates them — only the entry cap keeps a head, elision drops it — so
+    asserting it is what makes this test fail if the cap is removed and elision
+    picks up the slack. Short fields (the path) survive both."""
     big = "z" * 200_000
 
     async def handler(args):
@@ -359,7 +360,8 @@ async def test_huge_tool_call_arguments_are_capped_on_the_way_in():
     assert len(stored) < len(big) // 10
     cut = json.loads(stored)  # still valid JSON — a strict server may parse it
     assert cut["_elided_chars"] > 200_000 - 1
-    assert cut["_head"].startswith("{\"path\"")  # entry cap, not elision
+    assert cut["path"] == "x.txt"  # which file, even after the cut
+    assert cut["content"].startswith("z" * 400) and cut["content"].endswith("chars elided]")  # entry cap, not elision
 
 
 async def test_a_session_of_big_writes_stays_inside_the_window():
@@ -429,3 +431,17 @@ async def test_an_elided_user_message_keeps_its_id_so_it_can_still_be_snipped():
     assert ids == [f"m{n:04d}" for n in range(1, 7)]
     text, bad = b._register_snip({"from_id": "m0001", "to_id": "m0002"})
     assert not bad, text
+
+
+
+def test_elided_call_arguments_keep_the_path():
+    """Dream fix #13: compaction used to replace a write_file call's arguments
+    with {"_elided_chars": N}, so the model no longer knew which files it had
+    written and wrote them again. Short fields survive; long values are cut."""
+    msg = {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {
+        "name": "write_file", "arguments": json.dumps({"path": "falcon9/textures.js", "content": "x" * 20000,
+                                                       "append": False})}}]}
+    assert openai_compat._elide_args(msg) == 1
+    cut = json.loads(msg["tool_calls"][0]["function"]["arguments"])
+    assert cut["path"] == "falcon9/textures.js" and cut["append"] is False
+    assert cut["content"] == "[20,000 chars elided]" and cut["_elided_chars"] > 20000

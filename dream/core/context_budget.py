@@ -59,21 +59,23 @@ class ContextReport:
 
 
 def account(messages: Sequence[dict], tools: Sequence[dict], window: int, output: int,
-            *, counter: Callable[[Any], int] = estimate, margin: int = 512) -> ContextReport:
+            *, counter: Callable[[Any], int] = estimate, margin: int = 512,
+            method: str | None = None) -> ContextReport:
     system = [m for m in messages if m.get("role") in {"system", "developer"}]
     history = [m for m in messages if m.get("role") not in {"system", "developer"}]
     return ContextReport(window, counter(system), counter(history), counter(tools), output,
                          min(margin, max(64, window // 16)),
-                         "provider counter" if counter is not estimate else "estimated UTF-8 bytes / 3.5; 4096 tokens per image (provider dependent)")
+                         method or ("provider counter" if counter is not estimate else "estimated UTF-8 bytes / 3.5; 4096 tokens per image (provider dependent)"))
 
 
 def admit(messages: Sequence[dict], tools: Sequence[dict], window: int, output: int,
-          *, minimum_output: int = 256) -> ContextReport:
-    report = account(messages, tools, window, output)
+          *, minimum_output: int = 256, counter: Callable[[Any], int] = estimate,
+          method: str | None = None) -> ContextReport:
+    report = account(messages, tools, window, output, counter=counter, method=method)
     if report.remaining < 0:
         available = window - report.input_tokens - report.margin
         if available >= minimum_output:
-            report = account(messages, tools, window, min(output, available))
+            report = account(messages, tools, window, min(output, available), counter=counter, method=method)
         else:
             raise ContextOverflow(
                 f"Context needs about {report.input_tokens + report.margin + minimum_output:,} tokens "

@@ -127,6 +127,8 @@ async def test_search_finds_by_what_a_tool_does_not_only_its_name():
 
 async def test_a_looked_up_tool_stays_loaded_only_for_current_turn():
     b, first = await _sent(16384)
+    b._stable_tool_list = lambda: False  # a remote provider: reveals and per-turn relevance update the list
+    b._stable_tools = None
     hatch = next(s for s in first if s["function"]["name"] == tbs.LOOKUP_TOOL_NAME)
     name = hatch["function"]["parameters"]["properties"]["name"]["enum"][0]
     b._lookup_tool_schema(name)

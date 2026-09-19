@@ -255,7 +255,7 @@ async def test_blocked_native_attempt_discards_its_host_approval(tmp_path, nativ
     assert not (tmp_path / "marker").exists()
 
 
-def test_scope_is_explicit_expiring_and_cannot_enable_host_network(tmp_path):
+def test_scope_is_explicit_and_expiring(tmp_path):
     target = tmp_path / "target"
     target.mkdir()
     with pytest.raises(ValueError):
@@ -264,8 +264,6 @@ def test_scope_is_explicit_expiring_and_cannot_enable_host_network(tmp_path):
         ex.ExecutionScope(tmp_path, red_team=True, target_roots=(tmp_path,), expires_at=time.monotonic()+10)
     with pytest.raises(ex.ExecutionRefused, match="expired"):
         ex.ExecutionScope(tmp_path, red_team=True, target_roots=(target,), expires_at=0).validate()
-    with pytest.raises(ex.ExecutionRefused, match="network"):
-        ex.ExecutionScope(tmp_path, network=True).validate()
     for expiry in (float("inf"), float("nan")):
         with pytest.raises(ValueError, match="finite"):
             ex.ExecutionScope(tmp_path, red_team=True, target_roots=(target,), expires_at=expiry)
@@ -311,6 +309,27 @@ def test_auto_routines_require_actual_executor_capability(tmp_path, command):
                          execution_scope=scope, execution_capability=cap)[0] == "allow"
     assert policy.decide("run_bash", {"command": command}, "plan", tmp_path,
                          execution_scope=scope, execution_capability=cap)[0] == "deny"
+
+
+@pytest.mark.parametrize("command", ["curl https://example.test", "wget -q https://example.test/a.tgz",
+                                     "timeout 30 curl -sS https://example.test | tar xz"])
+def test_network_scope_makes_contained_downloads_routine(tmp_path, command):
+    scope = ex.ExecutionScope(tmp_path, network=True)
+    cap = ex.SandboxCapability(True, "fixture", scope, "/usr/bin/bwrap")
+    assert policy.decide("run_bash", {"command": command}, "auto", tmp_path,
+                         execution_scope=scope, execution_capability=cap)[0] == "allow"
+    # Without verified containment a download still asks.
+    assert policy.decide("run_bash", {"command": command}, "auto", tmp_path, execution_scope=scope)[0] == "ask"
+
+
+@pytest.mark.parametrize("command", ["curl https://example.test; rm -rf build",
+                                     "curl https://example.test && git push origin main", "ssh host true",
+                                     "bash -c 'curl https://example.test; sudo true'"])
+def test_network_scope_still_asks_for_everything_else(tmp_path, command):
+    scope = ex.ExecutionScope(tmp_path, network=True)
+    cap = ex.SandboxCapability(True, "fixture", scope, "/usr/bin/bwrap")
+    assert policy.decide("run_bash", {"command": command}, "auto", tmp_path,
+                         execution_scope=scope, execution_capability=cap)[0] == "ask"
 
 
 @pytest.mark.parametrize("command", ["rm -rf build", "env rm -rf build", "git push origin main",
@@ -463,3 +482,74 @@ async def test_real_auto_runs_pytest_with_explicit_readonly_toolchain(tmp_path):
         sys.executable, "-m", "pytest", "-q", "test_answer.py"])
     result, contained = await ex.execute_bash(command, ex.ExecutionContext(scope))
     assert contained and result.returncode == 0 and b"1 passed" in result.output, result.output
+
+
+@pytest.mark.parametrize("address,public", [
+    ("127.0.0.1", False), ("::1", False), ("0.0.0.0", False), ("10.0.0.14", False), ("172.17.0.1", False),
+    ("192.168.1.1", False), ("100.100.100.100", False), ("169.254.169.254", False), ("fe80::1", False),
+    ("fd7a:115c:a1e0::1", False), ("::ffff:127.0.0.1", False), ("224.0.0.1", False),
+    ("1.1.1.1", True), ("2606:4700:4700::1111", True)])
+def test_network_proxy_admits_only_global_addresses(address, public):
+    from dream.core import sandbox_net
+    assert sandbox_net._public(address) is public
+
+
+@pytest.mark.asyncio
+async def test_real_network_scope_keeps_the_boundary_and_reaches_only_public_hosts(tmp_path, monkeypatch):
+    from dream.core import sandbox_net
+    workspace, outside = tmp_path / "workspace", tmp_path / "outside"
+    workspace.mkdir(); outside.mkdir()
+    sentinel = outside / "sentinel"
+    sentinel.write_text("untouched")
+    (workspace / "escape").symlink_to(outside, target_is_directory=True)
+    scope = ex.ExecutionScope(workspace, read_roots=(outside,), network=True)
+    await real_capability(scope)
+    requests = []
+
+    async def host_service(reader, writer):
+        requests.append(await reader.readuntil(b"\r\n\r\n"))
+        writer.write(b"HTTP/1.0 200 OK\r\nContent-Length: 11\r\n\r\nhost-served")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(host_service, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    host_socket = socket.socket(socket.AF_UNIX)
+    host_socket.bind(str(workspace / "host.sock"))
+    try:
+        (workspace / "probe.py").write_text(f'''
+import os, socket, sys, urllib.error, urllib.request
+from pathlib import Path
+for fd in range(3, 256):
+    try: os.fstat(fd)
+    except OSError: pass
+    else: raise AssertionError("host descriptor leaked: " + str(fd))
+for name in ["escape/sentinel", {str(sentinel)!r}, "/etc/host-escape"]:
+    try: Path(name).write_text("escaped")
+    except OSError: pass
+    else: raise AssertionError("outside write allowed: " + name)
+for family in [socket.AF_UNIX, socket.AF_NETLINK, socket.AF_PACKET]:
+    try: socket.socket(family, socket.SOCK_RAW if family != socket.AF_UNIX else socket.SOCK_STREAM)
+    except PermissionError: pass
+    else: raise AssertionError("socket boundary escaped")
+try: socket.create_connection(("127.0.0.1", {port}), timeout=3)
+except ConnectionRefusedError: pass
+else: raise AssertionError("host loopback reachable directly")
+os.environ.pop("no_proxy"); os.environ.pop("NO_PROXY")  # force the proxy for 127.0.0.1
+proxy = urllib.request.build_opener(urllib.request.ProxyHandler({{"http": os.environ["HTTP_PROXY"]}}))
+try: print(proxy.open("http://127.0.0.1:{port}/", timeout=10).read().decode())
+except urllib.error.HTTPError as e: print(e.code, e.read().decode())
+''')
+        result, contained = await ex.execute_bash("/usr/bin/python3 probe.py", ex.ExecutionContext(scope))
+        assert contained and result.returncode == 0, result.output
+        assert b"403 Dream sandbox proxy: 127.0.0.1 is a local or private address" in result.output, result.output
+        assert requests == [] and sentinel.read_text() == "untouched"
+        # The same path relays to an address the policy admits.
+        monkeypatch.setattr(sandbox_net, "_public", lambda address: True)
+        result, contained = await ex.execute_bash("/usr/bin/python3 probe.py", ex.ExecutionContext(scope))
+        assert contained and result.returncode == 0, result.output
+        assert result.output.strip().endswith(b"host-served"), result.output
+        assert len(requests) == 1 and requests[0].startswith(b"GET / HTTP/1.1\r\n")
+    finally:
+        host_socket.close()
+        server.close()

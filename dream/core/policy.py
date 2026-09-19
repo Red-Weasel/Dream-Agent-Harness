@@ -367,11 +367,13 @@ def _shell_parts(command: str) -> list[list[str]]:
     return [p for p in parts if p]
 
 
-def _shell_effect(command: str, workspace: Path) -> tuple[str, list[Path]]:
+def _shell_effect(command: str, workspace: Path, *, network: bool = False) -> tuple[str, list[Path]]:
     """Recognize explicit consequential operations, including common wrappers.
 
     Opaque programs still require OS containment. This detector is deliberately
     not presented as a sandbox, nor does it infer safety from a script's name.
+    network: the command runs contained with public internet, so a plain
+    download (curl, wget) is routine; the rest of the command is still checked.
     """
     try:
         parts = _shell_parts(command)
@@ -398,7 +400,7 @@ def _shell_effect(command: str, workspace: Path) -> tuple[str, list[Path]]:
                     nested.pop(0)
             if verb == "timeout" and nested:
                 nested.pop(0)
-            reason, _ = _shell_effect(shlex.join(nested), workspace)
+            reason, _ = _shell_effect(shlex.join(nested), workspace, network=network)
             if reason:
                 return reason, []
         if verb in {"rm", "rmdir", "unlink", "shred"}:
@@ -416,6 +418,8 @@ def _shell_effect(command: str, workspace: Path) -> tuple[str, list[Path]]:
             if not args or args[0] not in safe or any(
                     a in {"--ext-diff", "--textconv"} or a.startswith("--output") for a in args):
                 return "changes or publishes repository state", []
+        if network and verb in {"curl", "wget"}:
+            continue
         if verb in {"curl", "wget", "ssh", "scp", "sftp", "rsync", "gh", "ftp",
                     "sudo", "su", "doas", "systemctl", "service", "reboot", "shutdown",
                     "mount", "umount", "dd", "mkfs", "fdisk", "wipefs", "kill", "pkill",
@@ -429,7 +433,7 @@ def _shell_effect(command: str, workspace: Path) -> tuple[str, list[Path]]:
         if _names_binary(verb, _INTERPRETERS):
             for i, arg in enumerate(args):
                 if arg in _INLINE_CODE_FLAGS and i + 1 < len(args) and verb in {"bash", "sh", "dash", "zsh"}:
-                    reason, _ = _shell_effect(args[i + 1], workspace)
+                    reason, _ = _shell_effect(args[i + 1], workspace, network=network)
                     if reason:
                         return reason, []
     return "", []
@@ -613,7 +617,8 @@ def decide(
         if mode == "plan":
             return "deny", "plan mode — no commands"
         command = str(tool_input.get("command") or "")
-        effect, deletions = _shell_effect(command, workspace)
+        effect, deletions = _shell_effect(command, workspace,
+                                          network=contained and execution_scope.network)
         if effect:
             if mode == "auto" and contained and execution_scope.allows_deletion(deletions):
                 return "allow", "explicit red-team deletion scope"

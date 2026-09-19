@@ -256,10 +256,8 @@ async def test_a_call_cut_off_mid_write_says_so_instead_of_stopping_silently():
     cut = ('<tool_calls>\n<invoke name="write_file">\n'
            '<parameter name="path" string="true">/tmp/site/index.html</parameter>\n'
            '<parameter name="content" string="true"><!DOCTYPE html><html><body>')
-    b._client = _FakeClient([[
-        _sse({"choices": [{"delta": {"content": cut}, "finish_reason": "length"}]}),
-        "data: [DONE]",
-    ]])
+    cut_round = [_sse({"choices": [{"delta": {"content": cut}, "finish_reason": "length"}]}), "data: [DONE]"]
+    b._client = _FakeClient([cut_round, cut_round])   # the one retry in parts is cut off too
 
     kinds = []
     async for ev in b.ask("build the site"):
@@ -268,6 +266,7 @@ async def test_a_call_cut_off_mid_write_says_so_instead_of_stopping_silently():
     systems = [d for k, d in kinds if k == "system"]
     assert systems, "a truncated tool call must be reported, not swallowed"
     assert "truncat" in systems[0].lower() or "cut off" in systems[0].lower()
+    assert any("in parts" in s for s in systems), "Dream fix #14: one retry in parts"
     result = [d for k, d in kinds if k == "result"][0]
     assert result["subtype"] == "length"
 

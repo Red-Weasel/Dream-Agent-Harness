@@ -38,7 +38,18 @@
     }
     function thinking(parent) {
       const el = detail('think', 'Thinking · reported by the model');
+      el.querySelector('summary').append(node('span', '', 'think-live'));
       el.append(node('div', '')); parent.append(el); return el;
+    }
+    // Append reasoning and show its latest line on the summary, so a collapsed
+    // block still shows the model working (Dream fix #21).
+    function thought(el, delta) {
+      const body = el.querySelector('div');
+      appendText(body, delta);
+      const text = (textState.get(body) || {text: ''}).text;
+      const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+      const live = el.querySelector('summary .think-live');
+      if(live) live.textContent = lines.length ? ' · ' + lines[lines.length - 1].slice(-160) : '';
     }
     function inspectable(parent, label, raw, preview = false) {
       const value = stringify(raw), retained = value.slice(0, MAX_TOOL), truncated = value.length > MAX_TOOL;
@@ -108,7 +119,7 @@
       if(event === 'thinking_delta' || event === 'thinking_report') {
         if(!worker.thinking) { if(worker.count++ >= MAX_ITEMS) return; worker.thinking = thinking(worker.body); }
         if(event === 'thinking_report') worker.thinking.querySelector('summary').textContent = 'Thinking · reported after response';
-        appendText(worker.thinking.querySelector('div'), data.text ?? data.delta ?? data.data);
+        thought(worker.thinking, data.text ?? data.delta ?? data.data);
       } else if(event === 'text_delta') {
         worker.thinking = null;
         if(!worker.answer) { if(worker.count++ >= MAX_ITEMS) return; worker.answer = node('pre', '', 'agent-answer'); worker.body.append(worker.answer); }
@@ -134,7 +145,7 @@
         worker.body.append(node('p', 'Request ' + String(data.request ?? data.request_index ?? '').slice(0, 30), 'agent-request'));
       }
     }
-    return {thinking, appendText, tool, result, activity, reset};
+    return {thinking, thought, appendText, tool, result, activity, reset};
   }
   window.DreamFeed = {mount};
 })();

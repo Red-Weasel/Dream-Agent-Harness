@@ -29,6 +29,7 @@ async def test_mode_changes_only_next_turn_and_restores_baseline():
 
 def test_schema_selection_reuses_identical_inputs_but_invalidates_changes(monkeypatch):
     b = _backend([_tool("read_file"), _tool("other", 20)], n_ctx=8192)
+    b._stable_tool_list = lambda: False  # a remote provider: reveals and per-turn relevance update the list
     calls = []
     original = tool_budget_schemas.select
     def select(*args, **kwargs):

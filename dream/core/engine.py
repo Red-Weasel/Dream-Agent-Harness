@@ -115,7 +115,7 @@ class Engine:
             Path(workspace).expanduser().resolve() if workspace else config.ROOT
         )
         from .execution import ExecutionScope
-        self.execution_scope = ExecutionScope(self.workspace)
+        self.execution_scope = ExecutionScope(self.workspace, network=True)
         self.execution_capability = None
         self.session_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}"
         self.store: MemoryStore | None = None

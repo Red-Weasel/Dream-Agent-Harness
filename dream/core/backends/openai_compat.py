@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -341,13 +342,34 @@ def _clamp(text: str, cap: int) -> str:
     return f"{text[:cap]}\n\n[... {len(text) - cap} chars elided]"
 
 
+def _stub_args(args: str, head: int = 0) -> str:
+    """A tool call's arguments with every long value cut and every short one
+    (a path, a name, a flag) kept, so a stubbed write_file still says WHICH file
+    it wrote. Without that, compaction left `{"_elided_chars": N}` and the model
+    wrote finished files again. `head` keeps the start of each cut value."""
+    try:
+        obj = json.loads(args)
+    except (TypeError, ValueError):
+        obj = None
+    if not isinstance(obj, dict):
+        return json.dumps({"_elided_chars": len(args), **({"_head": args[:head]} if head else {})})
+    out: dict[str, Any] = {"_elided_chars": len(args)}
+    for key, value in obj.items():
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        if len(text) <= 200:
+            out[key] = value
+        else:
+            out[key] = (text[:head] + "…" if head else "") + f"[{len(text):,} chars elided]"
+    return json.dumps(out, ensure_ascii=False)
+
+
 def _clamp_args(args: str) -> str:
     """Cap a tool call's arguments for the history. Stays valid JSON: a strict
     server may parse what it is handed back, so the cut form is an object, not
     a truncated fragment."""
     if len(args) <= _TOOL_RESULT_CAP:
         return args
-    return json.dumps({"_elided_chars": len(args), "_head": args[:400]})
+    return _stub_args(args, head=400)
 
 
 def _elide_args(msg: dict[str, Any]) -> int:
@@ -358,7 +380,7 @@ def _elide_args(msg: dict[str, Any]) -> int:
     for tc in msg.get("tool_calls") or []:
         fn = tc.get("function") or {}
         args = fn.get("arguments") or ""
-        stub = json.dumps({"_elided_chars": len(args)})
+        stub = _stub_args(args)
         if len(args) > len(stub):
             fn["arguments"] = stub
             n += 1
@@ -372,6 +394,7 @@ def _msg_chars(m: dict[str, Any]) -> int:
         n = estimate(content) * 4
     else:
         n = len(content)
+    n += len(m.get("reasoning_content") or "")
     for tc in m.get("tool_calls") or []:
         fn = tc.get("function") or {}
         n += len(fn.get("name") or "") + len(fn.get("arguments") or "")
@@ -501,10 +524,18 @@ def _compact_messages(messages: list[dict[str, Any]], target: int, on_elide: Any
     target, a second sweep gives that protection up rather than sending over the
     window — the newest message is the only one that survives unconditionally.
     """
+    # Reasoning is kept only for the current task (the replies after the last
+    # user message): compaction is already re-reading the history, so earlier
+    # tasks' reasoning goes here rather than at every new message (which would
+    # break the prompt cache each time).
+    elided = 0
+    last_task = max((i for i, m in enumerate(messages) if m.get("role") == "user"), default=0)
+    for m in messages[:last_task]:
+        if m.pop("reasoning_content", None):
+            elided += 1
     # Verifier carry-over is optional background, not a conversational answer.
     # Remove it before spending the history budget, including the residual cost
     # of a stub. Existing working notes can retain its bounded provenance.
-    elided = 0
     for i in range(len(messages) - 1, -1, -1):
         message = messages[i]
         if (message.get("role") == "assistant" and message.get("name") in {"dream_verifier_report", "dream_council_context"}
@@ -692,6 +723,16 @@ class OpenAICompatBackend(Backend):
         self.n_ctx: int | None = None  # the server's loaded context window, if knowable
         # Last prompt_tokens the server reported: exact, but one round stale.
         self._last_prompt_tokens = 0
+        # Calibration of the size estimates against that count (Dream fix #12/#23):
+        # chars/4 runs low on code and a flat 4096 per image runs far high, so the
+        # estimate is scaled by what the server actually counted for the last
+        # request of the same shape. _calib scales the admission estimate (tools
+        # included), _calib_msgs the messages-only estimate compaction uses.
+        self._calib = 1.0
+        self._calib_msgs = 1.0
+        self._est_at_last = 0
+        self._sent_est: tuple[int, int, int] | None = None
+        self._stable_tools: tuple[Any, list[dict[str, Any]], frozenset[str]] | None = None
         self._sampling = self._build_sampling()
         if self._local_options:
             # Explicit zeros/off values must override both Dream and server defaults.
@@ -1435,10 +1476,44 @@ class OpenAICompatBackend(Backend):
         return self.profile.window(measured) if self.profile else measured or _ASSUMED_CTX
 
     def _ctx_fill(self) -> int:
-        """Tokens the next request will carry. The server's own prompt_tokens is
-        exact but a round stale; the estimate covers what was appended since.
-        Whichever is larger is the safe read."""
-        return max(_est_tokens(self.messages), self._last_prompt_tokens)
+        """Tokens the next request will carry: the server's own count for the
+        last request (exact, a round stale) plus a calibrated estimate of what
+        was appended since; the calibrated estimate alone before any count."""
+        est = _est_tokens(self.messages)
+        if self._last_prompt_tokens:
+            return self._last_prompt_tokens + max(0, int((est - self._est_at_last) * self._calib_msgs))
+        return int(est * self._calib_msgs)
+
+    def _record_calibration(self, prompt_tokens: int) -> None:
+        """Learn the estimate's error from the server's count of the request
+        _admit_request just measured."""
+        if not prompt_tokens or self._sent_est is None:
+            return
+        est_input, est_tools, est_msgs = self._sent_est
+        self._calib = min(4.0, max(0.1, prompt_tokens / max(1, est_input)))
+        tools_real = self._calib * est_tools
+        self._calib_msgs = min(4.0, max(0.1, (prompt_tokens - tools_real) / max(1, est_msgs)))
+        self._est_at_last = est_msgs
+        self._sent_est = None
+
+    def _keep_reasoning(self, message: dict[str, Any], parts: list[str]) -> None:
+        """Keep the model's reasoning on its reply (MachX): V4.1 renders it back
+        when tools are present, so without it the history differs from what the
+        model generated at the reply's first token and every round re-read the
+        whole reply. Earlier tasks' reasoning goes at the next compaction."""
+        if self.provider.key == "machx" and parts:
+            message["reasoning_content"] = "".join(parts)
+
+    def _stable_tool_list(self) -> bool:
+        """A local server reuses its prompt cache only while the prompt's start
+        is unchanged, and the tools render right after the system text: any
+        change to the sent set or its order re-reads the whole conversation
+        (live: 26K tokens / 93 s per new message, 47K / 178 s per revealed tool).
+        For a local backend the list is therefore chosen once and kept; a schema
+        fetched with tool_schema arrives in that tool's result instead."""
+        from ..inference_coordination import local_endpoint
+        return (getattr(self.provider, "key", "") == "machx"
+                or local_endpoint(getattr(self.provider, "base_url", "") or "") is not None)
 
     def _max_tokens(self, fill: int) -> int:
         ceiling = self._base_max_tokens(fill)
@@ -1523,7 +1598,7 @@ class OpenAICompatBackend(Backend):
         # straight back over it on the very next round. What goes is saved to
         # working notes first (Phase 10): the stub names the note.
         prior = list(self.messages)
-        n = _compact_messages(self.messages, int(window * _COMPACT_AT / 2),
+        n = _compact_messages(self.messages, int(window * _COMPACT_AT / 2 / self._calib_msgs),
                               on_elide=self._note_elided())
         self._record_council_omissions(prior, self.messages)
         if n:
@@ -1657,21 +1732,29 @@ class OpenAICompatBackend(Backend):
                              if s["function"]["name"] in active_names
                              or s["function"]["name"] in {"task", "fork_verifier_agent"}]
         allowed_lead = True
+        stable = self._stable_tool_list()
         snip = self._snip_schema() if len(self._user_ids()) >= _SNIP_FROM_TURN else None
         if snip is not None:
             # Reserve the control tool's width so the budget still holds.
             window = max(1024, window - int(tool_budget_schemas.measure([snip])
                                             / tool_budget_schemas.DEFAULT_BUDGET_FRAC))
+        schema_fraction = self.profile.schema_fraction if self.profile else None
+        if stable:
+            # Chosen once per session from the pins and historical use only: per-turn
+            # relevance and revealed tools would change the prompt's start.
+            stable_key = (window, json.dumps(available_schemas, sort_keys=True), bool(snip), schema_fraction)
+            if self._stable_tools is not None and self._stable_tools[0] == stable_key:
+                self._deferred_now = self._stable_tools[2]
+                return deepcopy(self._stable_tools[1])
         cache_key = (window, json.dumps(available_schemas, sort_keys=True),
-                     self._pinned | self._revealed, self._turn_tools, bool(snip),
-                     self.profile.schema_fraction if self.profile else None)
-        if self._schema_cache is not None and self._schema_cache[0] == cache_key:
+                     self._pinned | self._revealed, self._turn_tools, bool(snip), schema_fraction)
+        if not stable and self._schema_cache is not None and self._schema_cache[0] == cache_key:
             self._deferred_now = self._schema_cache[2]
             return deepcopy(self._schema_cache[1])
         if self._schema_usage is None:
             self._schema_usage = self._tool_uses()
         usage = self._schema_usage
-        if self._turn_tools:
+        if self._turn_tools and not stable:
             counts = {s["function"]["name"]: usage(s["function"]["name"]) if usage else 0
                       for s in available_schemas}
             # Rank relevant tools ahead of historical usage without making them
@@ -1682,7 +1765,7 @@ class OpenAICompatBackend(Backend):
         sent, deferred = tool_budget_schemas.select(
             available_schemas,
             window,
-            always=self._pinned | self._revealed,
+            always=self._pinned if stable else self._pinned | self._revealed,
             usage=usage,
             budget_frac=self.profile.schema_fraction if self.profile else tool_budget_schemas.DEFAULT_BUDGET_FRAC,
         )
@@ -1693,16 +1776,19 @@ class OpenAICompatBackend(Backend):
             sent = sent + [snip]
         if self.profile is None and self._subagents and "verifier" in self._subagents and allowed_lead:
             sent = sent + [self._verifier_schema()]
+        if stable:
+            self._stable_tools = (stable_key, deepcopy(sent), self._deferred_now)
         self._schema_cache = (cache_key, deepcopy(sent), self._deferred_now)
         return deepcopy(sent)
 
     def _admission_limits(self, messages):
         """Shared output/window arithmetic for preflight, projection and admission."""
         window = self._window()
+        fill = int(_est_tokens(messages) * self._calib_msgs)
         output = min(config.MAX_OUTPUT_TOKENS,
-                     self.profile.output_reserve(window) if self.profile else self._max_tokens(_est_tokens(messages)))
+                     self.profile.output_reserve(window) if self.profile else self._max_tokens(fill))
         if "max_tokens" in self._local_options:
-            output = self._max_tokens(_est_tokens(messages))
+            output = self._max_tokens(fill)
         if self._active_performance:
             output = min(output, self._active_performance["output_tokens"])
         return window, output
@@ -1764,23 +1850,39 @@ class OpenAICompatBackend(Backend):
                     and id(message) not in retained):
                 self._council_notices.append(omission_notice(message))
 
+    def _calibrated_counter(self) -> tuple[Callable[[Any], int], str | None]:
+        """The size estimate scaled by what the server counted last time."""
+        from ..context_budget import estimate
+        if self._calib == 1.0:
+            return estimate, None
+        k = self._calib
+        return (lambda value: math.ceil(estimate(value) * k),
+                f"estimate x {k:.2f}, calibrated on the server's count of the previous request")
+
     def _admit_request(self, messages: list[dict], schemas: list[dict], *, lead: bool = True):
         """One admission gate for lead, delegated and recovery requests."""
         window, output = self._admission_limits(messages)
-        report = account(messages, schemas, window, output)
+        counter, method = self._calibrated_counter()
+        report = account(messages, schemas, window, output, counter=counter, method=method)
         elided = 0
         if report.remaining < 0 and self._context_overflow == "compact":
             # Preserve the system/current user messages. Only prior exchanges
-            # can be elided, and lead elisions retain recovery notes.
+            # can be elided, and lead elisions retain recovery notes. One big
+            # step (to half the compaction line), never "just enough": trimming
+            # a little on every request changed the history's start each round
+            # and re-read all of it every time (Dream fix #2).
             prior = list(messages)
-            elided = _compact_messages(messages, max(0, window - report.tools - report.output - report.margin),
+            target = min(int(window * _COMPACT_AT / 2), window - report.tools - report.output - report.margin)
+            elided = _compact_messages(messages, max(0, int(target / self._calib_msgs)),
                                        on_elide=self._note_elided() if lead else None)
             self._record_council_omissions(prior, messages)
+            if elided and lead and messages is self.messages:
+                self._last_prompt_tokens = 0   # the count described the larger history
         try:
-            report = admit(messages, schemas, window, output)
+            report = admit(messages, schemas, window, output, counter=counter, method=method)
         except ContextOverflow as exc:
             if lead:
-                self.context_report = account(messages, schemas, window, output).as_dict()
+                self.context_report = account(messages, schemas, window, output, counter=counter, method=method).as_dict()
                 self.context_report["elided_messages"] = elided
             if self.runtime_meter is not None:
                 self.runtime_meter.record("context_refused", window=window, phase="lead" if lead else "delegated/recovery")
@@ -2210,7 +2312,8 @@ class OpenAICompatBackend(Backend):
                 text = _VisualResult(text, images[:4])
         # A clean `done` is the end-of-turn handoff: remember the page, and let
         # the verifier sweep it when the turn ends (lead only).
-        if name.lower() == "done" and allowed is None and not failed and args.get("path"):
+        if (name.lower() == "done" and allowed is None and not failed and args.get("path")
+                and str(args["path"]).lower().endswith((".html", ".htm", ".svg"))):
             self._last_done_path = str(args["path"])
             if _AUTO_VERIFY:
                 self._verify_at_turn_end = self._last_done_path
@@ -2703,6 +2806,7 @@ class OpenAICompatBackend(Backend):
         # already been blocked. Per-turn on purpose — a fresh user message may
         # legitimately redo an earlier call.
         call_history: dict[tuple[str, str], dict[str, Any]] = {}
+        cut_retries = 0
 
         for _ in range(_MAX_TOOL_ROUNDS):
             if self.runtime_meter is not None:
@@ -2747,8 +2851,13 @@ class OpenAICompatBackend(Backend):
                 for ev in self._context_notices():
                     yield ev
                 yield Event("context_budget", self.context_report)
+            # What this request is estimated at, for the calibration its usage teaches.
+            raw = account(self.messages, payload["tools"], self._window(), 0)
+            self._sent_est = (raw.input_tokens, raw.tools, _est_tokens(self.messages))
             text_parts: list[str] = []
+            reasoning_parts: list[str] = []
             tool_calls: dict[int, dict[str, str]] = {}
+            truncated_call: str | None = None
             usage = None
             timings = None
             finish_reason: str | None = None
@@ -2793,6 +2902,9 @@ class OpenAICompatBackend(Backend):
                             continue
                         if choice.get("finish_reason"):
                             finish_reason = choice["finish_reason"]
+                            # MachX names the tool call a length cut landed in.
+                            truncated_call = ((choice.get("truncated_tool_call") or {}).get("name")
+                                              or truncated_call)
                         delta = choice.get("delta", {}) or {}
                         meaningful = bool(delta.get("content") or delta.get("reasoning_content")
                                           or any(tc.get("id") or tc.get("function", {}).get("name")
@@ -2810,6 +2922,7 @@ class OpenAICompatBackend(Backend):
                             text_parts.append(delta["content"])
                             yield Event("text_delta", delta["content"])
                         if delta.get("reasoning_content"):
+                            reasoning_parts.append(delta["reasoning_content"])
                             yield Event("thinking_delta", delta["reasoning_content"])
                         for tc in delta.get("tool_calls") or []:
                             slot = tool_calls.setdefault(tc.get("index", 0), {"id": "", "name": "", "args": ""})
@@ -2874,6 +2987,12 @@ class OpenAICompatBackend(Backend):
                 round_stats["ttft_ms"] = (
                     (t_first - t_req) * 1000.0 if t_first is not None else None
                 )
+                # For the stats line under the prompt box: what the prompt really
+                # cost (cached tokens are not re-read) and how full the window is.
+                if usage:
+                    round_stats["prompt_tokens"] = int(usage.get("prompt_tokens") or 0)
+                    round_stats["cached"] = int((usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+                round_stats["window"] = self._window()
                 # Per-round speed for the live monitor pane — exact numbers the
                 # moment the round ends, not only at the end of the whole turn.
                 yield Event("stats", round_stats)
@@ -2885,6 +3004,7 @@ class OpenAICompatBackend(Backend):
                 agg["ctx_used"] = (int(usage.get("prompt_tokens") or 0)
                                    + int(usage.get("completion_tokens") or 0))
                 self._last_prompt_tokens = int(usage.get("prompt_tokens") or 0)
+                self._record_calibration(self._last_prompt_tokens)
 
             full = "".join(text_parts).strip()
             if usage:
@@ -2916,7 +3036,8 @@ class OpenAICompatBackend(Backend):
                 # of room mid-call (a big write_file is the usual one). Say so —
                 # otherwise this is indistinguishable from the model choosing to
                 # stop, which is the exact silence this whole path exists to end.
-                if _OPEN_INVOKE_RE.search(full):
+                cut_call = truncated_call or ("tool" if _OPEN_INVOKE_RE.search(full) else None)
+                if cut_call:
                     cap = self._max_tokens(self._ctx_fill())
                     why = (f"the {cap:,}-token limit for one generation"
                            if cap < config.MAX_OUTPUT_TOKENS
@@ -2924,11 +3045,25 @@ class OpenAICompatBackend(Backend):
                     hint = ("the context window is nearly full — /new starts fresh"
                             if cap < config.MAX_OUTPUT_TOKENS
                             else "raise DREAM_MAX_TOKENS, or ask for it in pieces")
+                    named = f" ({truncated_call})" if truncated_call else ""
                     yield Event("system", f"A tool call was cut off at {why} before "
-                                          f"it finished, so nothing ran. {hint}.")
+                                          f"it finished{named}, so nothing ran. {hint}.")
                 self.messages.append({"role": "assistant", "content": full})
+                self._keep_reasoning(self.messages[-1], reasoning_parts)
                 if full:
                     yield Event("assistant_done", full)
+                if subtype == "length" and cut_call and cut_retries < 1 and _ < _MAX_TOOL_ROUNDS - 1:
+                    # Retry once, in parts, instead of ending the turn: live, three
+                    # 16K-token write_file replies were lost and the next "continue"
+                    # attempted the same oversized call again (Dream fix #14).
+                    cut_retries += 1
+                    self.messages.append({"role": "user", "name": "dream_recovery_instruction", "content": (
+                        f"[Dream] Your last reply was cut off at the output limit while writing the {cut_call} "
+                        "call, so it did not run and nothing was written. Do it again in parts of at most "
+                        "~300 lines each: write_file the first part, then write_file with append=true for each "
+                        "further part. Check with list_dir/read_file what already exists before rewriting.")})
+                    yield Event("system", f"Asked the model to redo the cut-off {cut_call} call in parts.")
+                    continue
                 if subtype == 'success':
                     inbox = getattr(self, 'steering_inbox', None)
                     if inbox is not None and _ == _MAX_TOOL_ROUNDS - 1:
@@ -2995,6 +3130,7 @@ class OpenAICompatBackend(Backend):
                     for i, c in enumerate(calls)
                 ],
             })
+            self._keep_reasoning(self.messages[-1], reasoning_parts)
             loop_break = False
             recorded = 0
             round_images = []
@@ -3074,6 +3210,16 @@ class OpenAICompatBackend(Backend):
 
             if round_images:
                 self.messages.append(_visual_message(round_images))
+
+            # Say when the turn's round budget runs low (Dream fix #24): live, a
+            # model spent ~60 rounds on measurements and hit the limit mid-sweep.
+            left = _MAX_TOOL_ROUNDS - 1 - _
+            if left in (25, 10, 3):
+                last_tool = next((m for m in reversed(self.messages) if m.get("role") == "tool"), None)
+                if last_tool is not None and isinstance(last_tool.get("content"), str):
+                    last_tool["content"] += (f"\n\n[Dream: {left} tool rounds left in this turn. Batch checks "
+                                             "into fewer calls; finish the current step and report before "
+                                             "they run out.]")
 
             if loop_break:
                 inbox = getattr(self, 'steering_inbox', None)
