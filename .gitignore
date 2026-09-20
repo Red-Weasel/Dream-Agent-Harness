@@ -45,3 +45,10 @@ build/
 *.gguf
 *.safetensors
 *.zip
+
+# Internal development record and agent instructions — private (owner, 2026-09-20).
+# The dated work register, master plan and decision log are how the project is run,
+# not what it ships; publishing them gave away the roadmap.
+docs/project/
+CLAUDE.md
+AGENTS.md
