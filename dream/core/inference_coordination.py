@@ -228,7 +228,22 @@ class EndpointCoordinator:
             self.waiting = False
             previous = self._read(directory)
             if previous['state'] != 'idle':
-                raise CoordinationError('Previous local request outcome is uncertain. Check the server, then confirm idle in Controls.')
+                # Say WHEN and WHY, and name the one action that clears it. Twice on
+                # 2026-09-20 the owner read the bare refusal as "the harness hung" --
+                # the turn had in fact been cut off mid-stream hours earlier and every
+                # request since was refused in a quarter of a second.
+                # NOT auto-cleared on the server's own /health: on 2026-09-19 the engine
+                # reported inflight=0 while still burning nine cores on an aborted
+                # generation, which is exactly the case this lease exists to catch.
+                when = previous.get('updated_at') or previous.get('started_at')
+                ago = ''
+                if isinstance(when, (int, float)):
+                    mins = max(0, int((time.time() - when) // 60))
+                    ago = f' {mins} min ago' if mins else ' just now'
+                raise CoordinationError(
+                    f'Previous local request outcome is uncertain: it was cut off{ago} and the server was '
+                    'never confirmed idle, so this request was not sent. Open Controls and confirm the '
+                    'server is idle to clear it.')
             record = {'schema_version': 1, 'state': 'running', 'request_id': uuid4().hex,
                       'pid': os.getpid(), 'started_at': time.time()}
             self._write(directory, record)

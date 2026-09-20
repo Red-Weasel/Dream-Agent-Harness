@@ -35,6 +35,11 @@ from .bus import EventBus
 from .desktop_bridge import DesktopDiscovery
 
 STATIC_DIR = Path(__file__).parent / "static"
+# "Read ×2": the user's own words are sent twice, joined by this line. A causal model
+# reads every word of the second copy with the whole request already in view
+# (re-reading prompts, Xu et al. 2023). Only the typed text is doubled; the chat
+# shows it once, and the page strips the repeat when it replays history.
+READ_AGAIN = "\n\n[Read the request above again:]\n"
 
 
 def _jsonable(value: Any) -> Any:
@@ -125,6 +130,8 @@ class StudioServer:
         from .workflow_routes import routes as workflow_routes
         from .project_routes import routes as project_routes
         from .skill_routes import routes as skill_routes
+        from .memory_routes import routes as memory_routes
+        from .files_routes import routes as files_routes
         from .project_library_routes import routes as project_library_routes
         from .project_document_routes import routes as project_document_routes
         from ..projects.recovery import list_recoveries
@@ -158,6 +165,8 @@ class StudioServer:
         routes.extend(workflow_routes(self))
         routes.extend(project_routes(self, recovery_provider=list_recoveries))
         routes.extend(skill_routes(self))
+        routes.extend(memory_routes(self))
+        routes.extend(files_routes(self))
         routes.extend(project_document_routes(self))
         routes.extend(project_library_routes(self))
         if STATIC_DIR.is_dir():
@@ -619,6 +628,9 @@ class StudioServer:
             return JSONResponse({"error": "empty prompt"}, status_code=400)
         text = text or "Please inspect the attached files."
         display = text
+        if (body.get("read_twice") is True and body.get("delivery", "queue") == "queue"
+                and not text.startswith("/")):
+            text = text + READ_AGAIN + text
         if files:
             display += "\n\nAttached files: " + ", ".join(f["name"] for f in files)
             text += ("\n\n[Files attached by the user. Use read_file on these workspace paths "

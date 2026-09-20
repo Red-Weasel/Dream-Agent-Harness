@@ -77,6 +77,11 @@ main{flex:1;min-width:380px;overflow-y:auto;padding:22px 20px 8px;scroll-behavio
 .tool .targ{color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .tool .badge{margin-left:auto;font-size:10px;padding:1px 7px;border-radius:99px;
   background:#1b2030;color:var(--dim);flex:0 0 auto}
+.tool-preview{margin:0 0 8px;padding:10px 12px;max-height:40vh;overflow:auto;border:1px dashed var(--line);
+  border-radius:8px;background:#0d1017;color:var(--dim);font:11.5px/1.5 var(--mono);white-space:pre-wrap;
+  overflow-wrap:anywhere}
+.tool-preview::before{content:'Writing\2026';display:block;color:var(--violet);font-size:10px;
+  letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px}
 .tool.err{border-color:#4a2226}
 .tool.err .badge{background:#3b1d21;color:var(--err)}
 .tool pre{margin:0;padding:11px 13px;background:#0d1017;border-top:1px solid var(--line);
@@ -103,6 +108,15 @@ button{background:var(--grad);border:0;border-radius:8px;color:#0b0d12;font:600 
   padding:8px 15px;cursor:pointer;flex:0 0 auto}
 button:disabled{opacity:.35;cursor:default}
 .hint{max-width:860px;margin:7px auto 0;color:var(--faint);font:10.5px var(--mono);display:flex;gap:16px}
+#plan-panel{position:sticky;top:0;z-index:5;max-width:860px;margin:8px auto 4px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px 12px;font:12.5px/1.5 var(--sans, sans-serif);color:var(--fg)}
+#plan-panel summary{cursor:pointer;color:var(--dim)}
+#plan-panel ol{margin:6px 0 2px;padding-left:4px;list-style:none}
+#plan-panel ul{margin:2px 0 4px 18px;padding:0;list-style:none;color:var(--dim)}
+#plan-panel .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;border:1.5px solid #6b7280}
+#plan-panel .done > .dot, #plan-panel .done > div > .dot{background:#22c55e;border-color:#22c55e}
+#plan-panel .in_progress > .dot, #plan-panel .in_progress > div > .dot{background:#f59e0b;border-color:#f59e0b}
+#read-twice{background:none;border:1px solid var(--line);color:var(--faint);font:inherit;border-radius:6px;padding:1px 7px;cursor:pointer}
+#read-twice.on{border-color:var(--violet);color:var(--fg);background:color-mix(in srgb, var(--violet) 22%, transparent)}
 main::-webkit-scrollbar,.tool pre::-webkit-scrollbar{width:9px;height:9px}
 main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252b3d;border-radius:6px}
 
@@ -273,7 +287,7 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
 </header>
 
 <div class="split">
-  <main id="main"><div class="wrap" id="stream"></div></main>
+  <main id="main"><details id="plan-panel" hidden></details><div class="wrap" id="stream"></div></main>
   <aside id="rail">
     <div class="tabs">
       <button id="tab-metrics" class="on">metrics</button>
@@ -310,6 +324,7 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
   </div>
   <div class="hint">
     <span>⏎ send · ⇧⏎ newline</span><span>one session, two views</span>
+    <button id="read-twice" type="button" aria-pressed="false" title="Read ×2: the model reads each message you type twice (only your words, never the history)">Read ×2</button>
     <span id="perf" title="Last request: prompt reading speed, generation speed, and how full the context window is"></span>
     <span id="counts"></span>
   </div>
@@ -324,6 +339,7 @@ const stream = $('stream'), main = $('main');
 const feed = DreamFeed.mount(stream);
 let replayingHistory = false, working = false, sending = false;
 let socket, current = null, thinking = null, tools = new Map(), nTool = 0, nMsg = 0, retry = 0, replayOnConnect = false;
+let writing = null;   // the tool call being written, shown live and then replaced by its card
 
 /* ---------- rendering ---------------------------------------------------- */
 // Model output is untrusted: escape FIRST, then apply markup to the escaped
@@ -418,7 +434,9 @@ function finishPermission(id){
   if(companion) companion.permissionDone(id);
   else document.getElementById('permission-' + id)?.remove();
 }
+function clearWriting(){ if(writing){ writing.remove(); writing = null; } }
 function endTurn(){
+  clearWriting();
   if(current){
     current.el.innerHTML = md(current.raw);
     // Scan only on completion: a half-streamed fence is not an artifact yet.
@@ -435,11 +453,11 @@ function handle(m){
   syncFeedPosition();
   const replay = replayOnConnect;
   if(!['hello','history','permission'].includes(m.kind) && !replayingHistory) replayOnConnect = false;
-  if(COMPANION && ['text_delta', 'thinking_delta', 'tool_use'].includes(m.kind)) busy(true);
+  if(COMPANION && ['text_delta', 'thinking_delta', 'tool_use', 'tool_preview'].includes(m.kind)) busy(true);
   switch(m.kind){
     case 'project_view_reset': {
-      artifacts.clear(); artOpen = null; artVerIdx = 0; frameReady = false;
-      artbody.replaceChildren(); panel.classList.remove('open');
+      artifacts.clear(); artOpen = null; artVerIdx = 0;
+      closeArtifactFrame(); panel.classList.remove('open');
       companion?.closeArtifact(); companion?.artifacts();
       window.dispatchEvent(new Event('dream:project-reset'));
       break;
@@ -448,6 +466,7 @@ function handle(m){
       const liveSteeringTarget = steeringTarget;
       replayingHistory = true; endTurn(); current = null; thinking = null; tools.clear(); feed.reset(); nTool = 0; nMsg = 0;
       stream.querySelectorAll('.msg,.tool,.think,.sys,.permission-card,.turn-timing').forEach(el => el.remove());
+      $('plan-panel').hidden = true;
       busy(false); replayingHistory = true;
       try {
         if(m.data?.trimmed) sysline('Showing recent conversation. Earlier messages remain in the saved session.');
@@ -457,7 +476,13 @@ function handle(m){
       companion?.message?.(); counts(); scroll(true);
       break;
     }
-    case 'user': endTurn(); block('you','You').textContent = String(m.data || ''); nMsg++; counts(); scroll(true); break;
+    case 'user': {
+      endTurn();
+      // A "Read ×2" message is stored doubled; show the words once.
+      const said = String(m.data || ''), again = said.indexOf(READ_AGAIN);
+      block('you','You').textContent = again >= 0 ? said.slice(0, again) : said;
+      nMsg++; counts(); scroll(true); break;
+    }
     case 'turn_start': busy(true); break;
     case 'turn_end': steeringTarget = null; endTurn(); finishTools(m.data?.interrupted ? 'Interrupted' : 'No result returned'); busy(false); break;
     case 'steering': steeringNotice(m.data); break;
@@ -486,6 +511,24 @@ function handle(m){
       scroll();
       break;
     }
+    case 'tool_preview': {
+      // MachX streams a tool call's text while the model writes it, so a long
+      // write_file is visible instead of silent. Display only: the card that
+      // replaces this comes from tool_use, and nothing here is replayed.
+      if(replayingHistory) break;
+      if(!writing){
+        endTurn();
+        writing = document.createElement('pre');
+        writing.className = 'tool-preview';
+        writing.setAttribute('aria-label', 'Tool call being written');
+        stream.append(writing);
+      }
+      writing.textContent += m.data;
+      if(writing.textContent.length > 40000) writing.textContent = writing.textContent.slice(-40000);
+      writing.scrollTop = writing.scrollHeight;
+      scroll();
+      break;
+    }
     case 'thinking_delta': {
       if(!thinking){
         thinking = feed.thinking(stream);
@@ -494,9 +537,10 @@ function handle(m){
       break;
     }
     case 'stats': perf(m.data); break;
+    case 'plan': renderPlan(m.data); break;
     case 'assistant_done': endTurn(); break;
     case 'tool_use': {
-      endTurn();
+      endTurn();   // also removes the live preview of this very call
       const d = m.data || {}, name = String(d.name||'tool').split('__').pop();
       if(!replayingHistory && /^(write_file|Write|Edit|MultiEdit)$/.test(name)){
         try{ artifactFromWrite(d.input || {}); }catch(e){ console.error(e); }
@@ -549,7 +593,7 @@ function handle(m){
       break;
     }
     case 'system': sysline(String(m.data ?? '')); break;
-    case 'error':  sysline(String(m.data ?? ''), 'error'); busy(false); break;
+    case 'error':  clearWriting(); sysline(String(m.data ?? ''), 'error'); busy(false); break;
     case 'result': {
       endTurn(); busy(false);
       if(!replayingHistory && turnFiles.size){
@@ -595,6 +639,52 @@ function finishTools(label){
 }
 
 function counts(){ $('counts').textContent = `${nMsg} replies · ${nTool} tool calls`; }
+// "Read ×2" (owner idea): typed messages go to the model twice; only this viewer's preference is stored.
+const READ_AGAIN = '\n\n[Read the request above again:]\n';
+let readTwice = false;
+try{ readTwice = localStorage.getItem('dream.readTwice') === '1'; }catch(e){}
+function syncReadTwice(){
+  const b = $('read-twice'); if(!b) return;
+  b.setAttribute('aria-pressed', String(readTwice)); b.classList.toggle('on', readTwice);
+}
+document.addEventListener('click', e => {
+  if(!e.target.closest?.('#read-twice')) return;
+  readTwice = !readTwice;
+  try{ localStorage.setItem('dream.readTwice', readTwice ? '1' : '0'); }catch(err){}
+  syncReadTwice();
+});
+window.syncReadTwice = syncReadTwice;
+setTimeout(syncReadTwice, 0);
+// The project's phased plan (update_plan), pinned above the chat.
+function renderPlan(plan){
+  const el = $('plan-panel'), phases = (plan && plan.phases) || [];
+  if(!phases.length){ el.hidden = true; return; }
+  const steps = phases.flatMap(p => p.steps || []), done = steps.filter(s => s.status === 'done').length;
+  const current = phases.findIndex(p => p.status !== 'done');
+  const wasOpen = el.hidden ? true : el.open;
+  el.replaceChildren();
+  const head = document.createElement('summary');
+  head.textContent = `Plan${plan.title ? ': ' + plan.title : ''} — ` + (current < 0 ? `all ${phases.length} phases done`
+    : `phase ${current + 1} of ${phases.length}: ${phases[current].name}`) + ` · ${done}/${steps.length} steps`;
+  el.append(head);
+  const list = document.createElement('ol');
+  phases.forEach((p, i) => {
+    const li = document.createElement('li'); li.className = 'plan-phase ' + p.status;
+    const name = document.createElement('div'); name.innerHTML = '<span class="dot"></span>'; name.append(p.name);
+    li.append(name);
+    if(i === current || p.status === 'in_progress'){
+      const ul = document.createElement('ul');
+      for(const s of p.steps || []){
+        const st = document.createElement('li'); st.className = 'plan-step ' + s.status;
+        st.innerHTML = '<span class="dot"></span>'; st.append(s.name); ul.append(st);
+      }
+      li.append(ul);
+    }
+    if(p.summary && p.status === 'done'){ li.title = p.summary; }
+    list.append(li);
+  });
+  el.append(list); el.open = wasOpen; el.hidden = false;
+}
 const turnFiles = new Map();
 function noteFile(name, input){
   const how = {write_file: input.append ? 'appended' : 'wrote', Write: 'wrote', str_replace_edit: 'edited', Edit: 'edited',
@@ -662,7 +752,8 @@ async function submit(delivery = 'queue'){
   const fingerprint = JSON.stringify([text, fileIds]);
   if(delivery === 'steer' && steeringDraft?.fingerprint !== fingerprint)
     steeringDraft = {fingerprint, id:crypto.randomUUID().replaceAll('-', ''), target:steeringTarget};
-  const sent = await postPrompt(text, fileIds, delivery, delivery === 'steer' ? steeringDraft : undefined);
+  const sent = await postPrompt(text, fileIds, delivery, delivery === 'steer' ? steeringDraft : undefined,
+                               delivery === 'queue' && readTwice);
   sending = false;
   if(sent){
     if(input.value === savedInput) input.value = '';
@@ -674,13 +765,13 @@ async function submit(delivery = 'queue'){
 }
 // The one place this page speaks to Dream in the user's name: their typed message,
 // or a card's button he pressed. Nothing a page or widget does reaches here.
-async function postPrompt(text, attachments = [], delivery = 'queue', steering){
+async function postPrompt(text, attachments = [], delivery = 'queue', steering, twice = false){
   const wasWorking = working;
   busy(true);
   try{
     const r = await fetch('/api/prompt', {method:'POST',
       headers:{'Content-Type':'application/json','X-Dream-Token':TOKEN},
-      body: JSON.stringify({prompt:text, attachments, ...(delivery === 'steer' ? {delivery, steering_id:steering.id, steering_target:steering.target} : {})})});
+      body: JSON.stringify({prompt:text, attachments, ...(twice ? {read_twice:true} : {}), ...(delivery === 'steer' ? {delivery, steering_id:steering.id, steering_target:steering.target} : {})})});
     if(!r.ok) { const data = await r.json().catch(() => ({})); sysline(data.error || `Could not send (HTTP ${r.status})`,'error'); busy(wasWorking); return false; }
     if(delivery === 'steer') steeringNotice((await r.json()).steering);
     if($('studio-error')) $('studio-error').hidden = true;
@@ -1569,8 +1660,22 @@ $('artprev').onclick = () => { artView = 'preview'; paintArtifact(); };
 $('artcode').onclick = () => { artView = 'code'; paintArtifact(); };
 $('artclose').onclick = () => {
   panel.classList.remove('open'); artOpen = null; rail.classList.remove('hide');
+  // Closing only hid the panel: the iframe stayed loaded and kept driving its
+  // render loop. A three.js artifact then held the display GPU at 60-90% for
+  // hours with nothing on screen (2026-09-20). Tear the frame down; reopening
+  // calls paintArtifact(), which rebuilds it from the stored content.
+  closeArtifactFrame();
   companion?.closeArtifact();
 };
+
+function closeArtifactFrame(){
+  const f = artbody.querySelector('iframe');
+  // Removing the iframe destroys its document and its render loop. Do NOT set
+  // f.src here: artifact frames are srcdoc-only, and a guard test enforces it.
+  if(f){ f.srcdoc = ''; f.remove(); }
+  artbody.replaceChildren();
+  frameReady = false;
+}
 
 // Detection 1: renderable fenced blocks in what Dream says.
 function scanForArtifacts(text, seq){

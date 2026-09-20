@@ -1543,7 +1543,10 @@ class Engine:
             "memory — leave it for the skill step below, or you'll write it twice. "
             "Skip trivia. Before saving a fact, recall() it "
             "first — if a matching memory already exists, pass its existing slug to "
-            "remember() to update it in place rather than creating a near-duplicate.",
+            "remember() to update it in place rather than creating a near-duplicate. "
+            "Facts about THIS project (what exists, its conventions, decisions, what is left) "
+            "go to project memory with project_note() instead; global memory is for the user "
+            "and what carries across projects.",
             "3. Adjust salience where this session proved it wrong: if an existing "
             "memory was central to the work, re-remember() it (same slug, same body) "
             "with higher salience; if one kept surfacing without being useful, lower "

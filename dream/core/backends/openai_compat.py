@@ -503,6 +503,17 @@ def _turn_of(messages: list[dict[str, Any]], i: int) -> str:
 # `snip` is offered from this many user messages on: a fresh conversation has
 # nothing worth removing, and a first request should not pay for the schema.
 _SNIP_FROM_TURN = 3
+
+# Names models reach for that mean one of Dream's tools. Applied only when the
+# alias is not itself a real tool, and before any scope check.
+_TOOL_ALIASES = {
+    "bash": "run_bash",
+    "shell": "run_bash",
+    "sh": "run_bash",
+    "terminal": "run_bash",
+    "cat": "read_file",
+    "ls": "list_dir",
+}
 # After a clean `done`, the verifier sweeps the page when the turn ends. Off with
 # DREAM_AUTO_VERIFY=0 for a session that would rather not spend the model time.
 _AUTO_VERIFY = os.environ.get("DREAM_AUTO_VERIFY", "1") == "1"
@@ -733,6 +744,7 @@ class OpenAICompatBackend(Backend):
         self._est_at_last = 0
         self._sent_est: tuple[int, int, int] | None = None
         self._stable_tools: tuple[Any, list[dict[str, Any]], frozenset[str]] | None = None
+        self._phase_reset_pending = False   # a plan phase just finished (update_plan)
         self._sampling = self._build_sampling()
         if self._local_options:
             # Explicit zeros/off values must override both Dream and server defaults.
@@ -1578,6 +1590,28 @@ class OpenAICompatBackend(Backend):
 
         return save
 
+    def _phase_reset(self) -> list[Event]:
+        """A phase of the plan just finished (update_plan): compact now, in one
+        step, so the next phase starts lean. PLAN.md and the phase summary carry
+        the state; this is the planned reset the owner asked for, instead of the
+        context filling up and compacting mid-work."""
+        if not self._phase_reset_pending:
+            return []
+        self._phase_reset_pending = False
+        if self._context_overflow == "error":
+            return []
+        before = _est_tokens(self.messages)
+        prior = list(self.messages)
+        n = _compact_messages(self.messages, int(self._window() * 0.25 / self._calib_msgs),
+                              on_elide=self._note_elided())
+        self._record_council_omissions(prior, self.messages)
+        if not n:
+            return []
+        self._last_prompt_tokens = 0
+        return [Event("system", f"Phase complete — compacted the conversation ({before:,} to "
+                                f"{_est_tokens(self.messages):,} estimated tokens) so the next phase starts "
+                                "lean; PLAN.md carries the plan.")]
+
     def _maybe_compact(self) -> list[Event]:
         """Compact the history if it has crossed the threshold. Returns the
         events to surface — compaction is destructive, so it is never silent."""
@@ -1733,7 +1767,15 @@ class OpenAICompatBackend(Backend):
                              or s["function"]["name"] in {"task", "fork_verifier_agent"}]
         allowed_lead = True
         stable = self._stable_tool_list()
-        snip = self._snip_schema() if len(self._user_ids()) >= _SNIP_FROM_TURN else None
+        # Revealing `snip` partway through a session rewrites the prompt's start --
+        # tools render before the messages, so appending one shifts every message
+        # token after it. On a local server that re-reads the WHOLE conversation
+        # (live 2026-09-20: the third user message flipped it on and the next request
+        # re-read 42,231 tokens in 155 s). Reserving it from turn one instead would
+        # cost a tool slot in every constrained window, so a local backend simply does
+        # not offer it: its history pressure is handled by compaction already.
+        snip = (None if stable
+                else self._snip_schema() if len(self._user_ids()) >= _SNIP_FROM_TURN else None)
         if snip is not None:
             # Reserve the control tool's width so the budget still holds.
             window = max(1024, window - int(tool_budget_schemas.measure([snip])
@@ -2230,6 +2272,13 @@ class OpenAICompatBackend(Backend):
         generation = self._request_generation()
         self._check_interruption(generation)
         await _work_checkpoint()
+        # A model that has used `run_bash` correctly for nineteen calls can still
+        # reach for the name it knows from elsewhere (live 2026-09-20: `bash`, which
+        # cost a whole round trip to "unknown tool"). Canonicalise BEFORE the
+        # subagent scope check below, so an alias can never widen a scope -- the
+        # check then sees the real tool name.
+        if name.lower() in _TOOL_ALIASES and name.lower() not in self.tools_by_name:
+            name = _TOOL_ALIASES[name.lower()]
         # `task` is dispatched only by the lead (allowed is None). A subagent runs
         # with a scoped `allowed` set, so it can neither call `task` (recursion)
         # nor reach a tool outside its scope. Case-insensitive: Qwen was observed
@@ -2312,6 +2361,10 @@ class OpenAICompatBackend(Backend):
                 text = _VisualResult(text, images[:4])
         # A clean `done` is the end-of-turn handoff: remember the page, and let
         # the verifier sweep it when the turn ends (lead only).
+        if name.lower() == "update_plan" and allowed is None and not failed:
+            from ...tools.project import PHASE_DONE
+            if str(text).startswith(PHASE_DONE):
+                self._phase_reset_pending = True
         if (name.lower() == "done" and allowed is None and not failed and args.get("path")
                 and str(args["path"]).lower().endswith((".html", ".htm", ".svg"))):
             self._last_done_path = str(args["path"])
@@ -2628,6 +2681,7 @@ class OpenAICompatBackend(Backend):
             if reason not in (None, "stop", "tool_calls", "function_call"):
                 detail = ("output truncated at the token limit" if reason == "length"
                           else "output filtered" if reason == "content_filter"
+                          else "stopped because it kept repeating itself" if reason == "repetition"
                           else "invalid or unsupported completion")
                 return (f"(subagent '{subagent_type}' {detail} — treat as incomplete; "
                         f"no tools from this response ran)\n{last_content}"), True
@@ -2807,6 +2861,8 @@ class OpenAICompatBackend(Backend):
         # legitimately redo an earlier call.
         call_history: dict[tuple[str, str], dict[str, Any]] = {}
         cut_retries = 0
+        loop_retries = 0
+        prose_retries = 0
 
         for _ in range(_MAX_TOOL_ROUNDS):
             if self.runtime_meter is not None:
@@ -2818,6 +2874,8 @@ class OpenAICompatBackend(Backend):
                                            "stats": self._turn_stats(agg, time.monotonic() - turn_t0)})
                     return
             await self._apply_steering()
+            for ev in self._phase_reset():
+                yield ev
             for ev in self._maybe_compact():
                 yield ev
             for ev in self._context_notices():
@@ -2838,6 +2896,12 @@ class OpenAICompatBackend(Backend):
                 **self._sampling,
                 **self._effort_params(),
             }
+            if self.provider.key == "machx":
+                # Ask MachX to stream a tool call's text while it is being written, so the
+                # chat can show a file appearing instead of a long silence. Display only:
+                # the call itself still arrives structured at the end, and a server that
+                # doesn't know the field ignores it.
+                payload["stream_tool_preview"] = True
             if self.profile or self._local_options or self.capability_status()['context_tokens']['known']:
                 try:
                     payload["max_tokens"] = self._admit_request(self.messages, payload["tools"]).output
@@ -2924,6 +2988,11 @@ class OpenAICompatBackend(Backend):
                         if delta.get("reasoning_content"):
                             reasoning_parts.append(delta["reasoning_content"])
                             yield Event("thinking_delta", delta["reasoning_content"])
+                        if delta.get("tool_call_preview"):
+                            # The call as it is being written, for display only. It never
+                            # joins the reply text or the history — the structured call at
+                            # the end of the stream is the one that runs.
+                            yield Event("tool_preview", delta["tool_call_preview"])
                         for tc in delta.get("tool_calls") or []:
                             slot = tool_calls.setdefault(tc.get("index", 0), {"id": "", "name": "", "args": ""})
                             if tc.get("id"):
@@ -3011,7 +3080,7 @@ class OpenAICompatBackend(Backend):
                 self.last_usage = usage
 
             subtype = ('success' if finish_reason in (None, 'stop', 'tool_calls', 'function_call')
-                       else finish_reason if finish_reason in ('length', 'content_filter')
+                       else finish_reason if finish_reason in ('length', 'content_filter', 'repetition')
                        else 'unsupported_finish_reason')
             if subtype != 'success':
                 # Valid JSON is not authorization to execute an unfinished or
@@ -3064,6 +3133,30 @@ class OpenAICompatBackend(Backend):
                         "further part. Check with list_dir/read_file what already exists before rewriting.")})
                     yield Event("system", f"Asked the model to redo the cut-off {cut_call} call in parts.")
                     continue
+                if subtype == "length" and not cut_call and not prose_retries:
+                    # The whole output budget went on prose and the reply was cut at the
+                    # cap without a single tool call (live 2026-09-20: 16,384 tokens over
+                    # 40 minutes, ending "Now I'll build. Let me check the HTML controls
+                    # before editing."). SAY so -- the bare "Response incomplete (length)"
+                    # reads like a server fault. It is deliberately NOT an auto-retry:
+                    # truncation must not silently repeat work (see
+                    # test_truncated_answer_is_failed_without_discarding_partial_text).
+                    prose_retries += 1
+                    yield Event("system", "That reply used the whole output limit without making a single "
+                                          "tool call, so it was cut off and nothing ran. Continue, and tell "
+                                          "it to act rather than plan.")
+                if subtype == "repetition" and loop_retries < 1 and _ < _MAX_TOOL_ROUNDS - 1:
+                    # The engine stopped a reply that had started saying the same
+                    # thing over and over (ie serve's repetition stop). Name it and
+                    # ask once for a fresh answer, rather than ending the turn on
+                    # what otherwise reads as an obscure server failure.
+                    loop_retries += 1
+                    self.messages.append({"role": "user", "name": "dream_recovery_instruction", "content": (
+                        "[Dream] Your last reply started repeating the same words over and over, so it was "
+                        "stopped and nothing ran. Answer again from the start, keep it short, and make any "
+                        "tool call you need straight away.")})
+                    yield Event("system", "The reply started repeating itself and was stopped — asked for it again.")
+                    continue
                 if subtype == 'success':
                     inbox = getattr(self, 'steering_inbox', None)
                     if inbox is not None and _ == _MAX_TOOL_ROUNDS - 1:
@@ -3084,7 +3177,9 @@ class OpenAICompatBackend(Backend):
                     for ev in await self._finish_filing(self._turn_text(prompt)):
                         yield ev
                 else:
-                    yield Event('error', f'Response incomplete ({subtype}); no collected tool calls ran. Send new instructions to continue.')
+                    detail = ('The reply kept repeating itself and was stopped'
+                              if subtype == 'repetition' else f'Response incomplete ({subtype})')
+                    yield Event('error', f'{detail}; no collected tool calls ran. Send new instructions to continue.')
                 if subtype == 'success':
                     review_status = self._delivery_review['status']
                     if self._delivery_attempt['status'] == 'failed':

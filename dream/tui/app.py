@@ -191,6 +191,9 @@ class App(CouncilControls):
         self.provider_label = "Claude · Anthropic"
         self.provider_kind = provider
         self.consolidate_on_exit = consolidate_on_exit
+        # "/quit save" / "/quit nosave" answer the save-to-memory question up front
+        # (the desktop close dialog asks it); None = ask at shutdown.
+        self._exit_consolidate: bool | None = None
         self.workspace = Path(workspace).expanduser().resolve() if workspace else config.ROOT
         self.mode = "accept-edits"  # shift+tab cycles ask → accept-edits → auto → plan
         self.engine: Engine | None = None
@@ -1965,8 +1968,9 @@ class App(CouncilControls):
         # Read the config directly (NOT self.consolidate_on_exit): the model-picker
         # path threads that flag as True by default, which would silently
         # auto-consolidate. Only DREAM_CONSOLIDATE=1 forces it on; otherwise ask.
-        commit = config.CONSOLIDATE_ON_EXIT
-        if self.engine and not commit:
+        decided = getattr(self, "_exit_consolidate", None)
+        commit = config.CONSOLIDATE_ON_EXIT or decided is True
+        if self.engine and not commit and decided is None:
             ans = await self._read_answer(
                 "  Conversation is saved. Generate a summary and commit this session to long-term memory? "
                 "This optional model pass may take several minutes. [y/N] · ")
@@ -2005,6 +2009,8 @@ class App(CouncilControls):
         c = self.renderer.console
 
         if cmd in ("quit", "exit", "q"):
+            if arg in ("save", "nosave"):
+                self._exit_consolidate = arg == "save"
             return True
         if cmd == "help":
             c.print(HELP)
@@ -2313,8 +2319,18 @@ class App(CouncilControls):
                     c.print(f"[red]{i}. {source}[/red]")
                     c.print(f"[dim]{text}[/dim]")
         elif cmd == "new":
-            self.renderer.system("consolidating and starting a fresh session…")
-            await self.engine.stop(consolidate=True)
+            # The owner decides whether a session goes to long-term memory (ask
+            # each time); "/new save" and "/new nosave" answer it up front.
+            if arg in ("save", "nosave"):
+                save = arg == "save"
+            else:
+                ans = await self._read_answer(
+                    "  Save this session to long-term memory before starting a new one? "
+                    "This optional model pass may take several minutes. [y/N] · ")
+                save = (ans or "").strip().lower() in ("y", "yes")
+            self.renderer.system("saving to memory and starting a fresh session…" if save
+                                 else "starting a fresh session (not saved to memory)…")
+            await self.engine.stop(consolidate=save)
             self._reset_session_accounting()
             self.engine = self._boot_engine()
             await self.engine.start()

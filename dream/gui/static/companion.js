@@ -97,10 +97,23 @@ if(COMPANION){
         if(!response.ok){ const data = await response.json(); throw new Error(data.error || 'Could not stop Dream'); }
       } catch(e){ error(e.message); } finally { $('stop').disabled = false; }
     };
-    $('studio-new').onclick = () => postPrompt('/new');
+    // A new chat asks whether this one goes to long-term memory first (owner choice).
+    $('studio-new').onclick = () => {
+      if(document.getElementById('new-chat-ask')) return;
+      const box = document.createElement('div'); box.id = 'new-chat-ask'; box.setAttribute('role', 'dialog');
+      box.innerHTML = '<p>Save this chat to long-term memory before starting a new one?</p>'
+        + '<p class="new-chat-note">Saving writes a summary and the memories worth keeping; it can take several minutes.</p>'
+        + '<div><button data-new="save">Save and start new</button><button data-new="nosave">Start new without saving</button>'
+        + '<button data-new="cancel">Cancel</button></div>';
+      box.addEventListener('click', e => {
+        const choice = e.target.closest('button')?.dataset.new; if(!choice) return;
+        box.remove(); if(choice !== 'cancel') postPrompt('/new ' + choice);
+      });
+      document.body.appendChild(box); box.querySelector('button').focus();
+    };
     $('studio-skills').onclick = () => window.DreamLibrary?.show('skills');
 
-    document.querySelector('footer .hint').innerHTML = '<span>Enter to send · Shift+Enter for a new line</span><span id="perf" title="Last request: prompt reading speed, generation speed, and how full the context window is"></span><span id="counts"></span>';
+    document.querySelector('footer .hint').innerHTML = '<button id="read-twice" type="button" aria-pressed="false" title="Read ×2: the model reads each message you type twice (only your words, never the history)">Read ×2</button><span>Enter to send · Shift+Enter for a new line</span><span id="perf" title="Last request: prompt reading speed, generation speed, and how full the context window is"></span><span id="counts"></span>';
     document.querySelector('footer .hint').insertAdjacentHTML('afterbegin', '<button id="chat-mode" type="button" title="Shift+Tab cycles permission mode" aria-label="Cycle permission mode" aria-live="polite">Mode unavailable</button>');
     let modePending = false;
     async function permissionMode(cycle = false){
@@ -122,6 +135,7 @@ if(COMPANION){
       } finally { modePending = false; button.disabled = false; }
     }
     $('chat-mode').onclick = () => permissionMode(true);
+    window.syncReadTwice?.();
     input.addEventListener('keydown', e => {
       if(e.key !== 'Tab' || !e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return;
       e.preventDefault();

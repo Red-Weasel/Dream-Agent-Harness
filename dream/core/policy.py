@@ -95,7 +95,7 @@ _READ_ONLY = {
 # Dream editing its own long-term memory — internal cognition, always allowed.
 _MEMORY = {"remember", "note", "forget", "skill_save", "skill_patch",
            # the plan and the project's name are the session's own mind, not the world
-           "update_todos", "set_project_title",
+           "update_todos", "update_plan", "project_note", "set_project_title",
            # Phase 9b: the file tools on memory, delete included — like forget
            "memory_write", "memory_append", "memory_str_replace", "memory_delete",
            # Phase 11: the task store is the session's own mind about its work

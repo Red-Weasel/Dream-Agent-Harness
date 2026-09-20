@@ -147,9 +147,10 @@ async def test_unregister_by_asset_path_or_both(ws):
     assert _failed(await unregister_assets.handler({"items": [{}]}))
 
 
-def test_the_five_tools_are_exported():
+def test_the_project_tools_are_exported():
     assert [t.name for t in PROJECT_TOOLS] == [
-        "update_todos", "set_project_title", "save_as_template", "register_assets", "unregister_assets"]
+        "update_todos", "update_plan", "project_note", "set_project_title", "save_as_template",
+        "register_assets", "unregister_assets"]
 
 
 # --- write_file registers on request; Studio serves the manifest ------------------------

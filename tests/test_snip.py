@@ -36,7 +36,9 @@ async def test_every_user_message_carries_an_id_the_model_can_name():
 
 
 async def test_snip_is_offered_once_there_is_history_to_snip():
+    """On a REMOTE backend it appears once there is history worth snipping."""
     b = _backend(NATIVE_TOOLS)
+    b._stable_tool_list = lambda: False
     names = lambda: [s["function"]["name"] for s in b._client.payloads[0]["tools"]]  # noqa: E731
     await _turns(b, 1)
     assert "snip" not in names()
@@ -44,6 +46,23 @@ async def test_snip_is_offered_once_there_is_history_to_snip():
     assert "snip" not in names()
     await _turns(b, 1)
     assert names()[-1] == "snip", "from the third user message on, and always last"
+
+
+async def test_a_local_backend_is_never_offered_snip():
+    """Tools render before the messages, so revealing snip at the third user message
+    shifted every message token after it and cost a local server the whole
+    conversation (42,231 tokens re-read in 155 s, live 2026-09-20). Reserving it from
+    turn one instead would spend a tool slot in every constrained window, so a local
+    backend does not get it at all -- its history pressure is handled by compaction.
+    The point of the test is that the tool list NEVER changes across turns."""
+    b = _backend(NATIVE_TOOLS)
+    assert b._stable_tool_list() is True
+    seen = []
+    for _ in range(4):                      # _turns swaps the client, so collect per turn
+        await _turns(b, 1)
+        seen.append([s["function"]["name"] for s in b._client.payloads[0]["tools"]])
+    assert all("snip" not in names for names in seen), "never revealed on a local backend"
+    assert all(names == seen[0] for names in seen), "and the list never changes under the cache"
 
 
 async def test_register_validates_ids_and_never_the_live_turn():

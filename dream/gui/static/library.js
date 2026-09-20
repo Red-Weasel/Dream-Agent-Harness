@@ -33,9 +33,9 @@
     const list = node('div',null,{class:'library-list'}), detail = node('div',null,{class:'library-detail'});
     const filters=node('div',null,{class:'library-filters'});
     const filter=field(filters,'Show','select',{'aria-label':'Filter '+title.toLowerCase()}),sort=field(filters,'Sort','select',{'aria-label':'Sort '+title.toLowerCase()});
-    const choices=view==='skills'?[['all','All skills'],['managed','Your versions'],['installed','Installed originals'],['enabled','Enabled'],['disabled','Disabled']]:[['all','All projects'],['current','Current workspace'],['conversations','With conversations']];
+    const choices=view==='skills'?[['all','All skills'],['managed','Your versions'],['installed','Installed originals'],['enabled','Enabled'],['disabled','Disabled']]:view==='memory'?[['all','All memories'],['global','Global'],['project','Project notebooks']]:view==='files'?[['workspace','Project folder'],['dream','Dream setup']]:[['all','All projects'],['current','Current workspace'],['conversations','With conversations']];
     for(const [value,label] of choices)filter.append(node('option',label,{value}));
-    for(const [value,label] of [['name','Name A–Z'],['reverse','Name Z–A'],...(view==='projects'?[['conversations','Most conversations']]:[])])sort.append(node('option',label,{value}));
+    for(const [value,label] of view==='memory'?[['recent','Recently changed'],['name','Name A–Z']]:[['name','Name A–Z'],['reverse','Name Z–A'],...(view==='projects'?[['conversations','Most conversations']]:[])])sort.append(node('option',label,{value}));
     const count=node('p','',{class:'library-count',role:'status','aria-live':'polite'});
     const hint=node('p','Use ↑ and ↓ to browse, Enter to open.',{class:'library-keyboard-hint',id:'library-'+view+'-keys'});list.setAttribute('aria-describedby',hint.id);
     list.onkeydown=event=>{const items=[...list.querySelectorAll('button')],index=items.indexOf(document.activeElement);if(index<0)return;let next;if(event.key==='ArrowDown')next=Math.min(index+1,items.length-1);else if(event.key==='ArrowUp')next=Math.max(0,index-1);else if(event.key==='Home')next=0;else if(event.key==='End')next=items.length-1;else return;event.preventDefault();items[next]?.focus();};
@@ -371,4 +371,116 @@
   });
   window.addEventListener('dream:project-reset',()=>{hide();document.documentElement.dataset.dreamView='chat';});
   window.addEventListener('beforeunload',e=>{if(skillDraft||projectDraft){e.preventDefault();e.returnValue='';}});
+  // Memory (owner request): read, edit, delete and consolidate what Dream remembers --
+  // global memories and per-project notebooks. Saving writes the file; nothing runs.
+  const memory=page('memory','Memory','Read, edit and prune what Dream remembers: global memories and each project\'s notebook.');
+  let memoryRows=[], openMemory=null, memoryDirty=false;
+  const picked=new Set();
+  memory.actions.append(button('Refresh',safe(memory,()=>memory.refresh())),
+    button('Consolidate selected',()=>consolidateMemories(),{class:'primary'}));
+  function drawMemory(){
+    const query=memory.search.value.trim().toLowerCase();memory.list.replaceChildren();
+    const rows=memoryRows.filter(m=>(m.title+' '+m.description+' '+m.name).toLowerCase().includes(query))
+      .filter(m=>memory.filter.value==='all'||m.scope===memory.filter.value);
+    rows.sort((a,b)=>memory.sort.value==='name'?a.title.localeCompare(b.title):String(b.updated).localeCompare(String(a.updated)));
+    memory.count.textContent=rows.length+' of '+memoryRows.length+' memories';
+    for(const m of rows){
+      const key=m.scope+'/'+m.name, row=node('div',null,{class:'memory-row'});
+      const tick=node('input',null,{type:'checkbox','aria-label':'Select '+m.title});tick.checked=picked.has(key);
+      tick.onchange=()=>{tick.checked?picked.add(key):picked.delete(key);};
+      const b=button('',safe(memory,()=>openMem(m)),{'aria-current':String(openMemory?.key===key),'data-key':key});
+      b.append(node('strong',m.title),node('small',(m.scope==='project'?'Project notebook':'Global memory')+' · '+m.updated+' · '+m.size+' bytes'));
+      row.append(tick,b);memory.list.append(row);
+    }
+    if(!memory.list.children.length)memory.list.append(node('p',query?'No matching memories.':'Dream has not saved any memories yet.'));
+  }
+  memory.search.oninput=drawMemory;memory.filter.onchange=drawMemory;memory.sort.onchange=drawMemory;
+  memory.refresh=safe(memory,async()=>{const data=await api('/api/memory');memoryRows=data.items||[];memory.loaded=true;drawMemory();
+    report(memory,'Memory folder: '+(data.memory_dir||''));});
+  async function openMem(m){
+    if(memoryDirty&&!confirm('Discard your unsaved changes to this memory?'))return;
+    const data=await api('/api/memory/'+m.scope+'/'+encodeURIComponent(m.name));
+    openMemory={key:m.scope+'/'+m.name,...m};memoryDirty=false;
+    const box=node('div',null,{class:'memory-editor'});
+    const text=node('textarea',null,{'aria-label':'Memory text',spellcheck:'false'});text.value=data.text;text.oninput=()=>{memoryDirty=true;};
+    const save=button('Save',safe(memory,async()=>{await api('/api/memory/'+m.scope+'/'+encodeURIComponent(m.name),{text:text.value});
+      memoryDirty=false;await memory.refresh();report(memory,'Saved '+data.path);}),{class:'primary'});
+    const del=button('Delete',safe(memory,async()=>{if(!confirm('Delete "'+m.title+'"? This removes the file.'))return;
+      await api('/api/memory/'+m.scope+'/'+encodeURIComponent(m.name),{delete:true});memoryDirty=false;openMemory=null;
+      picked.delete(m.scope+'/'+m.name);memory.detail.replaceChildren();await memory.refresh();report(memory,'Deleted '+data.path);}));
+    box.append(node('h2',m.title),node('p',data.path,{class:'memory-path'}),text,node('div',null,{class:'library-actions'}));
+    box.lastChild.append(save,del);memory.detail.replaceChildren(box);drawMemory();
+  }
+  function consolidateMemories(){
+    const chosen=memoryRows.filter(m=>picked.has(m.scope+'/'+m.name));
+    if(chosen.length<1){report(memory,'Tick the memories to consolidate first.',true);return;}
+    chatDraft('Consolidate these memories into fewer, shorter ones without losing anything that still matters:\n'
+      +chosen.map(m=>'- '+m.path).join('\n')
+      +'\nRead each file, then show me the proposed result (what merges, what goes, the new text) and WAIT for my '
+      +'approval before writing or deleting anything.');
+  }
+
+  // Files (owner request): the project folder and Dream's own setup folders as a tree.
+  // Reading only -- this page never writes, and a folder's children load when it opens.
+  const files=page('files','Files','Browse the project folder and Dream\'s own setup folders. Reading only — nothing here changes a file.');
+  files.actions.append(button('Refresh',safe(files,()=>files.refresh())));
+  const joinPath=(base,name)=>base?base+'/'+name:name;
+  const bytes=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':n>=1024?Math.round(n/1024)+' KB':n+' B';
+  function entryNodes(data){
+    const query=files.search.value.trim().toLowerCase();
+    const rows=(data.entries||[]).filter(e=>!query||e.name.toLowerCase().includes(query));
+    rows.sort((a,b)=>a.type!==b.type?(a.type==='dir'?-1:1)
+      :files.sort.value==='reverse'?b.name.localeCompare(a.name):a.name.localeCompare(b.name));
+    return rows.map(e=>{
+      const path=joinPath(data.path,e.name);
+      return e.type==='dir'?folderNode(data.root,path,e.name):fileNode(data.root,path,e);
+    });
+  }
+  function folderNode(root,path,name){
+    const box=node('details',null,{class:'file-folder','data-path':path});
+    box.append(node('summary',name));
+    let loaded=false;
+    box.ontoggle=safe(files,async()=>{
+      if(!box.open||loaded)return;
+      loaded=true;
+      const data=await api('/api/files?root='+root+'&path='+encodeURIComponent(path));
+      const children=entryNodes(data);
+      box.append(...(children.length?children:[node('p','Empty folder.',{class:'library-meta'})]));
+    });
+    return box;
+  }
+  function fileNode(root,path,entry){
+    const b=button('',safe(files,()=>openFile(root,path)),{class:'file-entry','data-path':path});
+    b.append(node('span',entry.name),node('small',bytes(entry.size)));
+    return b;
+  }
+  async function openFile(root,path){
+    const data=await api('/api/files/read?root='+root+'&path='+encodeURIComponent(path));
+    const box=node('div',null,{class:'file-view'});
+    box.append(node('h2',path.split('/').pop()),node('p',path,{class:'memory-path'}));
+    if(data.binary)box.append(node('p','Not a text file ('+bytes(data.size)+').'));
+    else{
+      box.append(node('pre',data.text,{class:'file-text'}));
+      if(data.truncated)box.append(node('p','Showing the first '+bytes(data.text.length)+' of '+bytes(data.size)+'.',{class:'library-meta'}));
+    }
+    const actions=node('div',null,{class:'library-actions'});
+    actions.append(button('Ask about this file',()=>chatDraft('Read `'+path+'` in the '
+      +(root==='dream'?'Dream folder':'project folder')+' and tell me what it does.')));
+    box.append(actions);
+    files.detail.replaceChildren(box);
+    files.list.querySelectorAll('[aria-current]').forEach(n=>n.removeAttribute('aria-current'));
+    files.list.querySelector('.file-entry[data-path="'+CSS.escape(path)+'"]')?.setAttribute('aria-current','true');
+  }
+  files.refresh=safe(files,async()=>{
+    files.loaded=true;
+    const data=await api('/api/files?root='+files.filter.value);
+    const children=entryNodes(data);
+    files.list.replaceChildren(...(children.length?children:[node('p','Nothing to show here.')]));
+    files.count.textContent=children.length+(children.length===1?' item':' items');
+    report(files,data.base||'');
+  });
+  files.search.oninput=()=>files.refresh();
+  files.filter.onchange=()=>{files.detail.replaceChildren();files.refresh();};
+  files.sort.onchange=()=>files.refresh();
+
 })();

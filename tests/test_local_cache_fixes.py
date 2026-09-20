@@ -145,3 +145,63 @@ async def test_write_file_append_adds_to_the_end(tmp_path, monkeypatch):
     out = await native.write_file.handler({"path": "big.js", "content": "part two\n", "append": True})
     assert (tmp_path / "big.js").read_text() == "part one\npart two\n"
     assert "Appended" in json.dumps(out)
+
+
+async def test_a_looping_reply_is_named_and_asked_for_again():
+    """The engine now stops a reply that repeats itself (finish_reason
+    "repetition", after the live 'adversely' loop). Say what happened and ask
+    once for a fresh answer, instead of 'unsupported_finish_reason'."""
+    b = _backend(n_ctx=65536)
+    b._client = _FakeClient([
+        _usage_round(text="adversely " * 50, finish="repetition"),
+        _text_round("here is the answer"),
+    ])
+    events = [ev async for ev in b.ask("summarise it")]
+    systems = [e.data for e in events if e.kind == "system"]
+    assert any("repeating itself" in s for s in systems)
+    retry = b._client.payloads[1]["messages"][-1]
+    assert retry["name"] == "dream_recovery_instruction" and "repeating the same words" in retry["content"]
+    assert events[-1].data["subtype"] == "success"
+
+
+async def test_a_second_loop_ends_the_turn_and_says_why():
+    b = _backend(n_ctx=65536)
+    loop = _usage_round(text="adversely " * 50, finish="repetition")
+    b._client = _FakeClient([loop, loop])
+    events = [ev async for ev in b.ask("summarise it")]
+    errors = [e.data for e in events if e.kind == "error"]
+    assert len(b._client.payloads) == 2
+    assert any("kept repeating itself" in e for e in errors)
+    assert events[-1].data["subtype"] == "repetition"
+
+
+async def test_a_reply_that_spends_the_whole_budget_without_acting_is_asked_to_act():
+    """Live 2026-09-20: 16,384 tokens over 40 minutes, no tool call, cut at the cap,
+    ending "Now I'll build. Let me check the HTML controls before editing." Nothing ran,
+    and the oversized reply then forced a compaction."""
+    b = _backend(n_ctx=65536)
+    b._client = _FakeClient([
+        _usage_round(text="Analysis. " * 50, finish="length"),
+        _text_round("done"),
+    ])
+    events = [ev async for ev in b.ask("build it")]
+    systems = [e.data for e in events if e.kind == "system"]
+    assert any("without making a single tool call" in s for s in systems)
+    # Deliberately NOT an auto-retry: truncation must not silently repeat work
+    # (test_harness_backend_quality::test_truncated_answer_is_failed_...).
+    assert len(b._client.payloads) == 1
+    assert events[-1].data["subtype"] == "length"
+
+
+async def test_a_cut_off_tool_call_still_takes_priority_over_the_prose_guard():
+    """A length cut inside a write_file must get the in-parts instruction, not the
+    'you did not act' one -- it DID act, it just did not fit."""
+    b = _backend(n_ctx=65536)
+    b._client = _FakeClient([
+        _usage_round(text="Writing.", finish="length", truncated="write_file"),
+        _text_round("done in parts"),
+    ])
+    events = [ev async for ev in b.ask("build it")]
+    systems = [e.data for e in events if e.kind == "system"]
+    assert any("redo the cut-off write_file call in parts" in s for s in systems)
+    assert not any("without making a single tool call" in s for s in systems)

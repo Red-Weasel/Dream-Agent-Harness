@@ -70,7 +70,12 @@ PROVIDERS: dict[str, Provider] = {
         multimodal=False,
     ),
     # Subscription coding-agent CLIs driven headless (see backends/cli_agent.py).
-    "codex": Provider(key="codex", label="ChatGPT · Codex", kind="cli", cli_cmd="codex"),
+    # The codex CLI takes images: `codex exec -i/--image`, and its MCP client renders an
+    # ImageContent tool result. `see` already returns one, the session bridge preserves it
+    # (bridge._result validates into CallToolResult), so the only thing that had image input
+    # switched off for Astra was this flag being absent.
+    "codex": Provider(key="codex", label="ChatGPT · Codex", kind="cli", cli_cmd="codex",
+                      multimodal=True),
     "grok": Provider(key="grok", label="Grok · xAI", kind="cli", cli_cmd="grok"),
     "gemini": Provider(key="gemini", label="Gemini · Google", kind="cli", cli_cmd="gemini"),
 }

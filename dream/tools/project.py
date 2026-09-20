@@ -87,6 +87,123 @@ async def update_todos(args: dict[str, Any]) -> dict[str, Any]:
     return ok(f"Plan: {len(names)} task(s), {done} done.\n" + "\n".join(lines))
 
 
+# --- update_plan -------------------------------------------------------------------------
+# The project's phased plan (owner design, DREAM-083): a visible PLAN.md in the workspace
+# and a panel beside the chat, with ● done / ◐ in progress / ○ not started. A phase that
+# turns done carries a summary, and the backend compacts the conversation at that
+# boundary so the next phase starts lean -- PLAN.md is what carries over.
+
+PHASE_DONE = "Phase complete:"
+_STATUSES = ("pending", "in_progress", "done")
+_MARK = {"done": "●", "in_progress": "◐", "pending": "○"}
+_LAST_PLAN: dict[str, dict[str, str]] = {}   # workspace -> phase name -> status last written
+
+
+def _plan_markdown(title: str, phases: list[dict[str, Any]]) -> str:
+    from datetime import datetime
+    lines = [f"# Plan{': ' + title if title else ''}", "",
+             f"Status: ● done · ◐ in progress · ○ not started — updated {datetime.now():%Y-%m-%d %H:%M} by Dream", ""]
+    for i, phase in enumerate(phases, 1):
+        lines.append(f"## {_MARK[phase['status']]} {i}. {phase['name']}")
+        lines.extend(f"- {_MARK[s['status']]} {s['name']}" for s in phase["steps"])
+        if phase.get("summary"):
+            lines.append(f"\n> **Summary:** {phase['summary']}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+@tool(
+    "update_plan",
+    "Keep the project's phased plan in PLAN.md (workspace) and the plan panel. Call it first for any "
+    "multi-step build, then whenever a step changes; each call sends the COMPLETE plan. Status: "
+    "pending | in_progress | done. A phase marked done needs a `summary` (what exists, what the next "
+    "phase needs): Dream compacts the conversation at each phase boundary, so PLAN.md carries over.",
+    {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "phases": {"type": "array", "items": {"type": "object", "properties": {
+                "name": {"type": "string"}, "status": {"type": "string", "enum": list(_STATUSES)},
+                "summary": {"type": "string"},
+                "steps": {"type": "array", "items": {"type": "object", "properties": {
+                    "name": {"type": "string"}, "status": {"type": "string", "enum": list(_STATUSES)}},
+                    "required": ["name", "status"]}}},
+                "required": ["name", "status", "steps"]}},
+        },
+        "required": ["phases"],
+    },
+)
+async def update_plan(args: dict[str, Any]) -> dict[str, Any]:
+    raw = args.get("phases")
+    if not isinstance(raw, list) or not raw:
+        return err("update_plan needs a non-empty 'phases' list of {name, status, steps}.")
+    phases: list[dict[str, Any]] = []
+    for i, p in enumerate(raw):
+        if not isinstance(p, dict) or not str(p.get("name") or "").strip() or p.get("status") not in _STATUSES:
+            return err(f"phases[{i}] needs a name and a status ({', '.join(_STATUSES)}).")
+        steps = []
+        for j, s in enumerate(p.get("steps") or []):
+            if not isinstance(s, dict) or not str(s.get("name") or "").strip() or s.get("status") not in _STATUSES:
+                return err(f"phases[{i}].steps[{j}] needs a name and a status ({', '.join(_STATUSES)}).")
+            steps.append({"name": str(s["name"]).strip(), "status": s["status"]})
+        phases.append({"name": str(p["name"]).strip(), "status": p["status"], "steps": steps,
+                       "summary": str(p.get("summary") or "").strip()})
+    key = str(ctx().workspace)
+    prev = _LAST_PLAN.get(key, {})
+    newly_done = [p["name"] for p in phases if p["status"] == "done" and prev and prev.get(p["name"]) != "done"]
+    missing = [n for n in newly_done if not next(p for p in phases if p["name"] == n)["summary"]]
+    if missing:
+        return err(f"Give phase {missing[0]!r} a summary (what exists now, what the next phase needs) before "
+                   "marking it done: the conversation is compacted at the phase boundary, so the summary "
+                   "is what carries over. Call update_plan again with it.")
+    title = str(args.get("title") or "").strip()
+    path = ctx().workspace / "PLAN.md"
+    try:
+        await in_thread(path.write_text, _plan_markdown(title, phases), "utf-8")
+    except OSError as e:
+        return err(f"Could not write {path}: {type(e).__name__}: {e}")
+    _LAST_PLAN[key] = {p["name"]: p["status"] for p in phases}
+    emit = ctx().emit
+    if emit is not None:
+        from ..core.backends.base import Event
+        emit(Event("plan", {"title": title, "phases": phases, "path": str(path)}))
+    steps = [s for p in phases for s in p["steps"]]
+    note = (f"PLAN.md updated: {len(phases)} phase(s), {sum(s['status'] == 'done' for s in steps)}"
+            f"/{len(steps)} steps done.")
+    if newly_done:
+        note = (f"{PHASE_DONE} {', '.join(newly_done)}. Dream compacts the conversation before the next "
+                "request so the next phase starts lean; PLAN.md, the phase summary and your notes carry "
+                "over.\n" + note)
+    return ok(note)
+
+
+# --- project_note --------------------------------------------------------------------------
+
+
+@tool(
+    "project_note",
+    "Add to this project's memory notebook (kept in Dream's memory folder, loaded at every session "
+    "in this project): what exists, conventions, decisions, what is left. `replace: true` rewrites "
+    "the whole notebook (to consolidate it); otherwise the text is appended as a dated line.",
+    {"type": "object", "properties": {"text": {"type": "string"}, "replace": {"type": "boolean"}},
+     "required": ["text"]},
+)
+async def project_note(args: dict[str, Any]) -> dict[str, Any]:
+    from ..memory import project as project_memory
+    text = str(args.get("text") or "").strip()
+    if not text:
+        return err("project_note needs 'text'.")
+    workspace = ctx().workspace
+    if not project_memory.is_project(workspace):
+        return err("This session has no project folder (it runs in your home or Dream's own folder); "
+                   "use remember() for global memory.")
+    try:
+        path = await in_thread(project_memory.add_note, workspace, text, replace=args.get("replace") is True)
+    except OSError as e:
+        return err(f"Could not write project memory: {type(e).__name__}: {e}")
+    return ok(f"Project memory updated: {path}")
+
+
 # --- set_project_title -------------------------------------------------------------------
 
 
@@ -346,4 +463,4 @@ def manifest_with_content() -> list[dict[str, Any]]:
     return out
 
 
-PROJECT_TOOLS = [update_todos, set_project_title, save_as_template, register_assets, unregister_assets]
+PROJECT_TOOLS = [update_todos, update_plan, project_note, set_project_title, save_as_template, register_assets, unregister_assets]

@@ -18,7 +18,7 @@
   const brand=el('div',null,{class:'dream-nav-brand'});
   const brandText=el('div','DREAM');brandText.append(el('small','Build · Explore · Align'));
   brand.append(el('img',null,{src:'/assets/dream-mark.svg',alt:'',width:'44',height:'44'}),brandText);nav.append(brand);
-  const views=[['home','◉','Home'],['chat','◌','Chat'],['studio','◇','Studio'],['projects','▱','Projects'],['optimizer','✎','Prompt Optimizer'],['skills','✧','Skills'],['memory','▧','Memory'],['settings','⚙','Settings']];
+  const views=[['home','◉','Home'],['chat','◌','Chat'],['studio','◇','Studio'],['projects','▱','Projects'],['optimizer','✎','Prompt Optimizer'],['skills','✧','Skills'],['memory','▧','Memory'],['files','▤','Files'],['settings','⚙','Settings']];
   for(const [view,icon,label] of views){const b=button('',()=>navigate(view),'dream-nav-'+view);b.title=label;b.setAttribute('aria-label','Go to '+label);b.append(el('i',icon,{'aria-hidden':'true'}),el('span',label));nav.append(b);}
   nav.append(button('⌘',()=>palette.showModal(),'dream-command-open'));$('dream-command-open')?.setAttribute('aria-label','Command palette');
   document.body.prepend(nav);$('dream-command-open').setAttribute('aria-label','Command palette');
@@ -76,7 +76,8 @@
     nav.querySelectorAll('[aria-current]').forEach(n=>n.removeAttribute('aria-current'));$('dream-nav-'+view)?.setAttribute('aria-current','page');
     if(view==='optimizer'){inspector.hidden=true;$('studio-interactions')?.click();window.PromptOptimizer?.show();}
     else if(view==='home'){inspector.hidden=true;loadHome();}
-    else if(view==='memory'){inspector.hidden=false;refresh();environment();}
+    else if(view==='memory'){inspector.hidden=true;window.DreamLibrary?.show('memory');}
+    else if(view==='files'){inspector.hidden=true;window.DreamLibrary?.show('files');}
     else if(destinations[view])$(destinations[view])?.click();
   }
   let pendingNative=null;

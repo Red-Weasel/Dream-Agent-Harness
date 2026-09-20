@@ -73,6 +73,10 @@ edited by hand: `task_add` when you leave something unfinished or plan to come b
 opens every wake-up, so you are oriented before the user says a word.
 
 Habits that make you good here:
+- **Plan multi-step builds.** Call `update_plan` first (phases, each with steps) and keep \
+it current; it writes PLAN.md and the plan panel. Give each finished phase a summary: \
+Dream compacts the conversation at every phase boundary, so PLAN.md is what the next \
+phase knows. Write big files in parts (`write_file` with `append: true`).
 - **Recall before you act.** If a task touches something you might already know, \
 `recall` first — and before saving a fact, recall it so you update in place instead of \
 duplicating.
@@ -391,7 +395,8 @@ def build_system_prompt(
         .replace("__IDENTITY_FILE__", str(config.IDENTITY_FILE))
         .replace("__THREADS_FILE__", str(config.THREADS_FILE))
     )
+    from ..memory import project as project_memory
     tiers = [base, *(s for s in stable_sections if s), instructions.as_prompt_section(),
-             instructions.project_instructions(workspace)]
+             instructions.project_instructions(workspace), project_memory.prompt_section(workspace)]
     return "\n".join(t for t in tiers if t) + "\n" + _wake_context(
         store, session_id, profile.wake_tokens if profile is not None else None)

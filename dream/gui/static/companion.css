@@ -207,3 +207,12 @@
 
 .companion #chat-progress { max-width:800px; margin:0 auto 10px; font:12px/1.6 var(--sans); color:var(--dim); }
 .companion .tool.incomplete .badge { color:#e9c983; }
+
+#new-chat-ask { position:fixed; left:50%; top:30%; transform:translateX(-50%); z-index:50; max-width:440px;
+  background:var(--panel, #141824); border:1px solid var(--line, #232838); border-radius:12px; padding:16px 18px;
+  box-shadow:0 12px 40px rgba(0,0,0,.45); color:var(--fg); font:14px/1.5 var(--sans, sans-serif); }
+#new-chat-ask .new-chat-note { color:var(--dim); font-size:12.5px; margin-top:-4px; }
+#new-chat-ask div { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+#new-chat-ask button { background:none; border:1px solid var(--line, #232838); color:var(--fg); border-radius:8px;
+  padding:6px 10px; font:inherit; cursor:pointer; }
+#new-chat-ask button[data-new="save"] { border-color:var(--violet, #8b5cf6); }

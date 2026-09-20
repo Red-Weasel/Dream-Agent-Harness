@@ -654,17 +654,22 @@ class DreamWindow(Gtk.Window):
             return False
         dialog = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
                                    buttons=Gtk.ButtonsType.NONE, text='Finish this Dream session?')
-        dialog.format_secondary_text('Dream will finish its current turn and save the session before this window closes. Your browser stays open until it is done.')
-        dialog.add_buttons('Keep working', Gtk.ResponseType.CANCEL, 'Finish and close', Gtk.ResponseType.ACCEPT)
+        dialog.format_secondary_text('Dream will finish its current turn and save the conversation before this window '
+                                     'closes. Saving to long-term memory also writes a summary and the memories worth '
+                                     'keeping; that model pass can take several minutes.')
+        dialog.add_buttons('Keep working', Gtk.ResponseType.CANCEL,
+                           'Close without saving to memory', Gtk.ResponseType.REJECT,
+                           'Save to memory and close', Gtk.ResponseType.ACCEPT)
         response = dialog.run()
         dialog.destroy()
-        if response == Gtk.ResponseType.ACCEPT:
+        if response in (Gtk.ResponseType.ACCEPT, Gtk.ResponseType.REJECT):
+            quit_line = '/quit save' if response == Gtk.ResponseType.ACCEPT else '/quit nosave'
             self.closing = True
             if self.address_info:
                 base, token = self.address_info
                 def finish():
                     try:
-                        request = Request(base + '/api/prompt', data=json.dumps({'prompt': '/quit'}).encode(),
+                        request = Request(base + '/api/prompt', data=json.dumps({'prompt': quit_line}).encode(),
                                           headers={'x-dream-token': token, 'Content-Type': 'application/json'})
                         with build_opener(ProxyHandler({})).open(request, timeout=3) as result:
                             result.read()
