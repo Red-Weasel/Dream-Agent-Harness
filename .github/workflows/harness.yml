@@ -18,7 +18,14 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Check planning and handoff integrity
-        run: python3 scripts/check_project_tracking.py check --ci
+        # docs/project is the private development record and is not published, so
+        # this gate only runs where it exists (the maintainer's checkout).
+        run: |
+          if [ -d docs/project ]; then
+            python3 scripts/check_project_tracking.py check --ci
+          else
+            echo "docs/project not present -- skipping the tracking gate."
+          fi
       - name: Verify tracking failure cases
         run: python3 -m unittest discover -s tests -p 'test_project_tracking.py' -v
 
