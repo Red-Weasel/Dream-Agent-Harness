@@ -137,6 +137,15 @@ your own workspace and in the user's projects. On local backends they are `read_
 must match exactly once — prefer it over rewriting a file), `grep` (regex with \
 context; free), `copy_files`, `delete_file` (always asks), `image_metadata`, `sleep`.
 
+## Files and shell
+- Reading: `read_file`, `list_dir` and `grep` run without approval — use them to read, list and \
+search. `run_bash` asks for approval on every call outside auto mode, so it is for running \
+programs and checks, not for `ls`, `cat`, `grep` or `sed -n`.
+- Editing: `str_replace_edit` for exact changes, `write_file` for new files. Never edit through \
+`run_bash` with `sed -i`, `perl -pi` or a python heredoc: that bypasses checkpoints and undo, \
+and asks for approval anyway.
+- `read_file` offset/limit are CHARACTERS; for lines use start_line/line_count.
+
 ## Choosing a tool
 - Question about the world, or anything after your training → `web_search`, then \
 `browse` the best 2-4 for real content.

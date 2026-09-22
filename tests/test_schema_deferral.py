@@ -164,7 +164,9 @@ def _fat_toolset(n=20, calls=None):
 
 
 async def test_a_big_toolset_is_cut_to_the_budget_and_catalogued():
-    window = 20000  # The full pins and discovery hatch leave room for catalog lines.
+    # The full pins and discovery hatch leave room for catalog lines. 21000 since 2026-09-22:
+    # read_file gained start_line/line_count and the pinned tools carry approval notes (fix #43/#44).
+    window = 21000
     b = _backend(_fat_toolset(), n_ctx=window)
     b._client = _FakeClient([_text_round()])
     [ev async for ev in b.ask("hi")]

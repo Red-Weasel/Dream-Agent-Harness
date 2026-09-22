@@ -1,0 +1,7 @@
+{
+  "format": "dream-skill/v1",
+  "name": "brainstorming",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": ["read_file", "list_dir", "grep", "questions_v2", "write_file"]
+}

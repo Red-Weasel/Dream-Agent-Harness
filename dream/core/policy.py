@@ -454,6 +454,59 @@ def _static_shell_read(command: str) -> bool:
         "status", "diff", "log", "show", "ls-files", "rev-parse", "describe"}
 
 
+_READ_VERBS = frozenset({
+    "cd", "pwd", "ls", "cat", "head", "tail", "less", "more", "wc", "grep", "egrep", "fgrep", "rg",
+    "find", "stat", "file", "du", "df", "echo", "printf", "true", "false", "which", "type", "env",
+    "sort", "uniq", "cut", "tr", "diff", "cmp", "md5sum", "sha256sum", "basename", "dirname",
+    "realpath", "readlink", "date", "nl", "column", "jq", "tree", "test", "[",
+})
+_READ_GIT = frozenset({"status", "diff", "log", "show", "ls-files", "rev-parse", "describe", "blame", "branch", "remote"})
+
+
+def shell_read_only(command: str) -> bool:
+    """Every segment of `command` is a read: an allow-listed verb (cd/ls/cat/grep/sed -n/
+    awk without output/git status...), no redirection into a file, no in-place edit flag.
+    A verb not on the list is NOT a read. Used by the progress guard (fix #46); a
+    conservative classifier, never evidence of containment."""
+    try:
+        parts = _shell_parts(command)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>\n")
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        redirected = any(token and set(token) <= set("<>&") and ">" in token for token in lexer)
+    except ValueError:
+        return False
+    if not parts or redirected:      # `>` as a shell token, not inside a quoted awk/grep program
+        return False
+    for words in parts:
+        verb = words[0]
+        if verb in {"sudo", "env", "command", "nice", "time", "timeout"}:
+            words = words[1:]
+            while words and (words[0].startswith("-") or "=" in words[0]) and verb in {"env", "timeout", "nice"}:
+                words = words[1:]
+            if not words:
+                return False
+            verb = words[0]
+        args = words[1:]
+        if verb == "sed":
+            if any(a == "-i" or (a.startswith("-") and not a.startswith("--") and "i" in a[1:]) or a.startswith("--in-place") for a in args):
+                return False
+            continue
+        if verb == "awk":
+            if any(a in {">", ">>"} for a in args):
+                return False
+            continue
+        if verb == "git":
+            if not args or args[0] not in _READ_GIT:
+                return False
+            continue
+        if verb in {"perl", "python", "python3", "node", "ruby", "bash", "sh", "zsh", "xargs", "tee"}:
+            return False
+        if verb not in _READ_VERBS:
+            return False
+    return True
+
+
 def _bounded_output_cleanup(command: str, workspace: Path) -> bool:
     """Recognize a narrow output convention, not proof of file provenance.
 
@@ -630,6 +683,10 @@ def decide(
             if _shell_unconfined(command, workspace):
                 return "ask", f"outside workspace (shell): {command[:60]}"
             return "ask", effect
+        if contained and shell_read_only(command):
+            # Fix #41 (2026-09-21: 145 s of the first 264 s waited on ls/grep/cat): a contained command
+            # whose every segment only reads runs without asking, in every mode but plan.
+            return "allow", "read-only command inside workspace containment"
         if contained:
             return ("allow", "contained command") if mode == "auto" else ("ask", "shell command")
         # The workspace boundary applies to shell too. A command that isn't

@@ -27,11 +27,14 @@ def _resolve(raw: str) -> Path:
     "read_file",
     "Read text or PDF/DOCX/XLSX/PPTX extracts. Images: metadata; ZIP/TAR: listings. "
     "No OCR, macros or transcription. Use query for keyword excerpts with source "
-    "locations. Defaults: 12000 characters, 10 PDF pages. Follow offset hints for more.",
+    "locations. Defaults: 12000 characters, 10 PDF pages. Follow offset hints for more. "
+    "Offsets are CHARACTERS; start_line/line_count read lines. No approval needed.",
     {"type": "object", "properties": {
         "path": {"type": "string"},
-        "offset": {"type": "integer", "minimum": 0, "description": "Character offset; default 0."},
-        "limit": {"type": "integer", "minimum": 1, "maximum": 50000, "description": "Characters; default 12000."},
+        "offset": {"type": "integer", "minimum": 0, "description": "CHARACTERS, not lines; default 0."},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50000, "description": "CHARACTERS, not lines; default 12000."},
+        "start_line": {"type": "integer", "minimum": 1, "description": "First line, 1-based."},
+        "line_count": {"type": "integer", "minimum": 1, "maximum": 2000, "description": "Lines; default 200."},
         "page_start": {"type": "integer", "minimum": 1, "description": "First PDF page; default 1."},
         "page_count": {"type": "integer", "minimum": 1, "maximum": 50, "description": "PDF page count; default 10."},
         "sheet": {"type": "string", "description": "Exact XLSX sheet; default up to 50."},
@@ -49,10 +52,33 @@ async def read_file(args: dict[str, Any]) -> dict[str, Any]:
         p = _resolve(raw)
         if not p.is_file():
             return err(f"No file at {p}")
+        if 'start_line' in args or 'line_count' in args:
+            return ok(await in_thread(_read_lines, p, int(args.get('start_line') or 1), int(args.get('line_count') or 200)))
         options = {key: args[key] for key in ('offset', 'limit', 'page_start', 'page_count', 'sheet', 'query') if key in args}
-        return ok(await in_thread(read_document, p, workspace=ctx().workspace, **options))
+        text = await in_thread(read_document, p, workspace=ctx().workspace, **options)
+        limit = args.get('limit')
+        if isinstance(limit, int) and limit < 1000:
+            text += (f"\n[read_file: limit is in CHARACTERS — this returned {limit} characters. "
+                     "For lines, call read_file with start_line and line_count.]")
+        return ok(text)
     except Exception as e:
         return err(f"Could not read {raw}: {type(e).__name__}: {e}")
+
+
+def _read_lines(p, start_line: int, line_count: int) -> str:
+    """Lines [start_line, start_line + line_count) of a text file, 1-based, with a hint that
+    says where the block sits and where the next one starts."""
+    lines = p.read_text(encoding='utf-8', errors='replace').splitlines(keepends=True)
+    total = len(lines)
+    start = max(1, start_line)
+    end = min(total, start + max(1, line_count) - 1)
+    if start > total:
+        return f"[lines {start}-{start} of {total}: past the end of file]"
+    body = ''.join(lines[start - 1:end])
+    if not body.endswith('\n'):
+        body += '\n'
+    tail = 'end of file' if end >= total else f'next: start_line={end + 1}'
+    return body + f"[lines {start}-{end} of {total}; {tail}]"
 
 
 @tool(
@@ -116,7 +142,7 @@ async def write_file(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "list_dir",
-    "List the entries in a directory.",
+    "List the entries in a directory. No approval needed.",
     {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
 )
 async def list_dir(args: dict[str, Any]) -> dict[str, Any]:
@@ -191,7 +217,8 @@ def _describe_run(command: str, rc: int, text: str) -> str:
 
 @tool(
     "run_bash",
-    "Run a bash command and return its combined stdout/stderr. Verified workspace "
+    "Run a bash command and return its combined stdout/stderr (asks for approval; read with "
+    "read_file/list_dir/grep instead). Verified workspace "
     "containment is a prerequisite for routine contained commands; consequential actions "
     "require approval. An unavailable execution prerequisite cannot be fixed by rewriting "
     "the command. The sandbox sees only this workspace; it has public internet through "

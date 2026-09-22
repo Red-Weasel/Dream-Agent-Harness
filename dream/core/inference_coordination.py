@@ -106,10 +106,33 @@ def local_endpoint(url: str) -> str | None:
 
 
 class EndpointCoordinator:
-    def __init__(self, endpoint: str, *, root: Path | None = None):
+    def __init__(self, endpoint: str, *, root: Path | None = None, server_started_at=None):
         self.root = Path(root) if root is not None else Path('/tmp') / f'dream-inference-{os.getuid()}'
         self.key = hashlib.sha256(endpoint.encode()).hexdigest()
         self.waiting = False
+        # Fix #53: a callable returning the serving process's start time (epoch seconds), or None
+        # when unknown. A lease left "running" by a DEAD owner for a server that started AFTER the
+        # lease cannot describe anything in flight; it is reconciled here instead of refusing the
+        # owner's first prompt (2026-09-22 01:36).
+        self.server_started_at = server_started_at
+
+    def _stale_lease(self, record) -> bool:
+        pid = record.get('pid')
+        started = record.get('updated_at') or record.get('started_at')
+        if not isinstance(pid, int) or not isinstance(started, (int, float)) or not callable(self.server_started_at):
+            return False
+        try:
+            os.kill(pid, 0)
+            return False                      # the owner is alive: its request may be in flight
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            return False
+        try:
+            server = self.server_started_at()
+        except Exception:
+            return False
+        return isinstance(server, (int, float)) and server > started
 
     def _directory(self):
         try:
@@ -227,6 +250,14 @@ class EndpointCoordinator:
                     await asyncio.sleep(.05)
             self.waiting = False
             previous = self._read(directory)
+            if previous['state'] != 'idle' and self._stale_lease(previous):
+                self._write(directory, {'schema_version': 1, 'state': 'idle', 'request_id': None,
+                                        'reconciled_at': time.time(),
+                                        'auto_reconciled': {'dead_pid': previous.get('pid'), 'was': previous['state']}})
+                if on_event:
+                    on_event({'state': 'reconciled', 'message': 'A previous Dream request was left running by a '
+                              'process that is gone, and the engine has restarted since; the lease was cleared.'})
+                previous = self._read(directory)
             if previous['state'] != 'idle':
                 # Say WHEN and WHY, and name the one action that clears it. Twice on
                 # 2026-09-20 the owner read the bare refusal as "the harness hung" --

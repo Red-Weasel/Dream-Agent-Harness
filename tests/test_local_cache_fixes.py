@@ -70,7 +70,7 @@ async def test_admission_compacts_in_one_big_step():
     before = openai_compat._est_tokens(b.messages)
     b._admit_request(b.messages, b._request_tools())
     after = openai_compat._est_tokens(b.messages)
-    assert before > 8192 and after <= int(8192 * openai_compat._COMPACT_AT / 2) + 64
+    assert before > 8192 and after <= int(8192 * openai_compat.compact_at(8192) / 2) + 64
 
 
 async def test_reasoning_is_kept_on_the_reply_and_dropped_for_earlier_tasks():

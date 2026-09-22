@@ -145,9 +145,14 @@ def serve(model_path: Path, gpus: int | None = None, ctx: int | None = None,
         args.extend(["--ctx", str(ctx)])
     args.extend(server_args(options or {}, ctx=ctx or 8192, gpus=gpus))
     config.LOG_DIR.mkdir(parents=True, exist_ok=True)
+    # Fix list #49: the engine records a decode routing profile only when IE_DS41_PROFILE_OUT is set,
+    # and the profile is what a Dream-shaped expert placement is built from. Default it (the engine
+    # keeps the counts across restarts); an explicit value in the environment wins.
+    env = dict(os.environ)
+    env.setdefault("IE_DS41_PROFILE_OUT", str(Path.home() / ".cache" / "machx-ie" / "ds41-dream-profile.txt"))
     with load_lock(PORT) as launch_fd, _log_file().open("a", encoding="utf-8") as log:
         proc = subprocess.Popen(
-            _command(args), cwd=MACHX_DIR,
+            _command(args), cwd=MACHX_DIR, env=env,
             stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
             pass_fds=(launch_fd,),
         )
@@ -155,6 +160,21 @@ def serve(model_path: Path, gpus: int | None = None, ctx: int | None = None,
     os.environ["DREAM_MACHX_CTX"] = str(ctx or 8192)
     _pid_file().write_text(str(proc.pid), encoding="utf-8")
     return proc
+
+
+def server_started_at() -> float | None:
+    """Epoch start time of the engine process Dream launched (from its pid file and /proc), or
+    None when there is no such process. Used by the inference lease to tell a stale record from
+    a live one (fix #53)."""
+    try:
+        pid = int(_pid_file().read_text().strip())
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        start_ticks = int(stat.rsplit(")", 1)[1].split()[19])      # field 22, after the comm field
+        btime = next(int(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines()
+                     if line.startswith("btime"))
+        return btime + start_ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, StopIteration, IndexError):
+        return None
 
 
 def wait_ready(

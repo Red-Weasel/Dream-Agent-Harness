@@ -165,7 +165,7 @@ async def str_replace_edit(args: dict[str, Any]) -> dict[str, Any]:
     "Search file contents for a regex (Python re, case-insensitive). Each match returns "
     "file path, line number, and 2 lines of context either side. Searches up to 3000 "
     "files under the workspace, skipping .git, .venv, node_modules, other dot-folders, "
-    "and binaries; "
+    "and binaries; no approval needed; "
     "returns up to 100 matches — past the cap, narrow the pattern or scope with `path` "
     "(a directory searches under it, a file searches just it).",
     {

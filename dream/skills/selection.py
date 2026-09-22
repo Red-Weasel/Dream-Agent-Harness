@@ -72,6 +72,20 @@ _RULES = {
         r'\b(?:my|the|your) library\b|\blibrary (?:file|document|version|folder|search|restore)\b',
         r'\b(?:restore|update|find|retrieve)\b.{0,60}\b(?:saved (?:plan|report|document)|previous version|last week.s (?:plan|notes))\b',
     ),
+    'brainstorming': (
+        r'\b(?:brainstorm(?:ing)?|spec (?:this|it) out|think (?:this |it )?through|design (?:how|the approach|a plan|the plan)|what approach|before (?:we|I|you) (?:build|implement|code|start)|plan (?:out|for) (?:the|a|this))\b',
+        r'\b(?:requirements|trade-?offs?|options?|architecture)\b.{0,50}\b(?:decide|choose|recommend|weigh|compare)\b',
+    ),
+    'debugging': (
+        r'\b(?:root cause|debug(?:ging)?|intermittent(?:ly)?|flaky|fails? only|reproduce|regression)\b',
+        r'\bwhy (?:does|do|is|are|did) .{0,60}\b(?:fail|crash|break|hang|wrong|error)',
+    ),
+    'gated-build': (
+        r'\b(?:gated build|alpha[ -]?omega|build (?:it |this )?in phases|phases? with (?:a |an )?(?:fresh |independent )?(?:verifier|evaluator|gate)|pass/fail gates?|checkpoint gates?)\b',
+    ),
+    'frontend-design': (
+        r'\b(?:visual identity|typography|distinctive|aesthetic|look and feel|ui design|redesign|landing page|hero section|color palette|design tokens)\b',
+    ),
     'verifying': (
         r'\b(?:verify|verification|validate|sanity.check|acceptance check|regression|recover|recovery|stuck|blocked|retry|interrupted|resume task)\b',
         r'\b(?:command|tool|export|operation)\b.{0,35}\b(?:failed|failure|error|timed out|timeout)\b',
@@ -84,7 +98,8 @@ _PATTERNS = {name: tuple(re.compile(pattern, re.I) for pattern in patterns)
 _ACTION_PATTERN_INDEX = {
     'computer-use': (0, 1, 2, 3, 4), 'coding': (2,), 'research': (0, 2),
     'writing': (0,), 'documents': (1,), 'data-analysis': (1,), 'media': (1,),
-    'library': (1,), 'verifying': (1,),
+    'library': (1,), 'verifying': (1,), 'brainstorming': (0,), 'debugging': (0, 1),
+    'gated-build': (0,), 'frontend-design': (0,),
 }
 
 

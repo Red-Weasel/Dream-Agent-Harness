@@ -1394,6 +1394,8 @@ class Engine:
                 self.session_id, self._turn_index, self.working.log_turn,
                 lambda receipt: self.emit(Event('steering', receipt)) if self.emit else None)
             self.backend.steering_inbox = self._steering_inbox
+            from .progress_guard import ProgressGuard
+            self._progress_guard = ProgressGuard.from_env(self.workspace)
             if self.emit:
                 self.emit(Event('steering_ready', {'session_id': self.session_id, 'turn': self._turn_index}))
         async with aclosing(self.backend.ask(backend_prompt)) as events:
@@ -1402,6 +1404,20 @@ class Engine:
                     await in_thread(self.working.log_turn, "assistant", ev.data)
                 elif ev.kind == "tool_use":
                     self.tool_budget.record()
+                    # Progress guard (fix #46): a run of read-only steps with no project write
+                    # gets one steering note through the same inbox the owner's corrections use.
+                    guard = getattr(self, "_progress_guard", None)
+                    inbox = getattr(self, "_steering_inbox", None)
+                    if guard is not None and inbox is not None:
+                        note = guard.observe(str(ev.data.get("name") or "").split("__")[-1], ev.data.get("input") or {})
+                        if note:
+                            import uuid
+                            try:
+                                await inbox.submit(note, uuid.uuid4().hex)
+                            except ValueError:
+                                pass
+                            self.runtime_meter.record("progress_guard", turn=self._turn_index, reads=guard.reads, fired=guard.fired)
+                            yield Event("system", f"progress guard: {guard.reads} read-only steps without a project write — asked the model to act or say what blocks it")
                     # Self-built tools accrue usage history — it feeds their staleness tag.
                     short = str(ev.data.get("name") or "").split("__")[-1]
                     await in_thread(

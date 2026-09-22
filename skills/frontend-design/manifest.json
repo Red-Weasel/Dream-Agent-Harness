@@ -1,0 +1,7 @@
+{
+  "format": "dream-skill/v1",
+  "name": "frontend-design",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": ["write_file", "str_replace_edit", "show_html", "screenshot_user_view", "see"]
+}

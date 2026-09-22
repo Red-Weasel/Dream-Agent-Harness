@@ -1,0 +1,7 @@
+{
+  "format": "dream-skill/v1",
+  "name": "debugging",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": ["run_bash", "read_file", "grep", "str_replace_edit"]
+}

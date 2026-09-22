@@ -133,9 +133,11 @@ async def test_benign_shell_keeps_mode_behavior(tmp_path):
         "echo hi >> notes.txt", "python script.py", "npm run build",
         "grep -r rm .", "mkdir -p sub/dir",
     ]
+    read_only = {"ls -la", "git status", "grep -r rm ."}   # fix #41: contained reads never ask
     for cmd in benign:
         assert policy.decide("run_bash", {"command": cmd}, "auto", tmp_path, **options)[0] == "allow", cmd
-        assert policy.decide("run_bash", {"command": cmd}, "accept-edits", tmp_path, **options)[0] == "ask", cmd
+        expected = "allow" if cmd in read_only else "ask"
+        assert policy.decide("run_bash", {"command": cmd}, "accept-edits", tmp_path, **options)[0] == expected, cmd
     assert policy.decide("run_bash", {"command": "rm -rf build/"}, "auto", tmp_path, **options)[0] == "ask"
     assert policy.decide("run_bash", {"command": "ls"}, "plan", tmp_path, **options)[0] == "deny"
 

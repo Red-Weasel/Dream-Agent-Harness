@@ -173,7 +173,16 @@ _TOOL_NAME_CAP = 128
 # Fraction of the window at which the history gets compacted in place. Past this
 # the server either 400s (and since the history never shrinks on its own, every
 # later turn 400s identically) or silently evicts the system prompt.
-_COMPACT_AT = float(os.environ.get("DREAM_COMPACT_AT", "0.75"))
+_COMPACT_AT = float(os.environ["DREAM_COMPACT_AT"]) if os.environ.get("DREAM_COMPACT_AT") else None
+
+
+def compact_at(window: int) -> float:
+    """The fill fraction that triggers compaction. DREAM_COMPACT_AT wins when set;
+    otherwise 0.75, or 0.85 on a window of 64k+ (2026-09-21: two compactions in 40 min
+    at 75k while 19k of the window never got used, each costing 45-73 s of re-prefill)."""
+    if _COMPACT_AT is not None:
+        return _COMPACT_AT
+    return 0.85 if window >= 65536 else 0.75
 
 # The salvage reply's ceiling. A summary of work already done needs room to be
 # useful and no more; this is not the place to write a new document.
@@ -503,6 +512,21 @@ def _turn_of(messages: list[dict[str, Any]], i: int) -> str:
 # `snip` is offered from this many user messages on: a fresh conversation has
 # nothing worth removing, and a first request should not pay for the schema.
 _SNIP_FROM_TURN = 3
+
+# Tools that CHANGE something, as opposed to looking at something. Used to notice a
+# turn that is investigating without converging: live 2026-09-20, a session ran 114
+# tool calls over four hours on one visual detail and edited two files. The loop
+# guard could not see it -- every call differed and every result differed -- because
+# it watches for repetition, not for absence of progress.
+_CHANGING_TOOLS = frozenset({
+    "write_file", "str_replace_edit", "copy_files", "delete_file", "restore_version",
+    "run_bash", "run_script", "skill_save", "skill_patch", "memory_write",
+    "memory_append", "memory_str_replace", "memory_delete", "update_plan",
+    "update_todos", "project_note", "note", "remember", "library_replace",
+})
+# run_bash/run_script are in there because a command is how a model edits when it
+# prefers the shell; the guard would otherwise nag a session doing real work.
+_NO_PROGRESS_AT = (30, 60)
 
 # Names models reach for that mean one of Dream's tools. Applied only when the
 # alias is not itself a real tool, and before any scope check.
@@ -937,7 +961,9 @@ class OpenAICompatBackend(Backend):
         # Join cancellation before Engine changes the turn's accounting/context.
         if self._idle_work:
             await self._idle_work.foreground_started(cancel_running=self._coordinator() is None)
-        self._active_performance = dict(self.performance_status()["effective"])
+        status = self.performance_status()
+        self._active_performance = dict(status["effective"])
+        self._active_performance_mode = status.get("current")
         self._foreground_prepared = True
 
     def measurement_configuration(self) -> dict:
@@ -1441,6 +1467,26 @@ class OpenAICompatBackend(Backend):
         self._revealed.intersection_update(self.tools_by_name)
         self._schema_cache = None
 
+    async def _observe_engine_fault(self, error: _ServerGenerationError) -> None:
+        """2026-09-22 02:28: a lost GPU surfaced as a bare server_error. Ask /health once; when
+        the engine says it is unhealthy, keep the reason and the fix for the turn's system line."""
+        self._engine_fault_notice = None
+        if self._client is None or not hasattr(self._client, 'get'):
+            return
+        try:
+            root = self.provider.base_url.rsplit('/v1', 1)[0]
+            resp = await self._client.get(f"{root}/health", timeout=3.0)
+            data = resp.json() if hasattr(resp, 'json') else {}
+        except Exception:
+            return
+        if not isinstance(data, dict) or data.get('status') != 'unhealthy':
+            return
+        reason = str(data.get('reason') or 'device fault')
+        self._engine_fault_notice = (f"The engine reports it is unhealthy ({reason}). It will refuse every request "
+                                     "until it is restarted: pick the model again in the model picker (or restart Dream).")
+        if self.runtime_meter:
+            self.runtime_meter.record('engine_unhealthy', reason=reason[:300])
+
     def _observe_image_rejection(self, error: _ServerGenerationError) -> str:
         """Remember an explicit load failure from either HTTP generation path."""
         if (self.provider.key != 'machx' or error.message !=
@@ -1618,7 +1664,7 @@ class OpenAICompatBackend(Backend):
         if self._context_overflow == "error":
             return []
         window = self._window()
-        if self._ctx_fill() <= window * _COMPACT_AT:
+        if self._ctx_fill() <= window * compact_at(window):
             return []
         before = _est_tokens(self.messages)
         events = []
@@ -1632,7 +1678,7 @@ class OpenAICompatBackend(Backend):
         # straight back over it on the very next round. What goes is saved to
         # working notes first (Phase 10): the stub names the note.
         prior = list(self.messages)
-        n = _compact_messages(self.messages, int(window * _COMPACT_AT / 2 / self._calib_msgs),
+        n = _compact_messages(self.messages, int(window * compact_at(window) / 2 / self._calib_msgs),
                               on_elide=self._note_elided())
         self._record_council_omissions(prior, self.messages)
         if n:
@@ -1643,6 +1689,9 @@ class OpenAICompatBackend(Backend):
         if n:
             events.append(Event("system", f"compacted context: {before} to {after} "
                                           f"tokens ({n} messages elided)"))
+            if self.runtime_meter:
+                self.runtime_meter.record("compaction", before=before, after=after, elided=n,
+                                          window=window, threshold=compact_at(window))
         if after > window:
             # Nothing left to give: the irreducible history (system prompt, the
             # live turn) is bigger than the window. The request goes out anyway
@@ -1914,7 +1963,7 @@ class OpenAICompatBackend(Backend):
             # a little on every request changed the history's start each round
             # and re-read all of it every time (Dream fix #2).
             prior = list(messages)
-            target = min(int(window * _COMPACT_AT / 2), window - report.tools - report.output - report.margin)
+            target = min(int(window * compact_at(window) / 2), window - report.tools - report.output - report.margin)
             elided = _compact_messages(messages, max(0, int(target / self._calib_msgs)),
                                        on_elide=self._note_elided() if lead else None)
             self._record_council_omissions(prior, messages)
@@ -2033,7 +2082,8 @@ class OpenAICompatBackend(Backend):
             return override
         cached = getattr(self, "_endpoint_coordinator", None)
         if cached is None or cached[0] != endpoint:
-            cached = (endpoint, EndpointCoordinator(endpoint))
+            from ...local import machx
+            cached = (endpoint, EndpointCoordinator(endpoint, server_started_at=machx.server_started_at))
             self._endpoint_coordinator = cached
         return cached[1]
 
@@ -2162,6 +2212,7 @@ class OpenAICompatBackend(Backend):
             notice = self._observe_image_rejection(exc)
             if notice:
                 exc.args = (f'{exc}{notice}',)
+            await self._observe_engine_fault(exc)
             raise
         finally:
             if self.turn_timing:
@@ -2620,8 +2671,8 @@ class OpenAICompatBackend(Backend):
             # product — so unlike the lead's, compacting it needs no event.
             window = self._window()
             fill = max(_est_tokens(messages), sub_prompt_tokens)
-            if fill > window * _COMPACT_AT and self._context_overflow == "compact":
-                if _compact_messages(messages, int(window * _COMPACT_AT / 2)):
+            if fill > window * compact_at(window) and self._context_overflow == "compact":
+                if _compact_messages(messages, int(window * compact_at(window) / 2)):
                     # The stale server count describes the old, larger history.
                     sub_prompt_tokens = 0
                 fill = max(_est_tokens(messages), sub_prompt_tokens)
@@ -2863,6 +2914,7 @@ class OpenAICompatBackend(Backend):
         cut_retries = 0
         loop_retries = 0
         prose_retries = 0
+        since_change = 0          # tool calls since one that changed something
 
         for _ in range(_MAX_TOOL_ROUNDS):
             if self.runtime_meter is not None:
@@ -2896,7 +2948,29 @@ class OpenAICompatBackend(Backend):
                 **self._sampling,
                 **self._effort_params(),
             }
+            # A local server matches on the PROMPT'S HEAD — the system message and the
+            # tool schemas, ~8,614 tokens here. If that head changes mid-session the
+            # whole conversation is re-read, however little of it moved: live
+            # 2026-09-21, 33,077 tokens in 143 s, and 42,231 in 155 s the day before.
+            # Nothing said WHAT changed, so: fingerprint the head and say when it moves.
             if self.provider.key == "machx":
+                import hashlib as _hl
+                head = _hl.sha1(
+                    (str(self.messages[0].get("content", "")) + "\x00"
+                     + "\x00".join(t["function"]["name"] for t in payload["tools"])).encode()
+                ).hexdigest()[:10]
+                was = getattr(self, "_head_print", None)
+                if was is not None and was != head:
+                    n_sys = len(str(self.messages[0].get("content", "")))
+                    prev_sys, prev_n = getattr(self, "_head_parts", ("", 0))
+                    what = ("the system message" if prev_sys != str(self.messages[0].get("content", ""))
+                            else "the tool list")
+                    yield Event("system", f"The prompt's head changed ({what}) — the local server will re-read "
+                                          f"this conversation. System message {prev_n} → {n_sys} chars, "
+                                          f"{len(payload['tools'])} tools.")
+                self._head_print = head
+                self._head_parts = (str(self.messages[0].get("content", "")),
+                                    len(str(self.messages[0].get("content", ""))))
                 # Ask MachX to stream a tool call's text while it is being written, so the
                 # chat can show a file appearing instead of a long silence. Display only:
                 # the call itself still arrives structured at the end, and a server that
@@ -3005,6 +3079,11 @@ class OpenAICompatBackend(Backend):
             except _ServerGenerationError as e:
                 record_request()
                 notice = self._observe_image_rejection(e)
+                await self._observe_engine_fault(e)
+                fault = getattr(self, '_engine_fault_notice', None)
+                if fault:
+                    self._engine_fault_notice = None
+                    yield Event("system", fault)
                 yield Event("error", f"{self.provider.label} {e}{notice}")
                 yield Event("result", {"is_error": True, "subtype": e.subtype, "failure": self._failure_info(e, "server"),
                                        "stats": self._turn_stats(agg, time.monotonic() - turn_t0)})
@@ -3306,6 +3385,25 @@ class OpenAICompatBackend(Backend):
             if round_images:
                 self.messages.append(_visual_message(round_images))
 
+            # Notice a turn that is looking without converging. The loop guard above
+            # catches a call REPEATED with the same arguments and the same result; it
+            # cannot see a session whose every call differs and yet changes nothing
+            # (live 2026-09-20: 114 calls over four hours on one visual detail, two
+            # files edited). Counts calls since one that changed something.
+            for call in calls:
+                if (call.get("name") or "").lower() in _CHANGING_TOOLS:
+                    since_change = 0
+                    break
+            else:
+                since_change += len(calls)
+            if since_change in _NO_PROGRESS_AT:
+                last_tool = next((m for m in reversed(self.messages) if m.get("role") == "tool"), None)
+                if last_tool is not None and isinstance(last_tool.get("content"), str):
+                    last_tool["content"] += (
+                        f"\n\n[Dream: {since_change} tool calls since anything changed — these have all been "
+                        "looks, not edits. If you know the fix, make it now. If you are still narrowing it "
+                        "down, say in one line what you are testing and what result would settle it.]")
+
             # Say when the turn's round budget runs low (Dream fix #24): live, a
             # model spent ~60 rounds on measurements and hit the limit mid-sweep.
             left = _MAX_TOOL_ROUNDS - 1 - _
@@ -3403,8 +3501,55 @@ class OpenAICompatBackend(Backend):
     def _effort_params(self) -> dict[str, Any]:
         if self._active_performance is not None:
             effort = self._active_performance["reasoning_effort"]
-            return {"reasoning_effort": effort} if effort else {}
-        return self._base_effort_params()
+            params = {"reasoning_effort": effort} if effort else {}
+        else:
+            params = self._base_effort_params()
+        return self._adapt_effort(params)
+
+    def _adapt_effort(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Fix #40 (2026-09-21/22): with the effort fixed at high, orientation steps -- the model
+        deciding which file to read next -- cost 3-18 minutes of hidden reasoning each. A request
+        that follows a round of nothing but read-only tools runs at medium; the first call of a
+        turn, and any call after a write, an edit or a consequential shell command, keeps the
+        configured effort. An explicit /effort wins; DREAM_ADAPTIVE_EFFORT=0 turns this off."""
+        if not params or self._effort is not None or os.environ.get("DREAM_ADAPTIVE_EFFORT", "1") == "0":
+            return params
+        if getattr(self, "_active_performance_mode", "custom") not in (None, "custom"):
+            return params          # a chosen performance mode is explicit intent, like /effort
+        if not self._orientation_round():
+            return params
+        try:
+            lowered = self._native_effort("med")
+        except ValueError:
+            return params
+        return {**params, "reasoning_effort": lowered}
+
+    def _orientation_round(self) -> bool:
+        """True when the next request follows a completed round whose tool calls were all reads."""
+        if not self.messages or self.messages[-1].get("role") != "tool":
+            return False
+        for m in reversed(self.messages):
+            if m.get("role") != "assistant":
+                continue
+            calls = m.get("tool_calls") or []
+            if not calls:
+                return False
+            for tc in calls:
+                fn = tc.get("function") or {}
+                name = str(fn.get("name") or "").split("__")[-1]
+                cap = policy.capability(name)
+                if cap in {policy.READONLY, policy.MEMORY}:
+                    continue
+                if cap == policy.SHELL:
+                    try:
+                        command = str((json.loads(fn.get("arguments") or "{}") or {}).get("command") or "")
+                    except ValueError:
+                        return False
+                    if policy.shell_read_only(command):
+                        continue
+                return False
+            return True
+        return False
 
     def _base_effort_params(self) -> dict[str, Any]:
         """reasoning_effort fragment for the request, or {} when no effort is set."""

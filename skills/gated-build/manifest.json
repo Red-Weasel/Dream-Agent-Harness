@@ -1,0 +1,12 @@
+{
+  "format": "dream-skill/v1",
+  "name": "gated-build",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "run_bash",
+    "read_file",
+    "note",
+    "write_file"
+  ]
+}

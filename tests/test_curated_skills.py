@@ -35,8 +35,10 @@ def make_skill(root, name, *, filename='SKILL.md', text='Apply the specific work
 
 def test_default_catalog_is_small_and_all_workflows_are_packaged(curated):
     assert {s.name for s in curated} == set(config.CURATED_SKILLS)
-    assert len(curated) == 10
-    assert sum(len(s.manifest.read_text()) for s in curated) < 16000
+    assert len(curated) == 14
+    # 10 workflows fit in 16k; the four process skills added 2026-09-22 (brainstorming,
+    # debugging, gated-build, frontend-design) bring the curated set to 14 at ~2.1k each.
+    assert sum(len(s.manifest.read_text()) for s in curated) < 25000
     assert len('\n'.join(loader.index_lines(curated))) < 1600
     project = tomllib.loads((ROOT/'pyproject.toml').read_text())
     wheel = project['tool']['hatch']['build']['targets']['wheel']

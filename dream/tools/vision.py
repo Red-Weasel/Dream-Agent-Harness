@@ -20,6 +20,7 @@ _MIME = {
     ".gif": "image/gif",
 }
 _MAX_BYTES = 8_000_000  # keep the base64 payload sane
+_MAX_IMAGES = 6         # per call; one model round trip for a whole review set
 
 
 def _resolve(path: str) -> Path | None:
@@ -41,13 +42,17 @@ def _resolve(path: str) -> Path | None:
 
 @tool(
     "see",
-    "Look at an image and actually see it — a screenshot from `browse` (pass the path it "
-    "returned) or any local image file. Use this when the visual matters: page layout, a "
-    "chart, a design, a screenshot of an error. Supports png/jpg/webp/gif.",
+    "Look at one or several images and actually see them — a screenshot from `browse` (pass "
+    "the path it returned) or any local image files. Use this when the visual matters: page "
+    "layout, a chart, a design, a screenshot of an error. `paths` shows up to 6 images in ONE "
+    "call (one model round trip instead of one per image). Supports png/jpg/webp/gif.",
     {
         "type": "object",
-        "properties": {"path": {"type": "string", "description": "Path to the image file."}},
-        "required": ["path"],
+        "properties": {
+            "path": {"type": "string", "description": "Path to one image file."},
+            "paths": {"type": "array", "items": {"type": "string"}, "maxItems": 6,
+                      "description": "Several image files to view together (max 6)."},
+        },
     },
 )
 async def see(args: dict[str, Any]) -> dict[str, Any]:
@@ -58,31 +63,37 @@ async def see(args: dict[str, Any]) -> dict[str, Any]:
     if multimodal is False:
         return err("Image input is disabled for this session. No image was read. "
                    "A saved path is not visual evidence; report visual checks as unverified.")
-    try:
-        p = _resolve(args["path"])
-    except (OSError, ValueError) as exc:
-        return err(f"Cannot open image: {exc}")
-    if p is None:
-        return err(f"No image file found at '{args['path']}'.")
-    mime = _MIME.get(p.suffix.lower())
-    if mime is None:
-        return err(f"Unsupported image type '{p.suffix}'. Use png/jpg/webp/gif.")
-    def read_bounded():
-        with p.open("rb") as source:
-            return source.read(_MAX_BYTES + 1)
-    try:
-        data = await in_thread(read_bounded)
-    except OSError as exc:
-        return err(f"Cannot read image '{p.name}': {exc}")
-    if len(data) > _MAX_BYTES:
-        return err(
-            f"Image exceeds the {_MAX_BYTES//1_000_000}MB limit. "
-            "Use a smaller image or a viewport (not full-page) screenshot."
-        )
-    b64 = base64.b64encode(data).decode("ascii")
-    return {
-        "content": [
-            {"type": "image", "data": b64, "mimeType": mime},
-            {"type": "text", "text": f"(viewing {p.name})"},
-        ]
-    }
+    wanted = [str(x) for x in (args.get("paths") or [])] or ([str(args["path"])] if args.get("path") else [])
+    if not wanted:
+        return err("see needs 'path' or 'paths'.")
+    if len(wanted) > _MAX_IMAGES:
+        return err(f"see shows at most {_MAX_IMAGES} images per call; you passed {len(wanted)}.")
+    blocks: list[dict[str, Any]] = []
+    names: list[str] = []
+    for raw in wanted:
+        try:
+            p = _resolve(raw)
+        except (OSError, ValueError) as exc:
+            return err(f"Cannot open image: {exc}")
+        if p is None:
+            return err(f"No image file found at '{raw}'.")
+        mime = _MIME.get(p.suffix.lower())
+        if mime is None:
+            return err(f"Unsupported image type '{p.suffix}' ({p.name}). Use png/jpg/webp/gif.")
+
+        def read_bounded(path=p):
+            with path.open("rb") as source:
+                return source.read(_MAX_BYTES + 1)
+        try:
+            data = await in_thread(read_bounded)
+        except OSError as exc:
+            return err(f"Cannot read image '{p.name}': {exc}")
+        if len(data) > _MAX_BYTES:
+            return err(
+                f"Image '{p.name}' exceeds the {_MAX_BYTES//1_000_000}MB limit. "
+                "Use a smaller image or a viewport (not full-page) screenshot."
+            )
+        blocks.append({"type": "image", "data": base64.b64encode(data).decode("ascii"), "mimeType": mime})
+        names.append(p.name)
+    blocks.append({"type": "text", "text": f"(viewing {', '.join(names)})"})
+    return {"content": blocks}

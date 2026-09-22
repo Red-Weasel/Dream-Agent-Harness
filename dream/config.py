@@ -80,7 +80,8 @@ MCP_CONFIG_PATH = Path(os.environ.get("DREAM_MCP_CONFIG", str(ROOT / "mcp.json")
 # Dream's compact workflow catalog. External clients' catalogs are opt-in and
 # remain searchable rather than being inserted wholesale into model context.
 CURATED_SKILLS = ('coding', 'research', 'writing', 'documents', 'data-analysis',
-                  'media', 'library', 'verifying', 'computer-use', 'blender-animation')
+                  'media', 'library', 'verifying', 'computer-use', 'blender-animation',
+                  'brainstorming', 'debugging', 'gated-build', 'frontend-design')
 
 
 def bundled_skill_dirs() -> list[Path]:
