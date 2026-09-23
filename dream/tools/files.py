@@ -14,6 +14,7 @@ transfers verbatim.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -23,6 +24,42 @@ from typing import Any
 from claude_agent_sdk import tool
 
 from .context import ctx, err, in_thread, ok
+
+_NEAR_MISS_QUOTE = 600
+
+
+def _near_miss_hint(text: str, old: str) -> str:
+    """Where old_string matches once each line's leading and trailing whitespace is ignored, quote the file's exact
+    text there. A local model began three old_strings in a row mid-line WITH indentation and only "read the file
+    again" came back (2026-09-23, live session 20260923-094144-f5ed)."""
+    if not old.strip():
+        return ""
+    pattern = r"[ \t]*\r?\n[ \t]*".join(re.escape(line.strip()) for line in old.split("\n"))
+    found = [m for _, m in zip(range(3), re.finditer(pattern, text))]
+    if len(found) > 1:
+        return (f" Ignoring indentation it would match in {len(found)}{'+' if len(found) == 3 else ''} places;"
+                " widen it with a neighbouring line.")
+    if not found:
+        # No whitespace near miss: name the first old_string line the file lacks and the file's closest line. The
+        # model's recall of its own earlier write drifted by look-alike characters (`"Fac”` for `"Fac"]`, 2026-09-23).
+        import difflib
+        file_lines = [l.strip() for l in text.split("\n")]
+        for i, line in enumerate(old.split("\n"), 1):
+            want = line.strip()
+            if want and want not in text:
+                close = difflib.get_close_matches(want, [l for l in file_lines if l], n=1, cutoff=0.8)   # 0.6 named unrelated lines
+                if close and len(close[0]) <= _NEAR_MISS_QUOTE:
+                    at = file_lines.index(close[0]) + 1
+                    return (f" Line by line, line {i} of old_string is not in the file; closest is line {at}: "
+                            f"{json.dumps(close[0], ensure_ascii=False)} — copy the file's text exactly.")
+                return f" Line by line, line {i} of old_string is not in the file."
+        return ""
+    if len(found[0].group()) > _NEAR_MISS_QUOTE:
+        return ""
+    line = text.count("\n", 0, found[0].start()) + 1
+    return (f" Ignoring indentation it matches once, at line {line}: the file has {json.dumps(found[0].group())}"
+            " — copy that exactly as old_string.")
+
 
 _GREP_MAX_FILES = 3000
 _GREP_MAX_HITS = 100
@@ -141,6 +178,8 @@ async def str_replace_edit(args: dict[str, Any]) -> dict[str, Any]:
             if n == 0 and "\r\n" in new and "\n" in old and "\r\n" not in old:
                 hint = (" This file uses CRLF line endings and your old_string uses bare "
                         "\\n — spell its line breaks as \\r\\n.")
+            elif n == 0:
+                hint = _near_miss_hint(new, old)
             recovery = ("Read the current file and copy the exact text to replace."
                         if n == 0 else "Widen it with surrounding text until it is unique.")
             return err(

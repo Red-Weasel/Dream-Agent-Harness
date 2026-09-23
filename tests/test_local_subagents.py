@@ -385,3 +385,12 @@ def test_both_backends_offer_the_same_roster():
     """One canonical spec, two renderings — a subagent that exists for Claude but not
     for the local backend (or the reverse) is a spec that drifted."""
     assert set(subagents()) == set(local_subagents())
+
+
+def test_each_test_starts_with_the_built_in_roster_only():
+    """plugins.load() (an Engine boot, extensions reviewing a module) fills a module-global
+    roster from the checkout's plugins/ directory and nothing unloads it; the conftest hands
+    it back after every test (DREAM-099), so a plugin agent -- local tools `*`, no SDK tool
+    list -- loaded by an earlier file cannot fail the roster checks above."""
+    from dream.core.subagents import builtin_names
+    assert set(local_subagents()) == set(builtin_names())

@@ -34,7 +34,7 @@ from .backends.anthropic import AnthropicBackend
 from .backends.base import Backend, Event, PermissionCallback
 from .backends.openai_compat import OpenAICompatBackend
 from .providers import Provider, get_provider
-from .profiles import resolve_profile, guidance
+from .profiles import resolve_profile, guidance, session_vision
 from .subagents import subagents
 from .chat_recovery import status_record
 
@@ -101,9 +101,12 @@ class Engine:
         self.provider: Provider = provider if isinstance(provider, Provider) else get_provider(provider)
         self.model = model if model is not None else (config.MODEL or self.provider.default_model)
         self.profile = resolve_profile(self.provider, profile, model=self.model)
-        if self.profile.vision is not None:
+        # Provisional until the backend connects and the running server says whether image input is ready
+        # (DREAM-096): _adopt_server_vision then takes the connected answer and re-derives the Runtime note.
+        self._vision = session_vision(self.provider, self.profile, self.model)
+        if self._vision["enabled"] != bool(self.provider.multimodal):
             from dataclasses import replace
-            self.provider = replace(self.provider, multimodal=self.profile.vision)
+            self.provider = replace(self.provider, multimodal=self._vision["enabled"])
         self.runtime_meter = None
         self.turn_timing = None
         self._run_meter = None
@@ -190,6 +193,7 @@ class Engine:
                 self.store, self.working, self.browser, self.session_id,
                 workspace=self.workspace, moe_config=self._moe,
                 multimodal=self.provider.multimodal, emit=self.emit, tasks=self.tasks,
+                vision_helper=self.profile.vision_helper,
         )
         set_context(self._tool_context)
         from .execution import probe_sandbox
@@ -237,6 +241,7 @@ class Engine:
         self._custom_tool_names = set(built.get("custom_names") or [])
         self.backend = await self._create_backend()
         await self.backend.connect()
+        self._adopt_server_vision()
         if isinstance(self.backend, OpenAICompatBackend):
             self._tool_context.multimodal = self.backend.provider.multimodal
         await self._register_persistent_mcp()
@@ -249,16 +254,15 @@ class Engine:
         if config.SEMANTIC_MEMORY:
             self._backfill_task = asyncio.create_task(self._backfill_embeddings())
 
-    async def _create_backend(self) -> Backend:
-        """Build a fresh provider conversation using this Engine's existing tools."""
-        built = self._built_tools
+    def _system_prompt(self) -> str:
+        """The system prompt for this Engine's current provider, model, profile and vision decision."""
         # These sections are STABLE for the session (and identical across sessions
         # with the same setup), so they are assembled BEFORE the prompt is built and
         # handed to build_system_prompt as tier 2 — appending them afterwards put
         # them behind the volatile wake context and truncated the cacheable prefix
         # to a few KB. See build_system_prompt's docstring for the tier contract.
         stable: list[str] = []
-        stable.append(guidance(self.provider, self.profile, self.model))
+        stable.append(guidance(self.provider, self.profile, self.model, vision=getattr(self, "_vision", None)))
         stable.append(
             "\n## Council\nThe current Council roster is supplied with each turn. "
             "Use consult for one configured advisor or council for all. Advisors are "
@@ -298,12 +302,8 @@ class Engine:
         if mcp_section:
             stable.append(mcp_section)
 
-        local_subs = None
         if self.provider.kind not in ("anthropic", "cli"):
-            from .subagents import local_subagents
-
-            local_subs = local_subagents()
-            names = ", ".join(local_subs)
+            names = ", ".join(self._local_subs)
             stable.append(
                 "\n## Delegating (subagents)\nYou can hand a scoped, self-contained "
                 f"subtask to a specialist via the `task` tool ({names}). It runs in its "
@@ -316,10 +316,37 @@ class Engine:
                    "Subagents run one at a time on this engine, not in parallel.")
             )
 
-        sysprompt = system_prompt.build_system_prompt(
+        return system_prompt.build_system_prompt(
             self.store, self.session_id, stable_sections=stable, workspace=self.workspace,
             profile=self.profile,
         )
+
+    def _adopt_server_vision(self) -> None:
+        """Once connected, the backend knows whether the running server's image input is ready (DREAM-096). Take its
+        answer for the session and re-derive the Runtime note from it, so the header chip, the note and the image
+        switch cannot disagree. Backends without the question (Anthropic, CLIs) keep the answer from construction."""
+        status = getattr(self.backend, "vision_status", None)
+        if not callable(status):
+            return
+        vision = status()
+        if vision == getattr(self, "_vision", None):
+            return
+        self._vision = vision
+        if vision["enabled"] != bool(self.provider.multimodal):
+            from dataclasses import replace
+            self.provider = replace(self.provider, multimodal=vision["enabled"])
+        self._assembled_system_prompt = self._system_prompt()
+        self.backend.set_system_prompt(self._assembled_system_prompt)
+
+    async def _create_backend(self) -> Backend:
+        """Build a fresh provider conversation using this Engine's existing tools."""
+        built = self._built_tools
+        self._local_subs = None
+        if self.provider.kind not in ("anthropic", "cli"):
+            from .subagents import local_subagents
+
+            self._local_subs = local_subagents()
+        sysprompt = self._system_prompt()
         self._assembled_system_prompt = sysprompt
 
         if self.provider.kind == "anthropic":
@@ -368,7 +395,7 @@ class Engine:
                 system_prompt=sysprompt,
                 tools=built["tools"],
                 permission_cb=self._can_use_tool,
-                subagents=local_subs,
+                subagents=self._local_subs,
                 profile=self.profile,
             )
         if self.effort is not None:
@@ -469,11 +496,12 @@ class Engine:
             self._tool_context.moe_config = cfg
             return
         profile = resolve_profile(provider, self._profile_selection, model=selected)
-        if profile.vision is not None:
-            provider = replace(provider, multimodal=profile.vision)
+        vision = session_vision(provider, profile, selected)
+        if vision["enabled"] != bool(provider.multimodal):
+            provider = replace(provider, multimodal=vision["enabled"])
         history = await in_thread(self._council_transfer, snapshot_history=True)
         old = (self.backend, self.provider, self.model, self.profile,
-               self._assembled_system_prompt, self._moe, self.effort)
+               self._assembled_system_prompt, self._moe, self.effort, self._vision)
         previous_backend = self.backend
         bridge = self._tool_bridge
         if bridge is not None:
@@ -491,12 +519,13 @@ class Engine:
         self._backend_available = False
         replacement = None
         try:
-            self.provider, self.model, self.profile = provider, selected, profile
+            self.provider, self.model, self.profile, self._vision = provider, selected, profile, vision
             self.effort = effort
             replacement = await self._create_backend()
             self.backend = replacement
             self._refresh_bridge_limits()
             await replacement.connect()
+            self._adopt_server_vision()
             if isinstance(replacement, OpenAICompatBackend):
                 with bind_context(self._tool_context):
                     replacement.preflight_council_context(history)
@@ -510,7 +539,7 @@ class Engine:
             except BaseException as cleanup_exc:
                 cleanup_error = cleanup_exc
             (self.backend, self.provider, self.model, self.profile,
-             self._assembled_system_prompt, self._moe, self.effort) = old
+             self._assembled_system_prompt, self._moe, self.effort, self._vision) = old
             self._pending_handoff = history
             if cleanup_error is not None:
                 self._handoff_unavailable = 'Council backend cleanup failed. Restart Dream.'
@@ -535,6 +564,7 @@ class Engine:
         self._tool_context.multimodal = (self.backend.provider.multimodal
                                          if isinstance(self.backend, OpenAICompatBackend)
                                          else self.provider.multimodal)
+        self._tool_context.vision_helper = self.profile.vision_helper
         self._pending_handoff = history
         self._handoff_unavailable = ""
         self._backend_available = True
@@ -912,6 +942,19 @@ class Engine:
                                            if type(value := usage.get(key)) is int and value >= 0)
         if self.emit:
             self.emit(event)
+
+    def vision_status(self) -> dict:
+        """Whether this session sends images to the model, and why (DREAM-093): the header chip's source. A connected
+        backend answers from the facts it holds, the running server's readiness included (DREAM-096), so the chip, the
+        Runtime note and the image switch share one decision; before that, or on a backend without the question, the
+        session's own answer."""
+        backend = getattr(self, "backend", None)
+        status = getattr(backend, "vision_status", None)
+        if callable(status):
+            return status()
+        rejected = getattr(backend, "_image_rejection_model", None)
+        return session_vision(self.provider, self.profile, self.model,
+                              image_rejected=rejected is not None and rejected == self.model)
 
     def runtime_status(self) -> dict:
         from dataclasses import asdict

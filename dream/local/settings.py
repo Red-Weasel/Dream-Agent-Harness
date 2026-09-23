@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 import json
 import math
 import os
+from .models import DIRECTORY_ARCHITECTURES
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,10 @@ CONTROLS = (
     Control("threads", None, "CPU expert-work threads; default = engine auto; 1–1024", "--threads", "int", 1, 1024),
     Control("prefill_chunk", None, "prompt processing chunk; default = engine; >=1", "--prefill-chunk", "int", 1, 2**31 - 1),
     Control("parallel", 1, "server request slots; 1–4", "--parallel", "int", 1, 4),
+    # DREAM-100: the auto expert tier's per-card headroom (the forward's growth + the vision tower's encode block); raise it
+    # for very long contexts. Shown only when the engine advertises it (mimo_v2, deepseek41); unset = the engine's default.
+    Control("vram_reserve_gib", None, "VRAM kept free per card in GiB; default = the engine's own; raise for long contexts; 0–24",
+            "--vram-reserve-gib", "float", 0, 24),
     Control("slot_ctx", 0, "context per slot; 0 = automatic, otherwise >=9", "--slot-ctx", "int", 0, 2**31 - 1),
     Control("prompt_cache", True, "reuse eligible prompt state; on/off", "--no-prompt-cache", "bool"),
     Control("thinking", None, "on/off; controls model thinking template", "--thinking", "bool"),
@@ -106,8 +111,8 @@ def available_controls(capabilities: dict) -> list[Control]:
             continue
         if control.name == "prompt_cache" and not features.get("prompt_cache"):
             continue
-        if control.name == "parallel" and capabilities.get("architecture") == "deepseek_v41":
-            control = replace(control, maximum=1, hint="V4.1 serves one request at a time; parallel = 1")
+        if control.name == "parallel" and capabilities.get("architecture") in DIRECTORY_ARCHITECTURES:
+            control = replace(control, maximum=1, hint="This model serves one request at a time; parallel = 1")
         if control.name in defaults:
             value = defaults[control.name]
             # MachX uses zero for automatic thread selection; the UI uses None.
@@ -168,8 +173,8 @@ def validate_options(options: dict, *, ctx: int | None = None, gpus: int | None 
         raw = (json.dumps(value) if control.kind == "stop" else
                "on" if value is True else "off" if value is False else str(value))
         result[name] = parse_value(control, raw)
-    if architecture == "deepseek_v41" and result.get("parallel", 1) != 1:
-        raise ValueError("V4.1 requires parallel = 1")
+    if architecture in DIRECTORY_ARCHITECTURES and result.get("parallel", 1) != 1:
+        raise ValueError("This model requires parallel = 1")
     if ctx and result.get("slot_ctx", 0) > ctx:
         raise ValueError("slot_ctx cannot exceed context length")
     if result.get("int8_kv") and ((gpus != -1 and gpus != 1) or result.get("parallel", 1) != 1):

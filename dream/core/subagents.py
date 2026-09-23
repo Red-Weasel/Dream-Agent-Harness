@@ -246,8 +246,12 @@ def _plugin_specs() -> list[dict]:
             if a["name"] in builtin_names() or a["name"] in taken:
                 continue
             taken.add(a["name"])
+            # No `tools:` frontmatter means the parent's toolset (Claude Code's default for an agent), not an
+            # agent that can do nothing: None inherits on the SDK backend, ("*",) on the local one (DREAM-089).
+            declared = tuple(a["tools"])
             out.append({"name": a["name"], "description": a["description"], "prompt": a["prompt"],
-                        "sdk_tools": [_dream(t) for t in a["tools"]], "local_tools": tuple(a["tools"])})
+                        "sdk_tools": [_dream(t) for t in declared] if declared else None,
+                        "local_tools": declared or ("*",)})
         return out
     except Exception:
         return []
@@ -263,7 +267,8 @@ def subagents() -> dict[str, AgentDefinition]:
         s["name"]: AgentDefinition(
             description=s["description"],
             prompt=s["prompt"],
-            tools=[_dream("run_bash") if tool == "Bash" else tool for tool in s["sdk_tools"]],
+            tools=(None if s["sdk_tools"] is None
+                   else [_dream("run_bash") if tool == "Bash" else tool for tool in s["sdk_tools"]]),
             model="inherit",
         )
         for s in all_specs()

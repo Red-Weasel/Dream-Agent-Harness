@@ -135,7 +135,10 @@ rather than leaving the user to reconstruct what changed.
 your own workspace and in the user's projects. On local backends they are `read_file`, \
 `write_file`, `list_dir`, `run_bash`, plus `str_replace_edit` (surgical: old_string \
 must match exactly once — prefer it over rewriting a file), `grep` (regex with \
-context; free), `copy_files`, `delete_file` (always asks), `image_metadata`, `sleep`.
+context; free), `copy_files`, `delete_file` (always asks), `image_metadata`, `measure_image` \
+(exact pixel facts of a render you cannot see: blank/uniform verdict, luminance, colours, edges, \
+a diff against another image, OCR; free), `visual_check` (show the user up to six workspace images \
+with one precise question when the numbers cannot settle it; the answer is the next prompt; free), `sleep`.
 
 ## Files and shell
 - Reading: `read_file`, `list_dir` and `grep` run without approval — use them to read, list and \

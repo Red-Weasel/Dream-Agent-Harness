@@ -20,12 +20,16 @@ gi.require_version('Vte', '2.91')
 gi.require_version('WebKit2', '4.1')
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango, Vte, WebKit2
 
+from ..config import LOG_DIR
 from .browser import Browser, button, label, webview
+from .crash_log import ENV as CRASH_LOG_ENV
 from .protocol import session_address, session_status
 from .onboarding import Onboarding
 
 HERE = Path(__file__).resolve().parent
-WEB_VIEWS = frozenset(('home', 'chat', 'studio', 'projects', 'optimizer', 'skills', 'memory', 'settings'))
+WEB_VIEWS = frozenset(('home', 'chat', 'studio', 'projects', 'optimizer', 'skills', 'memory', 'understand', 'settings'))
+# The fatal signals faulthandler records (DREAM-086); the window itself stops a session only with /quit, SIGINT or Ctrl+D.
+CRASH_SIGNALS = frozenset((signal.SIGSEGV, signal.SIGBUS, signal.SIGILL, signal.SIGFPE, signal.SIGABRT))
 
 
 def color(value: str) -> Gdk.RGBA:
@@ -39,6 +43,7 @@ class DreamWindow(Gtk.Window):
         super().__init__(title='Dream — Workspace')
         self.python, self.cwd, self.cli_args = python, cwd, cli_args
         self.child_pid: int | None = None
+        self.crash_log: Path | None = None
         self.running = False
         self.closing = False
         self.polling = False
@@ -181,6 +186,7 @@ class DreamWindow(Gtk.Window):
                 ('projects', 'Projects', 'folder-symbolic'),
                 ('skills', 'Skills', 'applications-system-symbolic'),
                 ('memory', 'Memory', 'document-open-recent-symbolic'),
+                ('understand', 'Understand', 'view-grid-symbolic'),
                 ('terminal', 'Terminal', 'utilities-terminal-symbolic'),
                 ('browser', 'Browser', 'web-browser-symbolic'),
                 ('settings', 'Settings', 'emblem-system-symbolic')):
@@ -397,6 +403,9 @@ class DreamWindow(Gtk.Window):
         self.welcome_title.set_text('')
         self.welcome_description.set_text('Starting your conversation…' if self.launch_request else 'Choose your engine in the Terminal tab.')
         env = self.child_env()
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        self.crash_log = LOG_DIR / f"session-crash-{time.strftime('%Y%m%d-%H%M%S')}.log"
+        env[CRASH_LOG_ENV] = str(self.crash_log)
         command = ([self.python, '-m', 'dream.desktop.startup', 'run', str(self.launch_request), str(self.launch_status)]
                    if self.launch_request else [self.python, '-m', 'dream', *self.cli_args])
         if not self.launch_request:
@@ -441,6 +450,23 @@ class DreamWindow(Gtk.Window):
         self.workspace.set_visible_child_name('studio')
         self.welcome_description.set_text('Your terminal history is preserved. Start another conversation when ready.')
         self.status('Session ended. Choose an agent to start again; Terminal history is preserved.')
+        if os.WIFSIGNALED(wait_status):   # DREAM-086: say what stopped it, how to continue, and where its traceback is
+            sig = os.WTERMSIG(wait_status)
+            try:
+                name = signal.Signals(sig).name
+            except ValueError:
+                name = f'signal {sig}'
+            log = self.crash_log
+            traced = log is not None and log.exists() and log.stat().st_size > 0
+            if log is not None and log.exists() and not traced:
+                log.unlink()
+            text = ((f'The session crashed ({name}).' if sig in CRASH_SIGNALS else f'The session was stopped by {name}.')
+                    + ' Start a new session and type /resume to continue from its saved turns.'
+                    + (f' Crash traceback: {log}' if traced else ''))
+            self.session_label.set_text('Session crashed' if sig in CRASH_SIGNALS else 'Session stopped')
+            self.onboarding.message.set_text(text)
+            self.welcome_description.set_text(text)
+            self.status(text)
         if self.closing:
             self.destroy()
 

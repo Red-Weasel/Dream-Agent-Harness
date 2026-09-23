@@ -254,7 +254,10 @@ async def test_a_declined_write_is_still_snapshotted_but_reports_nothing_to_undo
     f = tmp_path / "a.py"
     f.write_text("original\n")
 
-    assert await app._permission("write_file", {"path": str(f)}) is False
+    # DREAM-085: a policy block is Dream's refusal, raised with its reason (not the owner's False)
+    from dream.core.permission_refusal import PermissionRefused
+    with pytest.raises(PermissionRefused, match="plan mode"):
+        await app._permission("write_file", {"path": str(f)})
     assert app.checkpoints.list() == []
 
 

@@ -24,7 +24,11 @@ def capability_report(*, provider_metadata=None, machx_capabilities=None,
     Settings describe configured limits, not proof of server capabilities.
     """
     report = {'schema_version': 1, **{key: {'known': False, 'value': None, 'source': 'unreported'}
-                                      for key in _FACTS}, 'configured': {}, 'warnings': []}
+                                      for key in _FACTS},
+              # The running server's own word on image input (DREAM-096): loaded and usable now, not architecture
+              # support. Only its /props feed it, so it stays outside _FACTS (provider metadata cannot claim it).
+              'vision_ready': {'known': False, 'value': None, 'source': 'unreported', 'reason': ''},
+              'configured': {}, 'warnings': []}
     conflicts = set()
 
     def warn(code):
@@ -91,6 +95,18 @@ def capability_report(*, provider_metadata=None, machx_capabilities=None,
     generation = mapping(props.get('default_generation_settings'), 'machx.props.default_generation_settings')
     if 'n_ctx' in generation:
         fact('context_tokens', generation['n_ctx'], 'machx.props.default_generation_settings.n_ctx')
+    if 'vision' in props:
+        readiness = mapping(props['vision'], 'machx.props.vision')
+        if isinstance(props['vision'], dict):
+            fact('vision_ready', readiness.get('ready'), 'machx.props.vision.ready')   # missing or non-bool: a warning
+            reason = readiness.get('reason', '')
+            if not isinstance(reason, str):
+                warn('malformed.machx.props.vision.reason')
+                reason = ''
+            if report['vision_ready']['known']:
+                report['vision_ready']['reason'] = ' '.join(reason.split())[:200]
+        elif props['vision'] is None:
+            warn('malformed.machx.props.vision')   # the key is there; null is not a readiness report
 
     configured = mapping(settings, 'settings')
     for key in ('context_limit', 'parallel', 'max_parallel', 'output_tokens', 'max_tokens'):

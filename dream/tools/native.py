@@ -256,5 +256,7 @@ async def run_bash(args: dict[str, Any]) -> dict[str, Any]:
 
 
 from .files import FILE_TOOLS  # noqa: E402 — after the four above are defined
+from .measure_image import measure_image  # noqa: E402 — its own module, so the local backend may defer it
+from .visual_check import visual_check  # noqa: E402 — likewise (DREAM-097)
 
-NATIVE_TOOLS = [read_file, write_file, list_dir, run_bash, *FILE_TOOLS]
+NATIVE_TOOLS = [read_file, write_file, list_dir, run_bash, *FILE_TOOLS, measure_image, visual_check]

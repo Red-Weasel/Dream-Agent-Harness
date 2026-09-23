@@ -190,7 +190,13 @@ async def skill_load(args: dict[str, Any]) -> dict[str, Any]:
     c = ctx()
     body = await in_thread(skills.load_skill, c.store, args["slug"])
     if body is None:
-        return err(f"No skill with slug '{args['slug']}'. Use skill_list to see them.")
+        # This tool reads the owner's LEARNED skills. An installed skill's name sent here got "no skill with slug"
+        # and a pointer to skill_list, which lists the learned ones (2026-09-23, live session): name the right door.
+        from . import installed_skill_tools
+        hit = await in_thread(installed_skill_tools._by_name, args["slug"])
+        where = (f" '{hit.name}' is an installed skill: skill_open(name=\"{hit.name}\")." if hit
+                 else " Learned skills: skill_list. Installed skills: skill_find, then skill_open.")
+        return err(f"No learned skill with slug '{args['slug']}'.{where}")
     return ok(f"Skill '{args['slug']}':\n\n{body}")
 
 

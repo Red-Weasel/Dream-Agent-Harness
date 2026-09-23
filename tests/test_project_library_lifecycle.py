@@ -28,7 +28,8 @@ def app(tmp_path, monkeypatch):
     obj.bus = EventBus()
     obj.renderer = SimpleNamespace(system=lambda text: None)
     obj.engine = SimpleNamespace(session_id='original', provider=SimpleNamespace(key='machx'),
-                                 provider_label='machx', model='kept-model', effort='high', _moe=None)
+                                 provider_label='machx', model='kept-model', effort='high', _moe=None,
+                                 vision_status=lambda: {'state': 'off', 'enabled': False, 'source': 'fixture'})
     obj.events = []
     obj.owner = None
     async def stop(*, consolidate):
@@ -38,7 +39,8 @@ def app(tmp_path, monkeypatch):
     obj.engine.stop = stop
     def boot():
         candidate = SimpleNamespace(session_id='new-session', provider=SimpleNamespace(key=obj.provider),
-                                    model=obj.model, provider_label='machx', effort=None, _moe=obj.moe)
+                                    model=obj.model, provider_label='machx', effort=None, _moe=obj.moe,
+                                    vision_status=lambda: {'state': 'off', 'enabled': False, 'source': 'fixture'})
         async def start():
             assert asyncio.current_task() is obj.owner
             obj.events.append('start')

@@ -706,7 +706,7 @@ class OpenAICompatBackend(Backend):
         self._all_tools = list(tools)
         self._configured_multimodal = bool(provider.multimodal)
         self._image_rejection_model: str | None = None
-        self.tools = [t for t in tools if provider.multimodal or t.name != "see"]
+        self.tools = [t for t in tools if self._offers_see(provider.multimodal) or t.name != "see"]
         self.tools_by_name = {t.name: t for t in self.tools}
         # Subagents the lead can dispatch to via the `task` tool (LocalSubagentSpec
         # keyed by name). None/empty → no `task` tool advertised, behaviour unchanged.
@@ -1229,8 +1229,11 @@ class OpenAICompatBackend(Backend):
         }
         if self._props_warning and self.model == self._server_props_model:
             report['warnings'].append(self._props_warning)
-        vision = report['vision']
-        if vision['known'] and vision['value'] != bool(self.provider.multimodal):
+        vision, ready = report['vision'], report['vision_ready']
+        # Architecture support against configuration is a contradiction only while the running server's readiness
+        # does not explain the configuration (DREAM-096).
+        if (vision['known'] and vision['value'] != bool(self.provider.multimodal)
+                and not (ready['known'] and ready['value'] == bool(self.provider.multimodal))):
             report['warnings'].append(
                 'Reported image input is supported, but tool images are disabled.' if vision['value'] else
                 'Reported image input is unsupported, but tool images are enabled.')
@@ -1420,11 +1423,38 @@ class OpenAICompatBackend(Backend):
             self.runtime_meter.record('request_failure', **info)
         return info
 
+    def vision_status(self) -> dict:
+        """Whether this connection sends images to the model, and why (DREAM-093; readiness DREAM-096).
+
+        The one answer the header chip, the Runtime note and _configure_tool_images share, from the facts this backend
+        holds for the current model: the profile, the captured capability report, the server's /props and an observed
+        image rejection.
+        """
+        from ..profiles import session_vision
+        current = self.model == self._capabilities_model
+        props = self._server_props if self.model == self._server_props_model else None
+        return session_vision(self.provider, self.profile, self.model,
+                              capabilities=self._local_capabilities if current else {},
+                              provider_metadata=self._provider_metadata if current else None, props=props,
+                              image_rejected=self._image_rejection_model is not None
+                              and self._image_rejection_model == self.model)
+
+    def set_system_prompt(self, text: str) -> None:
+        """Replace the system message: the engine re-derives its Runtime note once the connected server's image
+        readiness is known (DREAM-096), before the first turn."""
+        self.messages[0] = {"role": "system", "content": text}
+
+    def _offers_see(self, images_enabled: bool) -> bool:
+        """`see` stays in the toolset when the model gets images, or when a vision helper describes them for it
+        (DREAM-098): the images then go to that provider, never to this model, and its words come back as text."""
+        return bool(images_enabled) or bool(getattr(self.profile, "vision_helper", None))
+
     def _configure_tool_images(self) -> None:
         """Apply declared support at a lifecycle boundary; status reads stay pure.
 
-        A MachX architecture declaration permits sending images. It does not
-        establish that this server loaded a projector or accepted an image.
+        A MachX architecture declaration alone does not permit sending images once the
+        server's /props are in hand: its `vision.ready` decides (DREAM-096). Neither
+        establishes that this server accepted an image.
         """
         from copy import copy
         enabled = self._configured_multimodal
@@ -1432,9 +1462,12 @@ class OpenAICompatBackend(Backend):
         if override is not None:
             enabled = override
         elif self.provider.key == "machx":
-            vision = self.capability_status()['vision']
-            if vision['known']:
-                enabled = vision['value']
+            # The running server's readiness, else the architecture report: the one answer the header shows
+            # (DREAM-096), so the switch and the chip cannot disagree. With nothing reported at all the adapter's
+            # configuration stands, as before.
+            status = self.vision_status()
+            if status["state"] != "unreported" or self.capability_status()["vision"]["known"]:
+                enabled = status["enabled"]
         rejected = self._image_rejection_model == self.model
         if rejected:
             enabled = False
@@ -1456,7 +1489,7 @@ class OpenAICompatBackend(Backend):
             return
         self.provider = copy(self.provider)
         self.provider.multimodal = enabled
-        self.tools = [t for t in self._all_tools if enabled or t.name != "see"]
+        self.tools = [t for t in self._all_tools if self._offers_see(enabled) or t.name != "see"]
         self.tools_by_name = {t.name: t for t in self.tools}
         self.tool_schemas = [_tool_schema(t) for t in self.tools]
         if self._subagents:
@@ -2354,7 +2387,11 @@ class OpenAICompatBackend(Backend):
         # below — else a subagent emitting `Web_Search`/`Read` is wrongly refused
         # even though the tool is in its scope.
         if allowed is not None and name not in allowed and name.lower() not in allowed:
-            return f"Error: tool '{name}' is not available to this subagent.", True
+            # Name what it CAN call: told only "not available", tool-less subagents probed names for 8 requests
+            # (2026-09-23, live session 20260923-094144-f5ed).
+            have = (f"Its tools: {', '.join(sorted(allowed))}." if allowed
+                    else "This subagent has no tools: work from the task prompt and report what you could not do.")
+            return f"Error: tool '{name}' is not available to this subagent. {have}", True
         # Exact name first; lowercase fallback forgives a small model's Read_File-
         # style casing (no two tools differ only by case).
         tool = self.tools_by_name.get(name) or self.tools_by_name.get(name.lower())
@@ -2384,8 +2421,9 @@ class OpenAICompatBackend(Backend):
                 ok = await self.permission_cb(name, args)
             except RunLimit as exc:
                 return str(exc), True
-            except Exception:
-                ok = False
+            except Exception as exc:   # Dream's own refusal or a failing check -- not the owner's No (DREAM-085)
+                from ..permission_refusal import refusal_text
+                return refusal_text(exc), True
             if not ok:
                 return "Declined by the user.", True
         # Permission can arrive after Stop or a work deadline. It authorizes
@@ -2617,12 +2655,23 @@ class OpenAICompatBackend(Backend):
         finally:
             _AGENT_ACTIVITY.reset(token)
 
+    def _subagent_tool_names(self, spec: Any) -> list[str]:
+        """The local tools a subagent may call. A declared list is honoured as written (missing names skipped);
+        the undeclared marker ``("*",)`` means every tool the lead has except delegation itself -- what a plugin's
+        agent written for Claude Code's default toolset expects (DREAM-089)."""
+        if "*" in spec.tool_names:
+            from ... import extensions
+            active = {tool.name for tool in extensions.filter_tools(self.tools)}
+            return [n for n in self.tools_by_name if n in active and n not in {"task", "fork_verifier_agent"}]
+        return [n for n in spec.tool_names if n in self.tools_by_name]
+
     async def _subagent_loop(
         self, spec: Any, subagent_type: str, prompt: str
     ) -> tuple[str, bool]:
         # Scope to tools that actually exist on this backend — a renamed/missing
         # tool in the spec is silently skipped, never a crash.
-        allowed = {n for n in spec.tool_names if n in self.tools_by_name}
+        names = self._subagent_tool_names(spec)
+        allowed = set(names)
         required_inspection = {"show_html", "get_webview_logs", "save_screenshot", "see"}
         inspected: set[str] = set()
         failed_inspections: set[str] = set()
@@ -2639,8 +2688,7 @@ class OpenAICompatBackend(Backend):
                         + ", ".join(sorted(missing))
                         + ". No verifier request was sent. Check adapter tool/image support; "
                         "tool registration alone does not qualify endpoint image acceptance."), True
-        schemas = [_tool_schema(self.tools_by_name[n]) for n in spec.tool_names
-                   if n in self.tools_by_name]
+        schemas = [_tool_schema(self.tools_by_name[n]) for n in names]
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": spec.prompt},
             {"role": "user", "content": prompt},

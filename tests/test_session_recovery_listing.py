@@ -190,3 +190,18 @@ async def test_engine_consumes_listing_locator_and_raw_page_continuations(task_e
     assert any(turn['role'] == 'user' and turn['content'] == request
                for turn in e.store.session_turns(e.session_id))
     assert any(event.kind == 'result' and not event.data['is_error'] for event in events)
+
+
+async def test_a_missing_id_that_contains_a_stored_id_names_it_without_opening_it(session):
+    """2026-09-23, live session: recall_sessions printed "session 20260923-082006-b50c"; the model sent
+    id='session-20260923-082006-b50c' three ways and got only "no session" each time."""
+    session.start_session('20260923-082006-b50c', 'Rocket build')
+    session.add_turn('20260923-082006-b50c', 'user', 'Resume the rocket animation project')
+    for guess in ('session-20260923-082006-b50c', 'sessions/20260923-082006-b50c.md'):
+        missing = await read_session.handler({'id': guess})
+        text = missing['content'][0]['text']
+        assert missing.get('is_error') and 'no session' in text
+        assert 'Resume the rocket' not in text                          # named, never opened
+        assert 'Did you mean id="20260923-082006-b50c"' in text
+    unrelated = await read_session.handler({'id': 'nothing-like-it'})
+    assert unrelated.get('is_error') and 'Did you mean' not in unrelated['content'][0]['text']

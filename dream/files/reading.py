@@ -673,7 +673,9 @@ def read_document(path: Path, *, offset=0, limit=12_000, page_start=1, page_coun
     result = value[offset:end]
     if end < len(value):
         kind = 'Search result' if query is not None else 'Extracted'
-        result += f'\n[More text: call read_file with the same options and offset={end}, limit={limit}. {kind} characters: {len(value)}.]'
+        # Name the path: told "the same options", a model continued with read_file({"limit": 12000}) and no path (2026-09-23).
+        result += (f'\n[More text: call read_file with path={json.dumps(str(path), ensure_ascii=False)}, offset={end}, '
+                   f'limit={limit} (keep any page, sheet or query options). {kind} characters: {len(value)}.]')
     if truncated:
         result += f'\n[Extraction stopped at a safety limit: at most {MAX_EXTRACT_CHARS} characters, 2 MiB text input, 10000 cells, 50 sheets or 200 slides. This is not the complete file. Select a sheet/page range or split the source.]'
     return result or '[Empty file or no text in the selected range.]'

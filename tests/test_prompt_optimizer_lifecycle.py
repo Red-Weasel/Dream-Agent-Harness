@@ -14,7 +14,8 @@ def app(tmp_path):
     obj.workspace = tmp_path
     obj.provider_label = 'Fixture'
     obj.engine = SimpleNamespace(provider=SimpleNamespace(key='fixture'), model='selected',
-                                session_id='s1', effort='high', profile={'fixture': True})
+                                session_id='s1', effort='high', profile={'fixture': True},
+                                vision_status=lambda: {'state': 'unreported', 'enabled': False, 'source': 'fixture'})
     obj._gui_prompts = asyncio.Queue(maxsize=32)
     obj._deferred_gui_prompt = obj._council_pending = obj._interrupt_target = obj._active_loop = None
     obj._accepting_input = True

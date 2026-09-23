@@ -186,6 +186,11 @@ def _find_ggufs(
     return found
 
 
+# MachX's safetensors-directory checkpoints: one resident two-card runtime each, parallel = 1, host-RAM streaming
+# (engine: Engine::ds41_dir / Engine::mimo26_dir).
+DIRECTORY_ARCHITECTURES = ("deepseek_v41", "mimo_v2")
+
+
 def read_checkpoint_json(path: Path) -> dict:
     """Bound config/index reads without opening any tensor files."""
     with path.open("rb") as stream:
@@ -201,7 +206,7 @@ def read_checkpoint_json(path: Path) -> dict:
 def directory_model_files(path: Path) -> list[Path]:
     """Validate the directory format supported by MachX and its complete shard set."""
     config_path = path / "config.json"
-    if read_checkpoint_json(config_path).get("model_type") != "deepseek_v41":
+    if read_checkpoint_json(config_path).get("model_type") not in DIRECTORY_ARCHITECTURES:
         raise ValueError("Unsupported directory checkpoint architecture")
     index_path = path / "model.safetensors.index.json"
     weights = read_checkpoint_json(index_path).get("weight_map")

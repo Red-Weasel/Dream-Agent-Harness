@@ -301,3 +301,16 @@ def test_a_quoted_colon_in_a_description_parses_fine(tmp_path):
     skills, warnings = loader.discover([tmp_path])
     assert skills[0].description == "Covers this: and that"
     assert not warnings
+
+
+def test_a_missing_bundled_file_lists_what_the_skill_has(tmp_path):
+    """2026-09-23 (DREAM-091 follow-up): the model invented two paths in a row and only "no file" came back."""
+    d = _skill(tmp_path, "alpha", "d")
+    (d / "references").mkdir()
+    (d / "references" / "deep.md").write_text("the detail", encoding="utf-8")
+    (d / "scripts").mkdir()
+    (d / "scripts" / "run.mjs").write_text("// script", encoding="utf-8")
+    skills, _ = loader.discover([tmp_path])
+    out = loader.bundled_file(skills[0], "references/absent.md")
+    assert "no file 'references/absent.md'" in out
+    assert "references/deep.md" in out and "scripts/run.mjs" in out

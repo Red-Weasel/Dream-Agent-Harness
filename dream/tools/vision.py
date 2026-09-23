@@ -10,7 +10,8 @@ from typing import Any
 from claude_agent_sdk import tool
 
 from .. import config
-from .context import ctx, err, in_thread
+from ..core import vision_helper
+from .context import ctx, err, in_thread, ok
 
 _MIME = {
     ".png": "image/png",
@@ -45,22 +46,30 @@ def _resolve(path: str) -> Path | None:
     "Look at one or several images and actually see them — a screenshot from `browse` (pass "
     "the path it returned) or any local image files. Use this when the visual matters: page "
     "layout, a chart, a design, a screenshot of an error. `paths` shows up to 6 images in ONE "
-    "call (one model round trip instead of one per image). Supports png/jpg/webp/gif.",
+    "call (one model round trip instead of one per image). Supports png/jpg/webp/gif. When image input "
+    "is off but the owner configured a vision helper, the images go to that provider and its description "
+    "comes back as text.",
     {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "Path to one image file."},
             "paths": {"type": "array", "items": {"type": "string"}, "maxItems": 6,
                       "description": "Several image files to view together (max 6)."},
+            "question": {"type": "string",
+                         "description": "Optional: what to look for or answer about the image(s); read by a vision "
+                                        "helper describing them for you."},
         },
     },
 )
 async def see(args: dict[str, Any]) -> dict[str, Any]:
     try:
-        multimodal = getattr(ctx(), "multimodal", True)
+        context = ctx()
+        multimodal = getattr(context, "multimodal", True)
+        # Borrowed eyes (DREAM-098): with image input off, the owner may have named a provider that describes instead.
+        helper = getattr(context, "vision_helper", None) if multimodal is False else None
     except RuntimeError:
-        multimodal = True  # Standalone callers retain image inspection support.
-    if multimodal is False:
+        multimodal, helper = True, None  # Standalone callers retain image inspection support.
+    if multimodal is False and not helper:
         return err("Image input is disabled for this session. No image was read. "
                    "A saved path is not visual evidence; report visual checks as unverified.")
     wanted = [str(x) for x in (args.get("paths") or [])] or ([str(args["path"])] if args.get("path") else [])
@@ -95,5 +104,16 @@ async def see(args: dict[str, Any]) -> dict[str, Any]:
             )
         blocks.append({"type": "image", "data": base64.b64encode(data).decode("ascii"), "mimeType": mime})
         names.append(p.name)
+    if helper:
+        # The pixels go to the helper in one single-turn request; only its words reach the session's model.
+        provider = vision_helper.helper_provider(helper)
+        try:
+            text = await vision_helper.describe(blocks, args.get("question"), provider)
+        except Exception as exc:   # a HelperError, or whatever else the transport raised: either way nobody saw the image
+            why = str(exc) if isinstance(exc, vision_helper.HelperError) else f"{type(exc).__name__}: {exc}"
+            return err(f"Vision helper {provider.label} could not describe {', '.join(names)}: {why}. No description "
+                       "was produced and nobody saw the image; report the visual check as unverified or ask the user "
+                       "to look with `visual_check`.")
+        return ok(f"Described by {provider.label}: {text}")
     blocks.append({"type": "text", "text": f"(viewing {', '.join(names)})"})
     return {"content": blocks}

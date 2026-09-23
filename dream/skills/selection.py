@@ -86,6 +86,14 @@ _RULES = {
     'frontend-design': (
         r'\b(?:visual identity|typography|distinctive|aesthetic|look and feel|ui design|redesign|landing page|hero section|color palette|design tokens)\b',
     ),
+    'grill-me': (
+        r'\bgrill(?:ing)?\s+(?:me|us)\b|\bgrill\s+(?:my|our|this|the)\s+(?:plan|idea|design|decision|proposal|thinking|approach|spec|architecture)\b',
+        r'\b(?:stress[- ]test|pressure[- ]test|poke holes in)\b.{0,40}\b(?:plan|idea|design|decision|proposal|thinking|approach|spec|architecture)\b',
+    ),
+    'handoff': (
+        r'\bhand-?\s?off\b.{0,60}\b(?:session|conversation|agent|model|chat|context)\b|\b(?:session|conversation|agent|chat)\b.{0,60}\bhand-?\s?off\b',
+        r'\bhand\s+(?:this|it|the)(?:\s+(?:work|session|conversation|task|chat))?\s+(?:off|over)\b',
+    ),
     'verifying': (
         r'\b(?:verify|verification|validate|sanity.check|acceptance check|regression|recover|recovery|stuck|blocked|retry|interrupted|resume task)\b',
         r'\b(?:command|tool|export|operation)\b.{0,35}\b(?:failed|failure|error|timed out|timeout)\b',
@@ -99,8 +107,11 @@ _ACTION_PATTERN_INDEX = {
     'computer-use': (0, 1, 2, 3, 4), 'coding': (2,), 'research': (0, 2),
     'writing': (0,), 'documents': (1,), 'data-analysis': (1,), 'media': (1,),
     'library': (1,), 'verifying': (1,), 'brainstorming': (0,), 'debugging': (0, 1),
-    'gated-build': (0,), 'frontend-design': (0,),
+    'gated-build': (0,), 'frontend-design': (0,), 'grill-me': (0, 1), 'handoff': (0, 1),
 }
+# A selected workflow that contradicts another drops it unless the user named it: grill-me asks every open decision
+# per round, brainstorming one question per message (DREAM-090).
+_DISPLACES = {'grill-me': ('brainstorming',)}
 
 
 def _request_text(prompt: str) -> str:
@@ -214,6 +225,9 @@ def select_for_task(prompt: str, skills: Iterable[loader.FileSkill] | None = Non
         if explicit is not None or score:
             candidates.append((explicit is None, explicit if explicit is not None else -score,
                                skill.name.casefold(), skill))
+    present = {row[3].name for row in candidates}
+    candidates = [row for row in candidates
+                  if not (row[0] and any(row[3].name in _DISPLACES.get(name, ()) for name in present))]
     candidates.sort(key=lambda row: row[:3])
     if not candidates:
         return TaskGuidance()

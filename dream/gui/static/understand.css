@@ -1,0 +1,35 @@
+/* The Understand-Anything dock (DREAM-087): the codebase map, or this session's changes side by side, beside the chat. */
+#dream-understand{--ua-ink:#edf0fb;--ua-muted:#b3bcd3;--ua-line:#3a4a6a;--ua-panel:#0d1424;display:flex;flex-direction:column;position:relative;order:10;flex:0 0 var(--dream-understand-share,56%);min-width:480px;background:var(--ua-panel);color:var(--ua-ink);border-left:1px solid var(--ua-line);z-index:9;min-height:0;text-align:left;font-family:var(--sans)}
+#dream-understand[hidden]{display:none!important}
+.understand-open #artpanel{display:none!important}
+.understand-open #main{display:block!important;flex:1 1 0!important;min-width:0!important}
+#dream-understand .ua-bar{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--ua-line);background:#111a2e;flex-wrap:wrap}
+#dream-understand .ua-bar h2{font:500 14px/1.3 var(--sans);margin:0 8px 0 0;letter-spacing:.02em}
+#dream-understand .ua-bar button{font:12px/1.4 var(--sans);border:1px solid #4a5a7d;background:#1a2440;color:var(--ua-ink);border-radius:7px;padding:6px 10px;cursor:pointer}
+#dream-understand .ua-bar button[aria-selected=true]{background:#423273;border-color:#8470b0}
+#dream-understand .ua-bar button:hover{background:#28345a}
+#dream-understand #ua-close{margin-left:auto;font-size:18px;line-height:1;padding:2px 8px;border-color:transparent;background:transparent}
+#dream-understand .ua-body{flex:1;min-height:0;display:flex;flex-direction:column}
+#dream-understand .ua-body>[hidden]{display:none!important}
+#ua-frame{flex:1;width:100%;border:0;background:#fff}
+#ua-empty,#ua-changes{padding:18px 20px;overflow:auto;font-size:13px;line-height:1.55;flex:1;min-height:0}
+#ua-empty p,#ua-changes p{margin:0 0 12px;color:var(--ua-muted);overflow-wrap:anywhere}
+#ua-empty h3{margin:0 0 10px;font-size:15px;font-weight:500}
+#ua-empty button,#ua-changes button{font:12px/1.4 var(--sans);border:1px solid #f6b17f;background:#f6b17f;color:#1b1724;border-radius:7px;padding:8px 12px;cursor:pointer;font-weight:600}
+#ua-empty code{background:#070d1c;padding:2px 6px;border-radius:5px;font-size:12px}
+#ua-status{font-size:11px;color:var(--ua-muted);margin-left:4px;overflow-wrap:anywhere}
+.ua-diff{margin:0 0 20px;border:1px solid var(--ua-line);border-radius:9px;overflow:hidden}
+.ua-diff-head{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;padding:8px 12px;background:#111a2e;border-bottom:1px solid var(--ua-line)}
+.ua-diff-file{font:500 12px/1.4 var(--mono,monospace);overflow-wrap:anywhere}
+.ua-diff-when{font-size:11px;color:var(--ua-muted)}
+.ua-diff-grid{display:grid;grid-template-columns:1fr 1fr;font:11.5px/1.5 var(--mono,monospace)}
+.ua-old{border-right:1px solid var(--ua-line)}
+.ua-old,.ua-new{min-width:0}
+.ua-diff-grid .ln{display:block;white-space:pre-wrap;overflow-wrap:anywhere;padding:0 10px;min-height:1.5em}
+.ua-diff-grid .ctx{color:#c9d2e6}
+.ua-diff-grid .del{background:#4a1d26;color:#ffd6d6}
+.ua-diff-grid .add{background:#173a2a;color:#d3f7df}
+.ua-diff-grid .gap{background:#0a101e}
+.ua-diff-grid .hunk{grid-column:1/-1;color:#8fa2c7;background:#0a101e;padding:2px 10px;font-size:11px}
+.ua-diff-grid .note{grid-column:1/-1;color:var(--ua-muted);padding:6px 10px}
+@media(max-width:1100px){#dream-understand{min-width:380px;flex-basis:50%}}

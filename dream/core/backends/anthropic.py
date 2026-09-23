@@ -73,8 +73,9 @@ class AnthropicBackend(Backend):
             if budget_failures is not None:
                 budget_failures.append(str(exc))
             return PermissionResultDeny(message=str(exc))
-        except Exception:
-            ok = False
+        except Exception as exc:   # Dream's own refusal or a failing check -- not the owner's No (DREAM-085)
+            from ..permission_refusal import refusal_text
+            return PermissionResultDeny(message=refusal_text(exc))
         return PermissionResultAllow() if ok else PermissionResultDeny(message="Declined by the user.")
 
     def _build_options(self) -> ClaudeAgentOptions:

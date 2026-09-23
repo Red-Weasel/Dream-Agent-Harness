@@ -100,6 +100,36 @@ def _pid_file() -> Path:
     return config.VAR_DIR / "machx.pid"
 
 
+def _cmdline(pid: int) -> list[str] | None:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part] or None
+
+
+def served_model_path() -> Path | None:
+    """The weights the running server loaded, so an attached session can read their capabilities (DREAM-093).
+
+    First the server Dream launched (pid file -> its command line -> the argument after `serve`), then the one local
+    model whose name is the served id. Two candidates, or none, is None: never a guess.
+    """
+    served = served_model_id()
+    if not served:
+        return None
+    try:
+        args = _cmdline(int(_pid_file().read_text(encoding="utf-8").strip()))
+    except (OSError, ValueError):
+        args = None
+    if args and "serve" in args[:-1]:
+        path = Path(args[args.index("serve") + 1]).expanduser()
+        path = (path if path.is_absolute() else MACHX_DIR / path).resolve()
+        if served in (path.name, path.stem):
+            return path
+    matches = {m.path for m in list_models_detailed() if served in (m.name, m.path.name, m.path.stem)}
+    return matches.pop() if len(matches) == 1 else None
+
+
 def _log_file() -> Path:
     return config.LOG_DIR / "machx.log"
 

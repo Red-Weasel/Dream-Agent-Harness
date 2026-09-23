@@ -171,4 +171,9 @@ def _main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from .desktop.crash_log import enable
+    stop_crash_log = enable()   # DREAM-086: only the desktop window's Terminal session sets the file
+    try:
+        main()
+    finally:
+        stop_crash_log()

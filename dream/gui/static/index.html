@@ -210,6 +210,10 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
 .qform legend{font-weight:500;padding:0}
 .qform .qsub{opacity:.6;font-size:12px;margin:2px 0 6px}
 .qform .qopt{display:block;padding:3px 0}
+.qform .qimgs{display:flex;flex-wrap:wrap;gap:10px;margin:4px 0 10px}
+.qform .qimg{flex:1 1 320px;min-width:0;margin:0}
+.qform .qimg img{display:block;width:100%;height:auto;max-height:480px;object-fit:contain;border:1px solid rgba(255,255,255,.15);border-radius:6px;background:#fff}
+.qform .qimg figcaption{font:11px ui-monospace,monospace;opacity:.6;margin-top:4px}
 .qform .qother{margin-top:4px;width:60%}
 .qform .qsvg{display:inline-block;margin:4px 8px 4px 0;text-align:center}
 .qform .qsvg .qsvgbox{display:block;width:96px;height:68px;border:1px solid rgba(255,255,255,.15);border-radius:6px;overflow:hidden;background:#fff}
@@ -1470,9 +1474,17 @@ function swatchFrame(svg){
 function renderForm(form){
   endTurn();
   const qs = Array.isArray(form.questions) ? form.questions : [];
+  // visual_check: workspace images shown inline above the question, served by the
+  // token-checked download route (workspace files only); the path and the caption are model text.
+  const imgs = Array.isArray(form.images) ? form.images : [];
+  const strip = !imgs.length ? '' : `<div class="qimgs">` + imgs.map(im => {
+    const href = '/api/download?path=' + encodeURIComponent(String(im.path || '')) + '&token=' + encodeURIComponent(TOKEN);
+    const cap = esc(String(im.name || im.path || '')) + (im.size ? ' · ' + esc(String(im.size)) : '');
+    return `<figure class="qimg"><a href="${href}" target="_blank" rel="noopener"><img src="${href}" alt="${cap}"></a><figcaption>${cap}</figcaption></figure>`;
+  }).join('') + `</div>`;
   const el = document.createElement('form');
   el.className = 'qform';
-  el.innerHTML = `<div class="qtitle">${esc(form.title || 'Questions')}</div>` + qs.map((q, i) => {
+  el.innerHTML = `<div class="qtitle">${esc(form.title || 'Questions')}</div>` + strip + qs.map((q, i) => {
     const id = esc(String(q.id || ('q' + i))), kind = esc(String(q.kind || 'freeform'));
     const sub = q.subtitle ? `<div class="qsub">${esc(q.subtitle)}</div>` : '';
     let body = '';
@@ -1726,6 +1738,8 @@ function artifactFromWrite(input){
 <link rel="stylesheet" href="/assets/prompt_optimizer.css">
 <script src="/assets/prompt_optimizer.js"></script>
 <script src="/assets/workspace.js"></script>
+<link rel="stylesheet" href="/assets/understand.css">
+<script src="/assets/understand.js"></script>
 <link rel="stylesheet" href="/assets/library.css">
 <script src="/assets/library.js"></script>
 <link rel="stylesheet" href="/assets/branding.css">

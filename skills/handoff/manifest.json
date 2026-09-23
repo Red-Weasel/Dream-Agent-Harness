@@ -1,0 +1,7 @@
+{
+  "format": "dream-skill/v1",
+  "name": "handoff",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": ["write_file", "read_file", "list_dir"]
+}

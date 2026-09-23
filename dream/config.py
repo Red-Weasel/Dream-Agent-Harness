@@ -81,7 +81,8 @@ MCP_CONFIG_PATH = Path(os.environ.get("DREAM_MCP_CONFIG", str(ROOT / "mcp.json")
 # remain searchable rather than being inserted wholesale into model context.
 CURATED_SKILLS = ('coding', 'research', 'writing', 'documents', 'data-analysis',
                   'media', 'library', 'verifying', 'computer-use', 'blender-animation',
-                  'brainstorming', 'debugging', 'gated-build', 'frontend-design')
+                  'brainstorming', 'debugging', 'gated-build', 'frontend-design',
+                  'grill-me', 'handoff')
 
 
 def bundled_skill_dirs() -> list[Path]:

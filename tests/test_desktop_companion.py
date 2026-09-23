@@ -70,7 +70,9 @@ async def no_overflow(page):
 async def test_chat_is_primary_and_preview_and_external_mode_are_preserved(studio, tmp_path):
     srv, page, url, _, errors = studio
     await ready(page, url)
-    await expect(page.get_by_role("heading", name="What would you like to work on?")).to_be_visible()
+    # The welcome copy is the Dream branding's (workspace.js, DREAM-078); companion.js's older
+    # "What would you like to work on?" is only the fallback it overwrites at load.
+    await expect(page.get_by_role("heading", name="Your ideas. A higher state.")).to_be_visible()
     await expect(page.locator("#input")).to_be_visible()
     await expect(page.locator("#rail")).to_be_hidden()
     await page.screenshot(path=str(tmp_path / "companion-empty.png"))
@@ -82,7 +84,10 @@ async def test_chat_is_primary_and_preview_and_external_mode_are_preserved(studi
     await show(srv, page)
     assert await page.locator("#stream .msg, #stream .tool, #stream .think, #stream .sys").count() == 4
     box = await page.locator("#artbody iframe").bounding_box()
-    assert box["width"] >= 450 and box["height"] >= 380, box
+    # the DREAM-078 branding frame: at the 480 px pane the preview keeps 440 px (branding.css frames `.split` with 6 px
+    # margin + 1 px border over companion.css's `#artbody` 12 px margin + 1 px border = 20 px per side); the owner chose the
+    # design over the older 450 px bound (2026-09-23)
+    assert box["width"] >= 440 and box["height"] >= 380, box
     await no_overflow(page)
     await page.screenshot(path=str(tmp_path / "companion-preview.png"))
     await page.get_by_role("button", name="Code", exact=True).click()
@@ -104,7 +109,9 @@ async def test_chat_is_primary_and_preview_and_external_mode_are_preserved(studi
     await page.locator("#dream-output-expand").click()
     await no_overflow(page)
     box = await page.locator("#artbody iframe").bounding_box()
-    assert box["width"] >= 770 and box["height"] >= 430, box
+    # the same frame at the 800 px viewport (branding.css's base `.split` rule: margin 12px 16px 0 + 1 px border, over #artbody's
+    # 12 px + 1 px = 30 px per side): 800 - 60 = 740 wide; the frame's top margin takes the height from 430 to ~412
+    assert box["width"] >= 740 and box["height"] >= 410, box
     await page.screenshot(path=str(tmp_path / "companion-preview-800.png"))
     await page.locator("#artcode").click()
     await show(srv, page, PAGE, "second.html")

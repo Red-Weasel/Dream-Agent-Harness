@@ -34,7 +34,8 @@ def app(tmp_path):
     obj.bus.publish(Event('user', 'Keep my existing conversation'))
     obj.renderer = SimpleNamespace(console=Console(record=True), system=lambda text: None)
     obj.engine = SimpleNamespace(_moe=None, model='local-model', provider=SimpleNamespace(key='machx'),
-                                 provider_label='MachX', session_id='original-session', effort=None)
+                                 provider_label='MachX', session_id='original-session', effort=None,
+                                 vision_status=lambda: {'state': 'off', 'enabled': False, 'source': 'fixture'})
     return obj
 
 

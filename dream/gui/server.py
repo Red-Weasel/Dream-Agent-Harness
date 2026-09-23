@@ -132,6 +132,7 @@ class StudioServer:
         from .skill_routes import routes as skill_routes
         from .memory_routes import routes as memory_routes
         from .files_routes import routes as files_routes
+        from .understand_routes import routes as understand_routes
         from .project_library_routes import routes as project_library_routes
         from .project_document_routes import routes as project_document_routes
         from ..projects.recovery import list_recoveries
@@ -167,6 +168,7 @@ class StudioServer:
         routes.extend(skill_routes(self))
         routes.extend(memory_routes(self))
         routes.extend(files_routes(self))
+        routes.extend(understand_routes(self))
         routes.extend(project_document_routes(self))
         routes.extend(project_library_routes(self))
         if STATIC_DIR.is_dir():

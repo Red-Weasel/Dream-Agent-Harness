@@ -68,6 +68,10 @@ _READ_ONLY = {
     "checkpoint_list",
     # Phase 3 file tools that only look (or only wait).
     "grep", "image_metadata", "sleep",
+    # DREAM-094: pixel statistics, a diff and OCR of image files -- reads only
+    "measure_image",
+    # DREAM-097: shows workspace images with a question in Studio (questions_v2's form); asks, changes nothing
+    "visual_check",
     # Studio: the hidden frame has no network, and these change nothing on disk
     # (multi_screenshot writes only under Dream's screenshot folder, like browse).
     "show_html", "get_webview_logs", "show_to_user", "done", "eval_js", "multi_screenshot",

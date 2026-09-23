@@ -1,0 +1,7 @@
+{
+  "format": "dream-skill/v1",
+  "name": "grill-me",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": ["questions_v2", "read_file", "list_dir", "grep"]
+}

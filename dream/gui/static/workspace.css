@@ -94,7 +94,7 @@
  .dream-design #dream-workbar{flex-wrap:wrap}
  .dream-design #dream-workbar .studio-nav{flex-basis:100%;justify-content:flex-end}
  .dream-design #dream-workbar .studio-nav button{min-height:30px;padding:4px 8px}
- .dream-design #dream-effort{display:none}
+ .dream-design #dream-effort,.dream-design #dream-vision{display:none}
  .dream-design #dream-workspace{max-width:36%}
  .dream-design #dream-model{max-width:36%}
  .dream-design #dream-approval-return{flex:1 1 100%;white-space:normal;min-height:36px}
@@ -110,3 +110,9 @@
  .dream-design #dream-workspace{max-width:29%}
  .dream-design #dream-model{max-width:26%}
 }
+
+/* The vision chip (DREAM-093): a session whose model cannot see says so at a glance. */
+#dream-workbar #dream-vision[data-state=off]{border-color:#8a5a3a;color:#f3c9a8}
+#dream-workbar #dream-vision[data-state=on]{border-color:#3f6b54;color:#cfe9da}
+/* borrowed (DREAM-098): the model does not see; a named vision helper describes, so the image leaves the machine. */
+#dream-workbar #dream-vision[data-state=borrowed]{border-color:#5d5a8a;color:#d6d2f3}

@@ -18,7 +18,7 @@
   const brand=el('div',null,{class:'dream-nav-brand'});
   const brandText=el('div','DREAM');brandText.append(el('small','Build · Explore · Align'));
   brand.append(el('img',null,{src:'/assets/dream-mark.svg',alt:'',width:'44',height:'44'}),brandText);nav.append(brand);
-  const views=[['home','◉','Home'],['chat','◌','Chat'],['studio','◇','Studio'],['projects','▱','Projects'],['optimizer','✎','Prompt Optimizer'],['skills','✧','Skills'],['memory','▧','Memory'],['files','▤','Files'],['settings','⚙','Settings']];
+  const views=[['home','◉','Home'],['chat','◌','Chat'],['studio','◇','Studio'],['projects','▱','Projects'],['optimizer','✎','Prompt Optimizer'],['skills','✧','Skills'],['memory','▧','Memory'],['files','▤','Files'],['understand','⌬','Understand'],['settings','⚙','Settings']];
   for(const [view,icon,label] of views){const b=button('',()=>navigate(view),'dream-nav-'+view);b.title=label;b.setAttribute('aria-label','Go to '+label);b.append(el('i',icon,{'aria-hidden':'true'}),el('span',label));nav.append(b);}
   nav.append(button('⌘',()=>palette.showModal(),'dream-command-open'));$('dream-command-open')?.setAttribute('aria-label','Command palette');
   document.body.prepend(nav);$('dream-command-open').setAttribute('aria-label','Command palette');
@@ -34,6 +34,12 @@
   let performanceSupported=false;
   const effort=button('Effort · unreported',()=>{$(performanceSupported?'dream-controls-open':'dream-council-open').click();},'dream-effort');
   effort.title='Adjust supported reasoning settings; provider handoffs apply between turns';
+  // Whether this session sends images to the model, and why (DREAM-093): a model that cannot see should not be the
+  // last to say so. Click opens Controls, where the session's vision setting lives.
+  const vision=button('Vision · unreported',()=>$('dream-controls-open')?.click(),'dream-vision');
+  vision.title='Image input for this session: not reported';
+  // "borrowed" (DREAM-098): the model gets no images; a vision helper the owner named describes them, so the chip names it.
+  function showVision(){const v=window.DREAM_SESSION?.vision;const state=v&&['on','off','unreported','borrowed'].includes(v.state)?v.state:'unreported';vision.textContent='Vision · '+state+(state==='borrowed'?' ('+(v.helper||'vision helper')+')':'');vision.dataset.state=state;vision.title='Image input for this session: '+state+(v&&v.source?' ('+v.source+')':'');}
   const context=button('Context',()=>{inspector.hidden=!inspector.hidden;if(!inspector.hidden){refresh();environment();}},'dream-inspect-toggle');
   const utilityNav=document.querySelector('.studio-nav'), utilityAnchor=document.createComment('Classic workspace navigation');
   utilityNav.before(utilityAnchor);
@@ -42,7 +48,7 @@
   function toolLayout(){utilityMenu.open=!narrowTools.matches;}
   narrowTools.addEventListener('change',toolLayout);toolLayout();
   utilityMenu.addEventListener('keydown',e=>{if(e.key==='Escape'&&narrowTools.matches){e.preventDefault();utilityMenu.open=false;utilityMenu.querySelector('summary').focus();}});
-  workbar.append(workspace,model,effort,context,utilityMenu);utilityNav.after(workbar);
+  workbar.append(workspace,model,effort,vision,context,utilityMenu);utilityNav.after(workbar);
   const home=el('section',null,{id:'dream-home','aria-label':'Dream Home'});home.hidden=true;
   home.innerHTML='<div class="dream-hero"><div class="dream-hero-copy"><span class="dream-eyebrow">Welcome to Dream</span><h1>Your ideas<br>have a <em>higher state.</em></h1><p>Your models. Your workspace.<br>A place to think, build, and create.</p><div class="dream-actions"></div></div></div><div class="dream-home-grid"><section class="dream-home-card"><h2>YOUR WORKSPACE</h2><p id="dream-home-path">Workspace unreported</p><p id="dream-home-session"></p><div id="dream-home-project"></div></section><section class="dream-home-card"><h2>RECENT WORK</h2><div id="dream-recovery">Open Home to read saved run records.</div></section></div>';
   home.querySelector('.dream-actions').append(button('Resume work →',()=>navigate('chat'),'dream-resume'),button('Open project',()=>navigate('projects')));
@@ -67,6 +73,7 @@
   const destinations={chat:'studio-interactions',studio:'studio-preview',projects:'studio-project',skills:'studio-skills',settings:'dream-controls-open'};
   function navigate(view){
     if(!views.some(v=>v[0]===view))return;
+    if(view==='understand'){window.DreamLibrary?.hide();window.PromptOptimizer?.hide(false);root.classList.remove('dream-expanded');home.hidden=true;inspector.hidden=true;root.dataset.dreamView='chat';$('studio-interactions')?.click();window.DreamUnderstand?.toggle();return;}   // a dock beside the chat, not a page (DREAM-087)
     window.DreamLibrary?.hide();
     window.PromptOptimizer?.hide(false);
     root.classList.remove('dream-expanded');
@@ -82,7 +89,7 @@
   }
   let pendingNative=null;
   window.addEventListener('dream:navigate',e=>{if(!window.DREAM_SESSION){pendingNative=e.detail;return;}if(e.detail?.session_id&&e.detail.session_id===window.DREAM_SESSION?.session_id)navigate(e.detail.view);});
-  window.addEventListener('dream:session',()=>{const key=[window.DREAM_SESSION?.session_id,window.DREAM_SESSION?.workspace].join('|');if(key!==sessionKey){sessionKey=key;sessionGeneration++;}environmentLoaded=false;if(pendingNative?.session_id && pendingNative.session_id===window.DREAM_SESSION?.session_id)navigate(pendingNative.view);pendingNative=null;workspace.title=window.DREAM_SESSION.workspace||'Workspace unreported';workspace.textContent=shortWorkspace();model.textContent=window.DREAM_SESSION.model||window.DREAM_SESSION.provider||'Model unreported';effort.textContent='Effort · '+(Object.hasOwn(window.DREAM_SESSION,'reasoning_effort')?(window.DREAM_SESSION.reasoning_effort||'provider default'):'unreported');model.title=[window.DREAM_SESSION.provider,window.DREAM_SESSION.model].filter(Boolean).join(' · ');$('dream-home-path').textContent=workspace.title;$('dream-home-session').textContent=window.DREAM_SESSION.session_id||'Session identity unreported';});
+  window.addEventListener('dream:session',()=>{const key=[window.DREAM_SESSION?.session_id,window.DREAM_SESSION?.workspace].join('|');if(key!==sessionKey){sessionKey=key;sessionGeneration++;}environmentLoaded=false;if(pendingNative?.session_id && pendingNative.session_id===window.DREAM_SESSION?.session_id)navigate(pendingNative.view);pendingNative=null;workspace.title=window.DREAM_SESSION.workspace||'Workspace unreported';workspace.textContent=shortWorkspace();model.textContent=window.DREAM_SESSION.model||window.DREAM_SESSION.provider||'Model unreported';effort.textContent='Effort · '+(Object.hasOwn(window.DREAM_SESSION,'reasoning_effort')?(window.DREAM_SESSION.reasoning_effort||'provider default'):'unreported');showVision();model.title=[window.DREAM_SESSION.provider,window.DREAM_SESSION.model].filter(Boolean).join(' · ');$('dream-home-path').textContent=workspace.title;$('dream-home-session').textContent=window.DREAM_SESSION.session_id||'Session identity unreported';});
   function shortWorkspace(){return (window.DREAM_SESSION?.workspace||'Workspace unreported').replace(/[\\/]+$/,'').split(/[\\/]/).pop();}
   async function read(path){const generation=sessionGeneration;const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),8000);try{const response=await fetch(path,{headers:{'X-Dream-Token':TOKEN},cache:'no-store',signal:controller.signal});const data=await response.json();if(generation!==sessionGeneration){const stale=new Error('Workspace changed while loading.');stale.stale=true;throw stale;}if(!response.ok)throw new Error(data.error||'Unavailable ('+response.status+')');return data;}finally{clearTimeout(timer);}}
   let homeLoading=false;

@@ -38,6 +38,10 @@ class ToolContext:
     # toolset when it can't, so a result that points at `see` sends the model
     # after a tool it doesn't have.
     multimodal: bool = True
+    # Borrowed eyes (DREAM-098): the provider key that describes images for a model
+    # without image input, or None. `see` stays offered while it is set; only the
+    # owner's profile setting (vision_helper / DREAM_VISION_HELPER) sets it.
+    vision_helper: str | None = None
     # Push an Event to the session's viewers (the TUI funnel, and Studio when it
     # is open). Set by the app; None when nothing is listening. The Studio tools
     # use it to open an artifact in the user's panel.

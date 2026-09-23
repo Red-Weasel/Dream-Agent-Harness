@@ -361,6 +361,21 @@ async def test_skill_list_and_load_tools(tool_env):
     assert missing.get("is_error") is True
 
 
+async def test_skill_load_points_an_installed_skill_name_at_skill_open(tool_env, monkeypatch):
+    """2026-09-23, live session: search_skills listed 'understand-dashboard', then skill_load(slug=...) said only
+    "No skill with slug" and pointed at skill_list -- which lists the owner's LEARNED skills, not installed ones."""
+    from types import SimpleNamespace
+    from dream.tools import installed_skill_tools
+    monkeypatch.setattr(installed_skill_tools, "_by_name",
+                        lambda n: SimpleNamespace(name=n) if n == "understand-dashboard" else None)
+    hit = await skill_tools.skill_load.handler({"slug": "understand-dashboard"})
+    assert hit.get("is_error") is True
+    assert 'skill_open(name="understand-dashboard")' in _text(hit)
+    miss = await skill_tools.skill_load.handler({"slug": "ghost"})
+    assert miss.get("is_error") is True
+    assert "skill_list" in _text(miss) and "skill_open" in _text(miss)
+
+
 async def test_skill_list_when_empty(tool_env):
     result = await skill_tools.skill_list.handler({})
     assert not result.get("is_error")

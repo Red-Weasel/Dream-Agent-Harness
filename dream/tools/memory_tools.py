@@ -343,7 +343,13 @@ async def read_session(args: dict[str, Any]) -> dict[str, Any]:
     sid = str(args.get("id") or "")
     sess = await in_thread(c.store.get_session, sid)
     if not sess:
-        return err(f"read_session: no session {sid!r}. recall_sessions lists them.")
+        # Name the stored id the guess contains (a "session-" prefix, a ".md" suffix) WITHOUT opening it:
+        # the exact id stays the model's to send (2026-09-23, three misspelt guesses in a row, live session).
+        recent = await in_thread(c.store.recent_sessions, 200)
+        near = [s["id"] for s in recent if s.get("id") and len(s["id"]) >= 8 and s["id"] in sid][:3]
+        hint = (" Did you mean " + " or ".join(f"id={json.dumps(s, ensure_ascii=False)}" for s in near)
+                + "? Send the id exactly as recall_sessions prints it after the word 'session'.") if near else ""
+        return err(f"read_session: no session {sid!r}. recall_sessions lists them.{hint}")
     ceiling = (await in_thread(c.store.latest_user_turn_id, sid)
                if sid == c.session_id else None)
     bounds = {"through_turn": ceiling} if ceiling is not None else {}

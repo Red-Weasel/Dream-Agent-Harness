@@ -25,10 +25,24 @@ def catalog():
     from ..tui.picker import detect_providers
 
     rows = []
+
+    def vision(path):
+        """The engine's own vision report for these weights (DREAM-093); None when it cannot say."""
+        try:
+            reported = (machx.capabilities(path).get('features') or {}).get('vision') if path else None
+        except (ValueError, OSError, subprocess.SubprocessError):
+            return None
+        return reported if type(reported) is bool else None
+
+    def shown(label, sees):
+        return label + (' · sees images' if sees else ' · text only' if sees is False else ' · vision unreported')
+
     model = machx.served_model_id()
     if model:
-        rows.append(dict(id='running', label=f'{model} · already running', provider='machx',
-                         model=model, ready=True, kind='attach', note='Uses the loaded model. Leaves it running on exit.'))
+        sees = vision(machx.served_model_path())
+        rows.append(dict(id='running', label=shown(f'{model} · already running', sees), provider='machx',
+                         model=model, ready=True, kind='attach', vision=sees,
+                         note='Uses the loaded model. Leaves it running on exit.'))
     for row in detect_providers():
         if row.key == 'moe':
             continue  # Advisors are optional alongside the selected main engine.
@@ -41,8 +55,9 @@ def catalog():
             filename = item.path.name.lower()
             if filename.startswith('mmproj') or filename == 'mtp-head.gguf':
                 continue  # Auxiliary projection/MTP weights cannot serve chat alone.
-            rows.append(dict(id=str(item.path), label=f'{item.name} · {item.size_gb:.1f} GB · {item.volume}',
-                             path=str(item.path), provider='machx', ready=True, kind='local',
+            sees = vision(item.path)
+            rows.append(dict(id=str(item.path), label=shown(f'{item.name} · {item.size_gb:.1f} GB · {item.volume}', sees),
+                             path=str(item.path), provider='machx', ready=True, kind='local', vision=sees,
                              note='Load local weights using saved settings or recommendations.'))
     saved = load_config()
     return {'choices': rows, 'council_choices': provider_choices(),
@@ -70,8 +85,9 @@ def model_settings(path):
     memory_notes = (['Memory: MachX streams experts from host RAM and splits GPU work across the selected cards. '
                      'The full model file does not need to fit in VRAM; the engine checks weights, context and caches during startup.']
                     if caps.get('memory_planner') == 'streaming' else [])
-    if caps.get('architecture') == 'deepseek_v41' and caps.get('memory_planner') == 'streaming':
-        memory_notes = ['Memory: V4.1 uses GPU slots, bounded pinned RAM and disk-backed weights. '
+    from ..local.models import DIRECTORY_ARCHITECTURES
+    if caps.get('architecture') in DIRECTORY_ARCHITECTURES and caps.get('memory_planner') == 'streaming':
+        memory_notes = ['Memory: this model uses GPU slots, bounded pinned RAM and disk-backed weights. '
                         'The full checkpoint need not fit in RAM. The engine keeps 40 GiB of host RAM '
                         'available and sizes expert slots from free GPU memory. It uses all visible Arc GPUs '
                         'and serves one request at a time (parallel = 1).']
@@ -124,11 +140,12 @@ def launch_preflight(model_gb, gpus, settings):
     count = gpus or len(devices)
     if not gpu.get('ok') or not devices or count > len(devices):
         raise ValueError('GPU status or requested topology is unavailable. No model was loaded.')
-    disk_streaming = (settings.get('architecture') == 'deepseek_v41'
+    from ..local.models import DIRECTORY_ARCHITECTURES
+    disk_streaming = (settings.get('architecture') in DIRECTORY_ARCHITECTURES
                       and settings.get('memory_planner') == 'streaming')
-    # ds41_load enumerates all visible Arc devices; --gpus does not restrict it.
+    # ds41_load / mimo26_load enumerate all visible Arc devices; --gpus does not restrict them.
     if disk_streaming and count != len(devices):
-        raise ValueError('V4.1 uses all visible GPUs. Select auto or all detected GPUs so every card is checked.')
+        raise ValueError('This model uses all visible GPUs. Select auto or all detected GPUs so every card is checked.')
     for device in devices[:count]:
         for key in ('util_pct', 'vram_total_mib', 'vram_used_mib'):
             value = device.get(key)
@@ -170,13 +187,13 @@ def launch_preflight(model_gb, gpus, settings):
         # minus 40 GiB. Remaining experts/engram tables are mmap-backed, unlike
         # the GGUF streamers that require their weight banks to fit in host RAM.
         if disk_streaming and available_ram <= 40:
-            raise ValueError('V4.1 needs more than 40 GiB of available host RAM for its pinned tier and reserve.')
+            raise ValueError('This model needs more than 40 GiB of available host RAM for its pinned tier and reserve.')
         if not disk_streaming and available_ram < model_gb * 1.08:
             raise ValueError('MachX streams experts from host RAM, but available RAM is below the weight size plus headroom. Free memory before loading.')
         if any((d.get('vram_total_mib', 0) - d.get('vram_used_mib', 0)) < 8192 for d in devices[:count]):
             raise ValueError('Not enough free GPU memory for base weights and caches.')
         if disk_streaming:
-            return ('V4.1 streams through GPU slots, bounded pinned RAM and disk-backed weights; '
+            return ('This model streams through GPU slots, bounded pinned RAM and disk-backed weights; '
                     f'host RAM available: {available_ram:.1f} GiB, with 40 GiB kept free by the engine. '
                     'The engine validates context, dense weights and remaining expert slots during startup.')
         return ('MachX streams experts from host RAM; the full weight size is not a VRAM requirement. '
@@ -211,7 +228,7 @@ async def run(request, status_path):
     from .. import config
     from ..local import machx
     from ..local.model_presets import Presets, model_key
-    from ..local.settings import session_options
+    from ..local.settings import session_options, _validated_session_capabilities
 
     workspace = Path(request['workspace']).expanduser().resolve(strict=True)
     if not workspace.is_dir():
@@ -239,6 +256,18 @@ async def run(request, status_path):
             current = await asyncio.to_thread(machx.served_model_id)
             if not current or current != model:
                 raise ValueError('The running model changed or stopped. Refresh and select it again.')
+            # The running model's capabilities, so the session knows what it can do -- image input first (DREAM-093).
+            # Unknown weights attach exactly as before, with nothing reported; so does a report Dream cannot validate
+            # (checked here, not first at session_options below, which would abort the attach -- DREAM-096).
+            served = await asyncio.to_thread(machx.served_model_path)
+            if served is not None:
+                try:
+                    session_capabilities = _validated_session_capabilities(
+                        await asyncio.to_thread(machx.capabilities, served))
+                    options = {}
+                except (ValueError, OSError, subprocess.SubprocessError) as exc:
+                    session_capabilities = None
+                    publish(status_path, 'starting', f'Connected; the model\'s capabilities were not read: {exc}')
         elif choice['kind'] == 'local':
             load_lifetime.enter_context(local_load_lock())
             path = Path(choice['path']).resolve(strict=True)
@@ -313,4 +342,9 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    from .crash_log import enable
+    stop_crash_log = enable()   # DREAM-086: only the window's session launch sets the file
+    try:
+        main()
+    finally:
+        stop_crash_log()

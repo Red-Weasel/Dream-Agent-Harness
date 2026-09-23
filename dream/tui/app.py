@@ -558,7 +558,11 @@ class App(CouncilControls):
         return tool_name
 
     async def _permission(self, tool_name: str, tool_input: dict) -> bool:
-        granted = await self._decide_permission(tool_name, tool_input)
+        why: list[str] = []
+        granted = await self._decide_permission(tool_name, tool_input, why)
+        if not granted and why:   # Dream refused, not the owner: the model hears the reason (DREAM-085)
+            from ..core.permission_refusal import PermissionRefused
+            raise PermissionRefused(why[-1])
         if granted:
             # The last moment guaranteed to run BEFORE the tool does — snapshot any
             # later and the "undo" records the file Dream has already changed.
@@ -608,14 +612,18 @@ class App(CouncilControls):
         loop = getattr(self, "_active_loop", None)
         return getattr(loop, "workspace", None) if loop else None
 
-    async def _decide_permission(self, tool_name: str, tool_input: dict) -> bool:
+    async def _decide_permission(self, tool_name: str, tool_input: dict, why: list[str] | None = None) -> bool:
+        def refuse(reason: str) -> bool:   # Dream's own refusal, recorded for _permission (DREAM-085)
+            if why is not None:
+                why.append(reason)
+            return False
         engine = getattr(self, "engine", None)
         loop_dir = self._loop_workspace
         if loop_dir is not None and policy.capability(tool_name) in (policy.WRITE, policy.DESTRUCTIVE):
             targets = policy._paths(tool_input, self.workspace)
             if any(path.is_relative_to(loop_dir) and path != loop_dir / "progress.md" for path in targets):
                 self.renderer.system("Run records and acceptance criteria are managed by Dream; write progress.md instead.")
-                return False
+                return refuse("Dream manages this run's records and acceptance criteria; write progress.md instead")
         native_shell = tool_name in {"run_bash", f"mcp__{config.MCP_SERVER_NAME}__run_bash"}
         scope = getattr(engine, "execution_scope", None)
         capability = getattr(engine, "execution_capability", None)
@@ -631,9 +639,9 @@ class App(CouncilControls):
             if (getattr(self, "engine", None) is not engine or self.mode != mode
                     or self.workspace != workspace
                     or getattr(engine, "workspace", None) != engine_workspace
-                    or getattr(engine, "execution_scope", None) is not scope):
+                    or getattr(engine, "execution_scope", None) != scope):   # by value: frozen dataclass (DREAM-088)
                 self.renderer.system("Shell authorization changed during the sandbox check; retry in the current session and scope.")
-                return False
+                return refuse("shell authorization changed during the sandbox check; retry in the current session and scope")
             engine.execution_capability = refreshed
         decision, reason = policy.decide(tool_name, tool_input, self.mode, self.workspace,
                                        execution_scope=getattr(engine, "execution_scope", None),
@@ -646,7 +654,7 @@ class App(CouncilControls):
             return True
         if decision == "deny":
             self.renderer.system(f"✗ {tool_name.split('__')[-1]} blocked — {reason}")
-            return False
+            return refuse(f"blocked by Dream's policy: {reason}")
         # Boundary writes retain their own prompts. Explicit native Bash grants
         # below are exact-command/session scoped and distinguish host access.
         boundary = reason.startswith("outside workspace")
@@ -668,11 +676,14 @@ class App(CouncilControls):
         captured = (engine, self.mode, self.workspace, scope,
                     getattr(engine, 'workspace', None), capability)
         def unchanged():
+            # Scope and capability are frozen dataclasses: a re-probe of the same sandbox is a NEW object with the
+            # same evidence, not a change of authorization -- compared by identity, the first shell command of a
+            # session was refused right after the owner approved it (DREAM-088, 2026-09-23 08:21 and 09:46).
             return (getattr(self, 'engine', None) is captured[0]
                     and self.mode == captured[1] and self.workspace == captured[2]
-                    and getattr(engine, 'execution_scope', None) is captured[3]
+                    and getattr(engine, 'execution_scope', None) == captured[3]
                     and getattr(engine, 'workspace', None) == captured[4]
-                    and getattr(engine, 'execution_capability', None) is captured[5])
+                    and getattr(engine, 'execution_capability', None) == captured[5])
         effect = policy._shell_effect(str(tool_input.get('command') or ''), self.workspace)[0] if native_shell else None
         remember_native = bool(native_shell and scope is not None
                                and scope.workspace == self.workspace
@@ -686,7 +697,7 @@ class App(CouncilControls):
         async with self._perm_lock:
             if native_shell and not unchanged():
                 self.renderer.system('Shell authorization changed while waiting; retry in the current session and scope.')
-                return False
+                return refuse('shell authorization changed while the prompt was waiting; retry in the current session and scope')
             if remember_sandbox and sandbox_key in self._always_allow:
                 return True
             if remember_host and host_key in self._always_allow:
@@ -745,7 +756,7 @@ class App(CouncilControls):
                 return False
             if native_shell and not unchanged():
                 self.renderer.system('Shell authorization changed during approval; retry in the current session and scope.')
-                return False
+                return refuse('shell authorization changed during approval; retry in the current session and scope')
             ans = ans.strip().lower()
             if ans in ('a', 'always') and remember_sandbox:
                 self._always_allow.add(sandbox_key)
@@ -760,6 +771,8 @@ class App(CouncilControls):
             if ans in ("a", "always") and not native_shell and not boundary:
                 self._always_allow.add(key)
                 return True
+            if ans in ("a", "always", "ha"):   # an "always" answer this prompt did not offer: not a No
+                return refuse(f"'{ans}' is not an option for this command; choose run once or deny")
             approved = ans in ("y", "yes")
             if approved and uncontained:
                 engine.approve_command(str(tool_input.get("command") or ""), uncontained=True)
@@ -1529,6 +1542,7 @@ class App(CouncilControls):
             "provider": self.provider_label,
             "model": self.engine.model,
             "reasoning_effort": self.engine.effort,
+            "vision": self.engine.vision_status(),   # the header's vision chip (DREAM-093)
             "workspace": str(self.workspace),
             "project_id": getattr(self, '_active_project_id', None),
             'steering_target': ({'session_id': inbox.session, 'turn': inbox.turn}

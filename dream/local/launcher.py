@@ -307,7 +307,8 @@ async def serve_and_run(
             ) / (1024 ** 3)
     except OSError:
         size_gb = 0.0
-    if capabilities.get('architecture') == 'deepseek_v41' and capabilities.get('memory_planner') == 'streaming':
+    from .models import DIRECTORY_ARCHITECTURES
+    if capabilities.get('architecture') in DIRECTORY_ARCHITECTURES and capabilities.get('memory_planner') == 'streaming':
         # Use the same all-device and disk-backed residency checks as the GUI.
         from ..desktop.startup import launch_preflight
         try:

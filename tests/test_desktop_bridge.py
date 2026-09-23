@@ -194,12 +194,14 @@ def test_app_inherits_gui_unless_explicitly_overridden(app_factory, monkeypatch,
 @pytest.mark.asyncio
 async def test_session_metadata_follows_the_current_engine_without_restarting_studio(app_factory):
     app = app_factory(gui=True)
-    app.engine = SimpleNamespace(session_id="first", model="old", effort="low")
+    app.engine = SimpleNamespace(session_id="first", model="old", effort="low",
+                                 vision_status=lambda: {"state": "off", "enabled": False, "source": "fixture"})
     srv = StudioServer(EventBus(), session=app._studio_session_info)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://test") as client:
         headers = {"X-Dream-Token": srv.token}
         assert (await client.get("/api/desktop", headers=headers)).json()["session"]["session_id"] == "first"
-        app.engine = SimpleNamespace(session_id="next", model="new", effort="high")
+        app.engine = SimpleNamespace(session_id="next", model="new", effort="high",
+                                     vision_status=lambda: {"state": "on", "enabled": True, "source": "fixture"})
         metadata = (await client.get("/api/desktop", headers=headers)).json()["session"]
         assert metadata["session_id"] == "next" and metadata["model"] == "new"
         assert metadata["reasoning_effort"] == "high"
@@ -326,7 +328,8 @@ async def main():
     async def stopped(**kwargs):
         return None
     async def start():
-        app.engine = SimpleNamespace(session_id="native-test", model="scripted", effort=None, store=None, stop=stopped)
+        app.engine = SimpleNamespace(session_id="native-test", model="scripted", effort=None, store=None, stop=stopped,
+                                     vision_status=lambda: {"state": "unreported", "enabled": False, "source": "fixture"})
         app.provider_label = "scripted"
         await app._start_studio()
         if app.studio is None:

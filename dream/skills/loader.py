@@ -368,7 +368,10 @@ def bundled_file(skill: FileSkill, relpath: str) -> str:
     if target != root and root not in target.parents:
         return SkillReadFailure(f"[refused: '{relpath}' resolves outside the '{skill.name}' skill]")
     if not target.is_file():
-        return SkillReadFailure(f"[no file '{relpath}' in the '{skill.name}' skill]")
+        # Name what IS there: told only "no file", a model invented two more paths in a row (2026-09-23).
+        names = bundled_names(skill, limit=40)
+        have = f"; it has: {', '.join(names)}{', …' if len(names) == 40 else ''}" if names else "; it has no other files"
+        return SkillReadFailure(f"[no file '{relpath}' in the '{skill.name}' skill{have}]")
     try:
         with target.open(encoding="utf-8", errors="replace") as f:
             text = f.read(FILE_MAX_CHARS + 1)

@@ -76,6 +76,18 @@ def _isolate_memory(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "INSTRUCTIONS_FILE", root / "INSTRUCTIONS.md")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_plugins(monkeypatch):
+    """plugins.load() -- an Engine boot, extensions reviewing a module -- fills a module-global
+    roster from the checkout's plugins/ directory (understand-anything's ten agents today) and
+    nothing unloads it, so those plugin agents followed the suite into tests/test_local_subagents.py
+    (DREAM-099). Every test starts from the roster it inherited and hands it back afterwards; a
+    test that loads plugins still sees them for its own duration."""
+    from dream import plugins
+    for name in ("_LOADED", "_WARNINGS", "_EXTRA_WARNINGS"):
+        monkeypatch.setattr(plugins, name, list(getattr(plugins, name)))
+
+
 @pytest.fixture(scope="session")
 def session_embedder():
     e = Embedder()

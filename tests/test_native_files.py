@@ -420,3 +420,21 @@ def test_file_activity_accounting_for_the_new_tools(tmp_path):
     assert policy.classify_file_activity(
         "delete_file", {"paths": ["a.py"]}, tmp_path
     ) == ("deleted", "a.py")
+
+
+# --- read_file: a cut-off read says how to continue, path included ---------------------
+
+
+@pytest.mark.asyncio
+async def test_a_cut_off_read_names_the_path_in_its_continuation_note(ws):
+    """2026-09-23, live session: after a 12,000-character read the model followed the note literally --
+    read_file({"limit": 12000}) and then {"start_line": 386, "line_count": 260}, both without path -- and got
+    "missing required field path" twice. The note said "the same options" and never named the path."""
+    import json
+    from dream.tools.native import read_file
+    big = ws / "big.txt"
+    big.write_text("".join(f"line {i:05d} " + "x" * 40 + "\n" for i in range(700)))   # ~33k chars
+    out = _text(await read_file.handler({"path": "big.txt"}))
+    note = out[out.rindex("[More text"):]
+    assert f"path={json.dumps(str(big))}" in note and "offset=12000" in note and "limit=12000" in note
+    assert "same options" not in note
