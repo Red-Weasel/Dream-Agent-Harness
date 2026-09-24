@@ -586,7 +586,8 @@ def test_the_curated_skills_win_the_bare_names_and_the_plugin_copies_stay_reacha
 UNDERSTAND_FAMILY = {"understand", "understand-dashboard", "understand-domain"}
 ASK = ("Use the understand skill (Understand-Anything) to map this project into .ua/knowledge-graph.json, then tell me "
        "when the map is ready. Run its helper scripts with run_bash from $UA_SKILLS (the plugin is installed and built; "
-       "skip locating it). Exclude Dream's own state folders: pass --exclude \".dream/**,.remember/**\" to the scan.")
+       "skip locating it). Exclude Dream's own state folders: pass --exclude \".dream/**,.remember/**\" to its status "
+       "command.")
 
 
 @pytest.mark.parametrize("prompt", [

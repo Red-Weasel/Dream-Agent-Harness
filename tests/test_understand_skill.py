@@ -43,7 +43,8 @@ SCRIPTS = ("scan-project.mjs", "extract-import-map.mjs", "compute-batches.mjs", 
 # the dock's request (dream/gui/static/understand.js ASK), the explicit selection that must keep working
 ASK = ("Use the understand skill (Understand-Anything) to map this project into .ua/knowledge-graph.json, then tell me "
        "when the map is ready. Run its helper scripts with run_bash from $UA_SKILLS (the plugin is installed and built; "
-       "skip locating it). Exclude Dream's own state folders: pass --exclude \".dream/**,.remember/**\" to the scan.")
+       "skip locating it). Exclude Dream's own state folders: pass --exclude \".dream/**,.remember/**\" to its status "
+       "command.")
 
 needs_plugin = pytest.mark.skipif(
     not (UA_SKILLS / "understand" / "scan-project.mjs").is_file()
@@ -114,7 +115,8 @@ def test_the_pipeline_is_imperative_and_names_every_script_and_result(skill_text
     # numbered steps a local model follows in order, and every glue command the dry run uses
     steps = re.findall(r"^## (\d+)\. ", body, re.M)
     assert steps == [str(i) for i in range(1, len(steps) + 1)] and len(steps) >= 8, steps
-    for command in ("imports-input", "scan-result", "batch-inputs", "structure", "nodes", "assemble", "finish"):
+    for command in ("status", "imports-input", "scan-result", "batch-inputs", "structure", "draft", "nodes", "assemble",
+                    "finish"):
         assert f"`{command}" in body or f"ua_glue.py {command}" in body, command
     # no confirmation pauses, no gate that stops, no shell trip into the plugin folder
     assert not re.search(r"wait for (?:the user'?s? )?confirmation|confirm to continue|ask (?:the user )?(?:whether|if) ", body, re.I)
@@ -126,12 +128,25 @@ def test_the_pipeline_is_imperative_and_names_every_script_and_result(skill_text
     assert "legacy" in body and ".understand-anything/" in body        # gate note 5: the legacy data folder is explained
 
 
-def test_the_default_excludes_are_in_the_ignore_block(skill_text):
-    block = re.search(r"\.understandignore[^\n]*\n\s*```\n(.*?)```", skill_text, re.S)
-    assert block, "the SKILL.md must carry the .understandignore content in a fenced block"
-    lines = {line.strip() for line in block.group(1).splitlines() if line.strip()}
+def test_the_default_excludes_are_the_glues_ignore_file(skill_text, glue):
+    """DREAM-106 moved the default .understandignore from a fenced block the model copied into the glue: `status` writes
+    it when it is missing, before it compares anything, so the scan and the status check use the same rules."""
+    assert ".understandignore" in _body(skill_text) and "```\n.ua/" not in skill_text
+    lines = {line.strip() for line in glue.DEFAULT_IGNORE.splitlines() if line.strip()}
     assert {".ua/", ".understand-anything/", ".dream/", ".remember/"} <= lines
     assert any(line.startswith("*.") for line in lines)                 # binary patterns the scan's defaults lack
+
+
+def test_the_first_real_action_is_the_status_check(skill_text):
+    """DREAM-106 (1): step 1 asks the glue for the map's state before anything is scanned, and follows it: a current map
+    stops the run, update mode redoes only what changed, no map runs the whole pipeline."""
+    body = _body(skill_text)
+    step1 = body.split("## 1.", 1)[1].split("## 2.", 1)[0]
+    assert "`status`" in step1 and "scan-project.mjs" not in step1
+    assert "The map is current" in step1 and "stop" in step1.lower()
+    assert "update mode" in step1 and "no map" in step1
+    assert step1.index("`status`") < step1.index("project.json")        # README and manifest only for a full map
+    assert "draft" in body and "150 files" in body                     # the big-repo path is part of the skill
 
 
 # ---- (3) selection and name precedence ------------------------------------------------------------------------------
@@ -171,6 +186,17 @@ def test_the_dock_prompt_carries_the_whole_workflow_on_a_32k_window(curated):
         assert "## 9." in guidance.text or "## 8." in guidance.text     # the last steps made it in
     short = select_for_task(ASK, curated)                               # a small or unknown window: today's behaviour
     assert short.names[0] == "understand" and len(short.text) <= MAX_GUIDANCE_CHARS
+
+
+def test_the_ask_copy_is_the_docks_own_request():
+    """DREAM-106: the dock's request routes Dream's excludes through the glue's `status` (it prints the scan command);
+    this copy is what the selection tests above use, so it must be the dock's text exactly."""
+    if shutil.which("node") is None:
+        pytest.skip("needs node to evaluate the dock's string")
+    source = (ROOT / "dream" / "gui" / "static" / "understand.js").read_text(encoding="utf-8")
+    literal = re.search(r"const ASK = ([\s\S]*?);\n", source).group(1)
+    run = subprocess.run(["node", "-e", f"process.stdout.write({literal})"], capture_output=True, text=True, check=True)
+    assert run.stdout == ASK and "status command" in ASK
 
 
 @pytest.fixture
@@ -422,16 +448,23 @@ def mapped(tmp_path_factory, skill_text):
     head = _git(root, "rev-parse", "HEAD")
     log: list[str] = []
 
-    # step 1 -- prepare: the glue copied in, the ignore file from the SKILL.md's block, the project facts
+    # step 1 -- the glue copied in, then status (DREAM-106): no map yet, so it writes the default ignore file and prints
+    # the scan command; the project facts for a full map
     (root / ".ua" / "tmp").mkdir(parents=True)
     shutil.copy(GLUE, root / ".ua" / "tmp" / "ua_glue.py")
-    ignore = re.search(r"\.understandignore[^\n]*\n\s*```\n(.*?)```", skill_text, re.S).group(1)
-    (root / ".ua" / ".understandignore").write_text(ignore)
+    status = _sh("python3 .ua/tmp/ua_glue.py status", root)
+    status_text = status.output.decode("utf-8", "replace")
+    assert status.returncode == 0 and "no map" in status_text, status_text
+    assert (root / ".ua" / ".understandignore").is_file()
     (root / ".ua" / "tmp" / "project.json").write_text(json.dumps(
         {"name": "rocketlog", "description": "Records rocket launches from the command line.", "frameworks": ["Docker"]}))
-    # step 2 -- scan, import map, scan-result
-    log.append(_ua("understand", "scan-project.mjs",
-                   [root, root / ".ua/tmp/scan.json", "--exclude-analysis-data", "--exclude", ".dream/**,.remember/**"], root))
+    # step 2 -- the scan exactly as status printed it, import map, scan-result
+    scan_command = next(line.strip() for line in status_text.splitlines()
+                        if line.strip().startswith('node "$UA_SKILLS/understand/scan-project.mjs"'))
+    assert '"$PWD/.ua/tmp/scan.json" --exclude-analysis-data --exclude ".dream/**,.remember/**"' in scan_command
+    scanned = _sh(scan_command, root)
+    assert scanned.returncode == 0, scanned.output
+    log.append(scanned.output.decode("utf-8", "replace"))
     log.append(_glue(root, "imports-input"))
     log.append(_ua("understand", "extract-import-map.mjs", [root / ".ua/tmp/imports-in.json", root / ".ua/tmp/imports-out.json"], root))
     scan_line = _glue(root, "scan-result")

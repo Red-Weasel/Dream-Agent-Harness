@@ -11,6 +11,9 @@ terminal, streaming chat, browser, Studio previews, tools, and optional memory.
 ![Dream running DeepSeek-V4.1-Flash locally through the MachX engine](docs/public/images/dream-deepseek-v41.png)
 <sub>Dream running DeepSeek-V4.1-Flash locally through the [MachX inference engine](https://github.com/Red-Weasel/machx-inference-engine) on two Intel Arc Pro B70 cards — reasoning shown, 11.7 tok/s.</sub>
 
+![Dream mapping a 952-file project with the Understand-Anything skill](docs/public/images/dream-understand-map.png)
+<sub>Dream mapping a 952-file project with the Understand-Anything skill, run locally on MiMo-V2.6-Flash through MachX — 2,292 nodes and 2,368 edges in seven layers, a guided tour and a domain graph, shown in the Understand dock beside the chat.</sub>
+
 ## What you can do
 
 - **Choose your main agent.** Connect Claude through the Agent SDK, authenticated
