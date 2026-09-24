@@ -1,6 +1,7 @@
 /* The Understand-Anything dock (DREAM-087): the codebase map, or this session's changes side by side, beside the chat. */
 #dream-understand{--ua-ink:#edf0fb;--ua-muted:#b3bcd3;--ua-line:#3a4a6a;--ua-panel:#0d1424;display:flex;flex-direction:column;position:relative;order:10;flex:0 0 var(--dream-understand-share,56%);min-width:480px;background:var(--ua-panel);color:var(--ua-ink);border-left:1px solid var(--ua-line);z-index:9;min-height:0;text-align:left;font-family:var(--sans)}
 #dream-understand[hidden]{display:none!important}
+#dream-understand.ua-wide{flex-basis:80%}   /* Expand (DREAM-107): the chat keeps a column beside it */
 .understand-open #artpanel{display:none!important}
 .understand-open #main{display:block!important;flex:1 1 0!important;min-width:0!important}
 #dream-understand .ua-bar{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--ua-line);background:#111a2e;flex-wrap:wrap}
@@ -33,3 +34,4 @@
 .ua-diff-grid .hunk{grid-column:1/-1;color:#8fa2c7;background:#0a101e;padding:2px 10px;font-size:11px}
 .ua-diff-grid .note{grid-column:1/-1;color:var(--ua-muted);padding:6px 10px}
 @media(max-width:1100px){#dream-understand{min-width:380px;flex-basis:50%}}
+@media(max-width:999px){#ua-wide{display:none}}   /* the companion stacks the dock under the chat here: nothing to widen */

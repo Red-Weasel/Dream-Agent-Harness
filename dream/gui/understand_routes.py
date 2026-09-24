@@ -9,9 +9,15 @@ and ``/file-content.json`` serves only files the graph names, inside the project
 """
 from __future__ import annotations
 
+import codecs
+import hashlib
 import json
 import os
+import re
+import stat
+import time
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 from starlette.concurrency import run_in_threadpool
@@ -158,15 +164,127 @@ def freshness(project: Path, graph: dict) -> dict:
             "commitsBehind": behind, "commitsAhead": ahead, **when}
 
 
+_HASHES: dict[tuple[str, int, int, str], str] = {}     # (path, mtime_ns, size, method) -> sha256: a poll rehashes nothing unchanged
+
+
+def _content_hash(path: Path, method: str) -> str | None:
+    """SHA-256 of a project file as the understand skill records it: its bytes ('bytes', .ua/map-state.json) or its
+    decoded UTF-8 text ('text', the plugin's fingerprints.json) -- read in 1 MB chunks, so a large binary a map
+    recorded never sits in memory whole."""
+    try:
+        stat = path.stat()
+        key = (str(path), stat.st_mtime_ns, stat.st_size, method)
+        if key not in _HASHES:
+            digest = hashlib.sha256()
+            decoder = codecs.getincrementaldecoder("utf-8")("replace") if method == "text" else None
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1 << 20), b""):
+                    digest.update(decoder.decode(chunk).encode("utf-8") if decoder else chunk)
+            if decoder:
+                digest.update(decoder.decode(b"", final=True).encode("utf-8"))
+            _HASHES[key] = digest.hexdigest()
+        return _HASHES[key]
+    except (OSError, ValueError):
+        return None
+
+
+def _epoch(when) -> float | None:
+    """An ISO timestamp WITH a timezone (the glue's `...Z`, the plugin's toISOString); a naive one is not trusted."""
+    try:
+        moment = datetime.fromisoformat(str(when).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return moment.timestamp() if moment.tzinfo is not None else None
+
+
+def _run_epoch(run) -> float | None:
+    """When the run began: the glue's run id starts with the UTC time `status` stamped BEFORE the scan took the hashes
+    (`20260924T122212.123456Z-<pid>`)."""
+    match = re.match(r"(\d{8}T\d{6})(?:\.(\d{1,6}))?Z", str(run or ""))
+    if not match:
+        return None
+    try:
+        moment = datetime.strptime(match.group(1), "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+    except ValueError:                                   # impossible digits (a hand-edited record): trust nothing
+        return None
+    return moment.timestamp() + float("0." + (match.group(2) or "0"))
+
+
+def recorded_hashes(folder: Path) -> tuple[dict, str, str | None, float | None, str | None] | None:
+    """(file -> sha256, hash method, when built, the moment no mapped file changed before, the map's git commit) that
+    the understand skill recorded: DREAM-106's .ua/map-state.json -- its hashes are taken at the scan, so the moment is
+    the run's start -- else a map from before it: the plugin's fingerprints.json (text hashes, built after
+    lastAnalyzedAt). None without either."""
+    def load(name: str) -> dict:
+        try:
+            data = json.loads((folder / name).read_text("utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    state = load("map-state.json")
+    if isinstance(state.get("files"), dict) and state["files"]:
+        since = _run_epoch(state.get("run")) if state.get("run") else _epoch(state.get("builtAt"))
+        return (state["files"], str(state.get("hash") or "bytes"), state.get("builtAt"), since,
+                state.get("gitCommitHash") if isinstance(state.get("gitCommitHash"), str) else None)
+    prints = load("fingerprints.json").get("files")
+    if isinstance(prints, dict) and prints:
+        files = {p: (f or {}).get("contentHash") if isinstance(f, dict) else None for p, f in prints.items()}
+        meta = load("meta.json")
+        built = meta.get("lastAnalyzedAt")
+        return files, "text", built, _epoch(built), meta.get("gitCommitHash") if isinstance(meta.get("gitCommitHash"), str) else None
+    return None
+
+
+def content_freshness(project: Path, recorded: tuple) -> dict:
+    """DREAM-107: freshness from the recorded file hashes, no git needed -- fresh while every mapped file is unchanged,
+    dirty naming the edited and deleted ones (the skill's `status` names new files too, when the map is next updated).
+    Only files modified since the record's moment are hashed (the run's start; a missing, naive or future moment hashes
+    all); a recorded path that leaves the project, or is not a regular file, is never read and counts as changed."""
+    files, method, built, since, commit = recorded
+    if since is not None and since > time.time():
+        since = None
+    base = project.resolve()
+    changed = []
+    for rel, digest in files.items():
+        try:
+            path = (project / str(rel)).resolve()
+            info = path.stat() if path.is_relative_to(base) else None
+        except (OSError, ValueError, RuntimeError):
+            info = None
+        if info is None or not stat.S_ISREG(info.st_mode):
+            changed.append(str(rel))                             # deleted, outside the project, or not a regular file
+            continue
+        if since is not None and info.st_mtime < since:
+            continue                                             # untouched since the hashes were taken: not even read
+        if not isinstance(digest, str) or _content_hash(path, method) != digest:
+            changed.append(str(rel))
+    changed.sort()
+    when = {"lastAnalyzedAt": built} if isinstance(built, str) else {}
+    # upstream's dashboard validates both commit fields as non-empty strings for every status (freshness.ts); without
+    # git there is none, so the map's recorded commit, else "none"
+    tag = commit if commit else "none"
+    return {"status": "dirty" if changed else "fresh", "graphCommitHash": tag, "headCommitHash": tag,
+            "changedFileCount": len(changed), "changedFiles": changed, "commitsBehind": 0, "commitsAhead": 0, **when}
+
+
 def staleness(project: Path) -> tuple[int, dict]:
     folder = data_dir(project)
     if not (folder / "knowledge-graph.json").is_file():
         return 404, {"error": "No knowledge graph found. Run /understand first."}
     graphs = {}
+    recorded = recorded_hashes(folder)   # the skill's own record answers without git, and matches its `status`
     for key, name in (("knowledge", "knowledge-graph.json"), ("domain", "domain-graph.json")):
         if (folder / name).is_file():
             try:
-                graphs[key] = freshness(project, json.loads((folder / name).read_text("utf-8")))
+                graph = json.loads((folder / name).read_text("utf-8"))
+                if recorded is not None and (folder / "map-state.json").is_file():
+                    graphs[key] = content_freshness(project, recorded)          # content decides, as for `status`
+                    continue
+                result = freshness(project, graph)
+                if recorded is not None and result.get("status") == "unknown":   # a map from before DREAM-106, no git
+                    result = content_freshness(project, recorded)
+                graphs[key] = result
             except (OSError, ValueError):
                 return 500, {"error": "Failed to read graph file"}
     return 200, {"graphs": graphs}

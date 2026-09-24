@@ -14,6 +14,7 @@
       <button id="ua-tab-map" type="button" role="tab" aria-selected="true">Map</button>
       <button id="ua-tab-changes" type="button" role="tab" aria-selected="false">Changes</button>
       <button id="ua-refresh" type="button" title="Reload the map or the change list">Refresh</button>
+      <button id="ua-wide" type="button" aria-pressed="false" title="Widen the map; the chat stays beside it">Expand</button>
       <span id="ua-status"></span>
       <button id="ua-close" type="button" aria-label="Close Understand">×</button>
     </div>
@@ -166,6 +167,16 @@
   byId('ua-tab-map').onclick = () => showTab('map');
   byId('ua-tab-changes').onclick = () => showTab('changes');
   byId('ua-close').onclick = close;
+  // DREAM-107: side by side by default; Expand widens the dock and keeps a chat column beside it (remembered per viewer)
+  const wide = byId('ua-wide');
+  function setWide(on) {
+    panel.classList.toggle('ua-wide', on);
+    wide.setAttribute('aria-pressed', String(on));
+    wide.textContent = on ? 'Narrow' : 'Expand';
+    try { localStorage.setItem('dream.understand.wide', on ? '1' : '0'); } catch (e) { /* storage may be unavailable */ }
+  }
+  wide.onclick = () => setWide(!panel.classList.contains('ua-wide'));
+  try { if (localStorage.getItem('dream.understand.wide') === '1') setWide(true); } catch (e) { /* default: side by side */ }
   byId('ua-refresh').onclick = () => { if (tab === 'changes') loadChanges(); else { if (frame.getAttribute('src')) frame.src = frame.getAttribute('src'); poll(); } };
   byId('ua-ask').onclick = () => {
     const input = byId('input');

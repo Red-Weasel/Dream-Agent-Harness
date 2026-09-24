@@ -6,6 +6,7 @@ dashboard is served by Dream itself (built once with base /ua/) and reads its da
 through Dream's token-checked endpoints (root paths, as the dashboard hard-codes them); a Changes tab shows this
 session's checkpoint diffs as two aligned columns.
 """
+import hashlib
 import json
 import re
 import shutil
@@ -168,6 +169,177 @@ class FakeStore:
 
 @pytest.mark.skipif(not SAMPLE.is_file() or not understand_routes.DIST.joinpath('index.html').is_file(),
                     reason='needs the Understand-Anything clone with a built dashboard (see understand_routes.DIST)')
+async def test_the_real_dashboard_shows_no_banner_for_a_fresh_map_without_git(tmp_path, monkeypatch):
+    """Gate 1, finding 1: upstream's dashboard validates graphCommitHash / headCommitHash on every freshness answer and
+    replaced ours with "could not be verified". Loaded for real: fresh shows no banner, an edit shows the changed-files
+    banner, never the unverified one."""
+    from playwright.async_api import async_playwright
+    monkeypatch.delenv('DREAM_DESKTOP_SESSION_FILE', raising=False)
+    root = tmp_path / "nogit"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "main.ts").write_text("export const stages = 2;\n")
+    write_graph(root, json.loads(SAMPLE.read_text()))
+    sha = lambda rel: hashlib.sha256((root / rel).read_bytes()).hexdigest()
+    (root / ".ua" / "map-state.json").write_text(json.dumps({"version": 1, "builtAt": "2026-09-24T12:22:12Z",
+                                                              "files": {"src/main.ts": sha("src/main.ts")}}))
+    srv = server(root)
+    url = await srv.start()
+    base = url.split('?')[0].rstrip('/')
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(args=['--disable-gpu'])
+            page = await browser.new_page(viewport={'width': 1400, 'height': 900})
+
+            async def banner_text():
+                async with page.expect_response(lambda r: 'staleness.json' in r.url, timeout=15000) as answer:
+                    await page.goto(base + '/ua/?token=' + srv.token)
+                assert (await answer.value).ok
+                await page.wait_for_selector('header', timeout=15000)
+                await page.wait_for_timeout(1500)
+                return await page.evaluate('document.body.innerText')
+
+            text = await banner_text()
+            assert 'could not be verified' not in text and 'working-tree changes' not in text, text[:600]
+            (root / "src" / "main.ts").write_text("export const stages = 3;\n")
+            text = await banner_text()
+            assert 'working-tree changes' in text and 'could not be verified' not in text, text[:600]
+            await browser.close()
+    finally:
+        await srv.stop()
+
+
+@pytest.mark.skipif(not SAMPLE.is_file() or not understand_routes.DIST.joinpath('index.html').is_file(),
+                    reason='needs the Understand-Anything clone with a built dashboard (see understand_routes.DIST)')
+async def test_staleness_without_git_uses_the_file_hashes_the_skill_recorded(tmp_path, monkeypatch):
+    """DREAM-107: a project without git (the owner's) showed "freshness could not be verified" forever. The understand
+    skill records every mapped file's SHA-256 (.ua/map-state.json; a map from before DREAM-106: the plugin's
+    fingerprints.json, hashed as text), so the dock answers from those -- fresh while every mapped file is unchanged,
+    dirty naming the edited and deleted ones -- the same answer the skill's status gives for them."""
+    root = tmp_path / "plain"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "main.ts").write_text("export const stages = 2;\n")
+    (root / "src" / "util.ts").write_text("export const clamp = (x) => x;\n")
+    write_graph(root, graph_for(root, None))                                     # no commit, no git: git cannot answer
+    (root / ".ua" / "domain-graph.json").write_text(json.dumps({"nodes": [], "edges": []}))
+    sha = lambda rel: hashlib.sha256((root / rel).read_bytes()).hexdigest()
+    (root / ".ua" / "map-state.json").write_text(json.dumps({"version": 1, "builtAt": "2026-09-24T12:22:12Z",
+                                                              "files": {r: sha(r) for r in ("src/main.ts", "src/util.ts")}}))
+    srv = server(root)
+    async with client(srv) as c:
+        async def graphs():
+            return (await c.get('/staleness.json')).json()['graphs']
+        fresh = await graphs()
+        assert fresh['knowledge']['status'] == 'fresh' == fresh['domain']['status'], fresh
+        assert fresh['knowledge']['changedFiles'] == [] and fresh['knowledge']['lastAnalyzedAt'] == '2026-09-24T12:22:12Z'
+        assert fresh['knowledge']['graphCommitHash'] == 'none' == fresh['knowledge']['headCommitHash']   # dashboard needs both
+        (root / "src" / "main.ts").write_text("export const stages = 3;\n")
+        dirty = (await graphs())['knowledge']
+        assert dirty['status'] == 'dirty' and dirty['changedFiles'] == ['src/main.ts'] and dirty['changedFileCount'] == 1
+        (root / "src" / "main.ts").write_text("export const stages = 2;\n")         # restored: fresh again
+        assert (await graphs())['knowledge']['status'] == 'fresh'
+        (root / "src" / "util.ts").unlink()
+        gone = (await graphs())['knowledge']
+        assert gone['status'] == 'dirty' and gone['changedFiles'] == ['src/util.ts']
+
+        # a map from before DREAM-106: the plugin's fingerprints.json, hashed as decoded text
+        (root / ".ua" / "map-state.json").unlink()
+        text_sha = hashlib.sha256((root / "src" / "main.ts").read_bytes().decode("utf-8").encode("utf-8")).hexdigest()
+        (root / ".ua" / "fingerprints.json").write_text(json.dumps({"files": {"src/main.ts": {"contentHash": text_sha}}}))
+        assert (await graphs())['knowledge']['status'] == 'fresh'
+        (root / "src" / "main.ts").write_text("export const stages = 4;\n")
+        assert (await graphs())['knowledge']['changedFiles'] == ['src/main.ts']
+
+
+async def test_the_freshness_check_reads_only_files_touched_since_the_map_and_never_a_whole_binary(tmp_path, monkeypatch):
+    """The owner's pre-106 map records 952 files, 794 MB with a 280 MB browser binary: a poll must not read them. Files
+    untouched since the map was built are never read; a changed one is hashed in chunks, text hashes decoded
+    incrementally exactly as a whole-file decode would."""
+    import os
+    import time
+    root = tmp_path / "big"
+    (root / "tools").mkdir(parents=True)
+    blob = bytes(range(256)) * 4096 + "é€😀".encode() + b"\xff\xfe" + "ü".encode()[:1]     # binary, split and bad UTF-8
+    (root / "tools" / "chrome").write_bytes(blob)
+    whole = hashlib.sha256(blob.decode("utf-8", "replace").encode("utf-8")).hexdigest()
+    assert understand_routes._content_hash(root / "tools" / "chrome", "text") == whole          # chunked == one-shot
+    old = time.time() - 3600
+    os.utime(root / "tools" / "chrome", (old, old))
+    reads = []
+    monkeypatch.setattr(understand_routes, "_content_hash", lambda path, method: reads.append(path) or whole)
+    built = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 60))
+    record = ({"tools/chrome": whole}, "text", built, understand_routes._epoch(built), None)
+    result = understand_routes.content_freshness(root, record)
+    assert result["status"] == "fresh" and reads == []                                          # older than the map: not read
+    os.utime(root / "tools" / "chrome", None)                                                   # touched after the map
+    assert understand_routes.content_freshness(root, record)["status"] == "fresh"
+    assert reads == [root / "tools" / "chrome"]
+
+
+async def test_an_edit_during_the_run_is_dirty_and_the_cutoff_is_trusted_only_when_safe(tmp_path):
+    """Gate 1, finding 2: map-state's hashes are taken at the scan, its builtAt at assemble. The cutoff is the run's
+    start (the run id `status` stamps before the scan), so a file edited between scan and assemble -- mtime before
+    builtAt, content unlike the record -- is dirty. A naive or future timestamp is never trusted: everything is hashed."""
+    import os
+    import time
+    root = tmp_path / "run"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "a.py").write_text("A = 1\n")
+    recorded = hashlib.sha256(b"A = 1\n").hexdigest()
+    (root / "src" / "a.py").write_text("A = 2\n")                     # edited mid-run, after the scan hashed "A = 1"
+    now = time.time()
+    os.utime(root / "src" / "a.py", (now - 600, now - 600))          # ... ten minutes ago, before the map was assembled
+    start = time.strftime("%Y%m%dT%H%M%S", time.gmtime(now - 1800)) + ".000000Z-4242"       # status: half an hour ago
+    built = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 60))                        # assemble: a minute ago
+    ua = root / ".ua"
+    ua.mkdir()
+    (ua / "map-state.json").write_text(json.dumps({"version": 1, "run": start, "builtAt": built,
+                                                    "files": {"src/a.py": recorded}}))
+    record = understand_routes.recorded_hashes(ua)
+    assert abs(record[3] - (now - 1800)) < 2                            # the moment is the run's start, not builtAt
+    assert understand_routes.content_freshness(root, record)["changedFiles"] == ["src/a.py"]
+    assert understand_routes._run_epoch("20261399T999999Z-1") is None       # impossible digits: no crash, no cutoff
+    for untrusted in ("2026-09-24T12:00:00", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + 86400)), "not a date"):
+        (ua / "map-state.json").write_text(json.dumps({"version": 1, "builtAt": untrusted, "files": {"src/a.py": recorded}}))
+        assert understand_routes.content_freshness(root, understand_routes.recorded_hashes(ua))["status"] == "dirty", untrusted
+
+
+async def test_a_recorded_path_outside_the_project_or_not_a_regular_file_is_never_read(tmp_path, monkeypatch):
+    """Gate 1, finding 3: a crafted record could name ../x, an absolute path, a symlink out, a FIFO or /dev/zero -- a
+    content oracle for outside files and a hang. Such entries count as changed and are never opened."""
+    import os
+    root = tmp_path / "proj"
+    (root / "src").mkdir(parents=True)
+    (tmp_path / "secret.txt").write_text("outside\n")
+    (root / "src" / "link").symlink_to(tmp_path / "secret.txt")
+    os.mkfifo(root / "src" / "pipe")
+    secret = hashlib.sha256(b"outside\n").hexdigest()
+    reads = []
+    real = understand_routes._content_hash
+    monkeypatch.setattr(understand_routes, "_content_hash", lambda path, method: reads.append(str(path)) or real(path, method))
+    files = {"../secret.txt": secret, str(tmp_path / "secret.txt"): secret, "src/link": secret, "src/pipe": "x",
+             "/dev/zero": "x"}
+    result = understand_routes.content_freshness(root, (files, "bytes", None, None, None))
+    assert result["status"] == "dirty" and sorted(result["changedFiles"]) == sorted(files)
+    assert reads == []
+
+
+async def test_recorded_hashes_win_over_git_for_a_map_that_has_them(project):
+    """With the skill's record present, a commit that changes no mapped content does not make the map stale, and an
+    uncommitted edit makes it dirty -- content decides, as it does for the skill's status."""
+    head = git(project, "rev-parse", "HEAD")
+    write_graph(project, graph_for(project, head))
+    sha = lambda rel: hashlib.sha256((project / rel).read_bytes()).hexdigest()
+    (project / ".ua" / "map-state.json").write_text(json.dumps({"version": 1, "builtAt": "2026-09-24T12:00:00Z",
+                                                                 "files": {r: sha(r) for r in ("src/main.ts", "src/util.ts")}}))
+    git(project, "commit", "-q", "--allow-empty", "-m", "nothing mapped changed")
+    srv = server(project)
+    async with client(srv) as c:
+        assert (await c.get('/staleness.json')).json()['graphs']['knowledge']['status'] == 'fresh'
+        (project / "src" / "util.ts").write_text("export const clamp = (x) => Math.max(0, x);\n")
+        dirty = (await c.get('/staleness.json')).json()['graphs']['knowledge']
+        assert dirty['status'] == 'dirty' and dirty['changedFiles'] == ['src/util.ts']
+
+
 async def test_the_dock_opens_beside_the_chat_and_stays_while_working(project, monkeypatch):
     from playwright.async_api import async_playwright, expect
     monkeypatch.delenv('DREAM_DESKTOP_SESSION_FILE', raising=False)
@@ -198,6 +370,20 @@ async def test_the_dock_opens_beside_the_chat_and_stays_while_working(project, m
             dashboard = page.frame_locator('#ua-frame')                                     # the upstream React app, live
             await expect(dashboard.get_by_role('banner')).to_be_visible(timeout=12000)
             await expect(dashboard.locator('body')).to_contain_text('understand-anything')   # the sample's project name
+
+            # DREAM-107: side by side by default; the expand toggle widens the dock and keeps the chat beside it
+            narrow = (await dock.bounding_box())['width']
+            toggle = dock.locator('#ua-wide')
+            await expect(toggle).to_have_attribute('aria-pressed', 'false')
+            await toggle.click()
+            await expect(toggle).to_have_attribute('aria-pressed', 'true')
+            wide = (await dock.bounding_box())['width']
+            assert wide > narrow + 200, (narrow, wide)
+            await expect(main).to_be_visible()
+            assert (await main.bounding_box())['width'] > 150                                # the chat keeps a column
+            await toggle.click()
+            await expect(toggle).to_have_attribute('aria-pressed', 'false')
+            assert abs((await dock.bounding_box())['width'] - narrow) < 2
 
             # a permission card pulls the view back to chat; the map must stay in sight while the owner answers
             await page.evaluate("document.getElementById('stream').insertAdjacentHTML('beforeend','<div class=\"permission-card\">card</div>')")
