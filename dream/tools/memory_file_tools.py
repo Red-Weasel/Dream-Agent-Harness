@@ -19,8 +19,16 @@ from claude_agent_sdk import tool
 
 from .. import config
 from ..memory import longterm
-from ..memory.store import MEM_TYPES, MemoryIndexError, _now, default_type, slugify
+from ..memory import project as projects
+from ..memory.store import MEM_TYPES, MemoryIndexError, ScopeError, _now, default_type, slugify
 from .context import ctx, err, in_thread, ok
+from .memory_tools import (
+    ALL_PROJECTS_ARG, FROM_PROJECT_ARG, PROJECT_ARG, SCOPE_ARG, here, move_refusal, not_here, owned,
+    read_scope, resolve_project,
+)
+
+# Writes to a memory another project owns name that project (DREAM-108).
+_OWNER_ARG = {"type": "string", "description": "Only to change a memory another project owns: that project."}
 
 # --- never filed -----------------------------------------------------------------------
 # One place for the patterns; every write tool and `remember` check here. The
@@ -125,10 +133,37 @@ def _stale(name: str, given: Any, current: tuple[str, str]) -> dict[str, Any] | 
                f"never read it). Current version {ver}. Current content:\n\n{text}")
 
 
+def _owner_of(name: str) -> str:
+    mem = longterm.read_file(_path(name)) or {}
+    return mem.get("project") or ""
+
+
+def _write_target(tool: str, name: str, args: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+    """(the project a write to an EXISTING memory acts in, or an error). This project's
+    and user-wide memories need nothing; another project's needs that project named."""
+    owner, current = _owner_of(name), here()
+    if not args.get("project"):
+        if owned(owner, current):
+            return owner or current, None
+        hint = (f"Pass project={owner or projects.UNASSIGNED!r} to change it there."
+                if tool != "memory_write" or (owner and owner != projects.UNASSIGNED)
+                else "memory_move it to a project first, then write it there.")
+        return None, err(f"{tool}: " + not_here(f"memory {name!r}", owner, hint))
+    try:
+        named = resolve_project(args["project"])
+    except ValueError as e:
+        return None, err(f"{tool}: {e}.")
+    if named != (owner or projects.UNASSIGNED):
+        return None, err(f"{tool}: memory {name!r} belongs to {owner or projects.UNASSIGNED}, "
+                         f"not {named}; memory_move moves a memory.")
+    return owner, None
+
+
 async def _finish_async(mem: dict[str, Any], verb: str) -> dict[str, Any]:
     """Write the row, the file, the index; report the version and any cap note.
     The cap is checked on the rendered file — frontmatter included — because
-    that is what the cap is about: the file the user opens."""
+    that is what the cap is about: the file the user opens. ``mem['project']`` is
+    the project it is written in (DREAM-108); ``mem['reassign']`` moves it there."""
     # Measured on what will be persisted: the store stamps both timestamps, and
     # a render without them is ~50 chars short of the file the user opens.
     probe = dict(mem)
@@ -146,7 +181,11 @@ async def _finish_async(mem: dict[str, Any], verb: str) -> dict[str, Any]:
             source_session=c.session_id, description=mem.get("description", ""),
             mem_type=mem.get("mem_type", ""), created_at=mem.get("created_at"),
             persist_markdown=True, embed=False,
+            project=mem["project"] if mem.get("project") is not None else here(),
+            reassign=bool(mem.get("reassign")),
         )
+    except ScopeError as e:
+        return err(not_here(f"memory {mem['slug']!r}", e.owner, "Name its project to change it there."))
     except (ValueError, OSError, sqlite3.Error, MemoryIndexError) as e:
         return err(str(e))
     path = longterm.path_for(row)
@@ -160,7 +199,8 @@ async def _finish_async(mem: dict[str, Any], verb: str) -> dict[str, Any]:
     if c.store.embedder is not None:
         warnings.append("Optional semantic indexing is deferred until embedding backfill.")
     note = longterm.near_cap(text)
-    return ok(f"{verb} {mem['slug']} ({len(text):,} chars, version {version_of(text)}) → {path}"
+    owner = projects.tag(row.get("project") or "", here())
+    return ok(f"{verb} {mem['slug']}{owner} ({len(text):,} chars, version {version_of(text)}) → {path}"
               + (f"\nNote: {note}." if note else "")
               + ("\n" + "\n".join(warnings) if warnings else ""))
 
@@ -171,41 +211,60 @@ async def _finish_async(mem: dict[str, Any], verb: str) -> dict[str, Any]:
 
 @tool(
     "memory_list",
-    "List every memory: name, type, description, size, version. The names are what "
-    "memory_read and the write tools take.",
-    {"type": "object", "properties": {}, "required": []},
+    "List this project's and user-wide memories: name, type, description, size, version. "
+    "The names are what memory_read and the write tools take.",
+    {"type": "object", "properties": {"project": PROJECT_ARG, "all_projects": ALL_PROJECTS_ARG},
+     "required": []},
 )
 async def memory_list(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        scope, current, cross = read_scope(args)
+    except ValueError as e:
+        return err(f"memory_list: {e}.")
     files = await in_thread(longterm.memory_files)
-    if not files:
-        return ok("No memories yet.")
-    lines = [f"{len(files)} memories (name · type · description · chars · version):"]
+    rows = []
     for f in files:
         mem = longterm.read_file(f)
-        if not mem:
+        if not mem or (scope is not None and (mem.get("project") or "") not in scope):
             continue
         text = f.read_text(encoding="utf-8", errors="replace")
-        lines.append(f"- {mem['name']} · {mem['mem_type'] or default_type(mem['kind'], mem['title'], mem['body'])}"
-                     f" · {longterm.describe(mem)[:100]} · {len(text):,} · {version_of(text)}")
-    return ok("\n".join(lines))
+        rows.append(f"- {mem['name']} · {mem['mem_type'] or default_type(mem['kind'], mem['title'], mem['body'])}"
+                    f" · {longterm.describe(mem)[:100]} · {len(text):,} · {version_of(text)}"
+                    + projects.tag(mem.get("project") or "", current, cross=cross))
+    if not rows:
+        return ok("No memories yet." if scope is None else
+                  "No memories in this scope. memory_list(all_projects=true) lists every project's.")
+    return ok("\n".join([f"{len(rows)} memories (name · type · description · chars · version):", *rows]))
 
 
 @tool(
     "memory_read",
     "Read one memory whole, with its version. Every write to it must present that "
     "version, so read before you write.",
-    {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+    {"type": "object", "properties": {"name": {"type": "string"}, "project": PROJECT_ARG,
+                                      "all_projects": ALL_PROJECTS_ARG}, "required": ["name"]},
 )
 async def memory_read(args: dict[str, Any]) -> dict[str, Any]:
     name = _name(args.get("name"))
     if not name:
         return err("memory_read: that is not a memory name.")
+    try:
+        scope, current, cross = read_scope(args)
+    except ValueError as e:
+        return err(f"memory_read: {e}.")
     cur = await in_thread(_read, name)
     if cur is None:
         return err(f"memory_read: no memory named {name!r}. memory_list shows the names.")
+    owner = _owner_of(name)
+    if scope is not None and owner not in scope and not owned(owner, current):
+        # An exact name is no way around the scope (DREAM-108).
+        return err("memory_read: " + not_here(f"memory {name!r}", owner,
+                                              "Pass project= with its project, or all_projects=true, "
+                                              "to read another project's memory."))
     text, ver = cur
     note = longterm.near_cap(text)
-    return ok(f"version: {ver}\n\n{text}" + (f"\nNote: {note}." if note else ""))
+    return ok(f"version: {ver}{projects.tag(owner, current, cross=cross)}\n\n{text}"
+              + (f"\nNote: {note}." if note else ""))
 
 
 _WRITE_SCHEMA = {
@@ -218,6 +277,8 @@ _WRITE_SCHEMA = {
         "description": {"type": "string", "description": "One line for the memory index."},
         "provenance": {"type": "string", "description": "stated | observed | inferred (default) for untagged lines."},
         "if_version": {"type": "string", "description": "From memory_read; required when the memory exists."},
+        "scope": SCOPE_ARG,
+        "project": _OWNER_ARG,
     },
     "required": ["name", "content"],
 }
@@ -246,22 +307,48 @@ async def memory_write(args: dict[str, Any]) -> dict[str, Any]:
     why = suppression(content, args.get("title"), args.get("description"))
     if why:
         return err(f"memory_write: {why}.")
+    scope = str(args.get("scope") or "project").strip().lower()
+    if scope not in ("project", "user"):
+        return err("memory_write: scope must be 'project' (default) or 'user'.")
+    if args.get("project"):
+        try:
+            named = resolve_project(args["project"])
+        except ValueError as e:
+            return err(f"memory_write: {e}.")
+        if named == projects.UNASSIGNED:
+            # Unassigned is where the migration leaves what it could not place, never a
+            # destination (DREAM-108 gate): not for a new memory, not for a rewrite.
+            return err("memory_write: unassigned is not a destination; leave project out to write "
+                       "here, or memory_move an unassigned memory to a project first.")
     body = longterm.tag_body(content, prov)
     cur = await in_thread(_read, name)
     if cur is None:
+        owner = projects.USER if scope == "user" else here()
+        if args.get("project") and scope != "user":
+            try:
+                owner = resolve_project(args["project"])
+            except ValueError as e:
+                return err(f"memory_write: {e}.")
         mem = {"slug": name, "kind": "semantic", "title": str(args.get("title") or name.replace("-", " ")),
-               "body": body, "description": str(args.get("description") or ""), "mem_type": mtype}
+               "body": body, "description": str(args.get("description") or ""), "mem_type": mtype,
+               "project": owner}
         return await _finish_async(mem, "Created")
+    owner, refused = _write_target("memory_write", name, args)
+    if refused:
+        return refused
     stale = _stale(name, args.get("if_version"), cur)
     if stale:
         return stale
     old = longterm.read_file(_path(name)) or {}
+    # scope='user' on this project's own memory promotes it, deliberately.
+    promote = scope == "user" and owner == here()
     mem = {"slug": name, "kind": old.get("kind", "semantic"),
            "title": str(args.get("title") or old.get("title") or name),
            "body": body, "tags": old.get("tags", ""), "salience": old.get("salience", 1.0),
            "created_at": old.get("created_at", ""),
            "description": str(args.get("description") or old.get("description") or ""),
-           "mem_type": mtype or old.get("mem_type", "")}
+           "mem_type": mtype or old.get("mem_type", ""),
+           "project": projects.USER if promote else owner, "reassign": promote}
     return await _finish_async(mem, "Replaced")
 
 
@@ -272,7 +359,7 @@ async def memory_write(args: dict[str, Any]) -> dict[str, Any]:
     {"type": "object", "properties": {
         "name": {"type": "string"}, "text": {"type": "string"},
         "provenance": {"type": "string", "description": "stated | observed | inferred (default)."},
-        "if_version": {"type": "string"}}, "required": ["name", "text", "if_version"]},
+        "if_version": {"type": "string"}, "project": _OWNER_ARG}, "required": ["name", "text", "if_version"]},
 )
 async def memory_append(args: dict[str, Any]) -> dict[str, Any]:
     name = _name(args.get("name"))
@@ -281,6 +368,9 @@ async def memory_append(args: dict[str, Any]) -> dict[str, Any]:
     cur = await in_thread(_read, name)
     if cur is None:
         return err(f"memory_append: no memory named {name!r}; memory_write creates one.")
+    owner, refused = _write_target("memory_append", name, args)
+    if refused:
+        return refused
     stale = _stale(name, args.get("if_version"), cur)
     if stale:
         return stale
@@ -296,6 +386,7 @@ async def memory_append(args: dict[str, Any]) -> dict[str, Any]:
     old = longterm.read_file(_path(name))
     mem = dict(old)
     mem["body"] = (old["body"].rstrip() + "\n" + longterm.tag_body(text, prov)).strip()
+    mem["project"] = owner
     return await _finish_async(mem, "Appended to")
 
 
@@ -305,7 +396,8 @@ async def memory_append(args: dict[str, Any]) -> dict[str, Any]:
     "exactly once — widen it with surrounding lines otherwise. Needs if_version.",
     {"type": "object", "properties": {
         "name": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"},
-        "if_version": {"type": "string"}}, "required": ["name", "old_string", "new_string", "if_version"]},
+        "if_version": {"type": "string"}, "project": _OWNER_ARG},
+     "required": ["name", "old_string", "new_string", "if_version"]},
 )
 async def memory_str_replace(args: dict[str, Any]) -> dict[str, Any]:
     name = _name(args.get("name"))
@@ -314,6 +406,9 @@ async def memory_str_replace(args: dict[str, Any]) -> dict[str, Any]:
     cur = await in_thread(_read, name)
     if cur is None:
         return err(f"memory_str_replace: no memory named {name!r}.")
+    owner, refused = _write_target("memory_str_replace", name, args)
+    if refused:
+        return refused
     stale = _stale(name, args.get("if_version"), cur)
     if stale:
         return stale
@@ -332,13 +427,15 @@ async def memory_str_replace(args: dict[str, Any]) -> dict[str, Any]:
     mem["body"] = old["body"].replace(old_s, new_s, 1)
     if mem["body"].strip() == "":
         return err("memory_str_replace: that would empty the memory; memory_delete removes one.")
+    mem["project"] = owner
     return await _finish_async(mem, "Edited")
 
 
 @tool(
     "memory_delete",
     "Delete a memory file and its index line. Needs if_version from memory_read.",
-    {"type": "object", "properties": {"name": {"type": "string"}, "if_version": {"type": "string"}},
+    {"type": "object", "properties": {"name": {"type": "string"}, "if_version": {"type": "string"},
+                                      "project": _OWNER_ARG},
      "required": ["name", "if_version"]},
 )
 async def memory_delete(args: dict[str, Any]) -> dict[str, Any]:
@@ -348,6 +445,9 @@ async def memory_delete(args: dict[str, Any]) -> dict[str, Any]:
     cur = await in_thread(_read, name)
     if cur is None:
         return err(f"memory_delete: no memory named {name!r}.")
+    _owner, refused = _write_target("memory_delete", name, args)
+    if refused:
+        return refused
     stale = _stale(name, args.get("if_version"), cur)
     if stale:
         return stale
@@ -357,4 +457,63 @@ async def memory_delete(args: dict[str, Any]) -> dict[str, Any]:
     return ok(f"Deleted {name}.")
 
 
-MEMORY_FILE_TOOLS = [memory_list, memory_read, memory_write, memory_append, memory_str_replace, memory_delete]
+@tool(
+    "memory_move",
+    "Give a memory (name) or a past session and its notes (session) to another project, "
+    "or a memory to 'user' (every project). For misfiled or unassigned items.",
+    {"type": "object", "properties": {
+        "name": {"type": "string"}, "session": {"type": "string"},
+        "project": {"type": "string", "description": "Folder name or key, or 'user'."},
+        "from_project": FROM_PROJECT_ARG},
+     "required": ["project"]},
+)
+async def memory_move(args: dict[str, Any]) -> dict[str, Any]:
+    c = ctx()
+    try:
+        target = resolve_project(args.get("project"))
+    except ValueError as e:
+        return err(f"memory_move: {e}.")
+    if target == projects.UNASSIGNED:
+        return err("memory_move: unassigned is where the migration leaves what it could not place, "
+                   "not a destination; name a project.")
+    if bool(args.get("name")) == bool(args.get("session")):
+        return err("memory_move: pass name (a memory) or session (a session id), one of them.")
+    if args.get("session"):
+        if target == projects.USER:
+            return err("memory_move: a session belongs to one project; 'user' is for memories.")
+        sid = str(args["session"])
+        sess = await in_thread(c.store.get_session, sid)
+        if sess is None:
+            return err(f"memory_move: no session {sid!r}. recall_sessions(all_projects=true) lists them.")
+        before = sess.get("project") or projects.UNASSIGNED
+        refused = move_refusal(f"session {sid!r}", before, args)
+        if refused:
+            return err(f"memory_move: {refused}")
+        if before == target:
+            return ok(f"Session {sid} is already in {target}; nothing moved.")
+        moved = await in_thread(c.store.move_session, sid, target)
+        return ok(f"Moved session {sid} and its {moved} note(s) from {before} to {target}.")
+    name = _name(args.get("name"))
+    if not name or await in_thread(_read, name) is None:
+        return err(f"memory_move: no memory named {args.get('name')!r}. "
+                   "memory_list(all_projects=true) shows the names.")
+    before = _owner_of(name) or projects.UNASSIGNED
+    refused = move_refusal(f"memory {name!r}", before, args)
+    if refused:
+        return err(f"memory_move: {refused}")
+    if before == target:
+        return ok(f"Memory {name} is already in {target}; nothing moved.")
+    try:
+        await in_thread(longterm.set_project_line, _path(name), target)
+    except (OSError, ValueError) as e:
+        return err(f"memory_move: the file was not changed: {e}")
+    await in_thread(c.store.move_memory, name, target)
+    try:
+        await in_thread(longterm.write_index)
+    except OSError as e:
+        return ok(f"Moved memory {name} from {before} to {target}; MEMORY.md was not refreshed: {e}.")
+    return ok(f"Moved memory {name} from {before} to {target}.")
+
+
+MEMORY_FILE_TOOLS = [memory_list, memory_read, memory_write, memory_append, memory_str_replace,
+                     memory_delete, memory_move]

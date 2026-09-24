@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .. import config
+from .project import UNASSIGNED, USER
+from .store import add_column
 
 STATUSES = ("open", "active", "blocked", "done")
 
@@ -29,15 +31,17 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, updated_at);
 """
 
+_ALL: Any = object()  # "the store's own scope" -- see MemoryStore.default_scope
 
-def wake_lines_if_present(store: Any, limit: int = 8) -> list[str]:
+
+def wake_lines_if_present(store: Any, limit: int = 8, scope: Any = _ALL) -> list[str]:
     """Open work for the wake-up, WITHOUT creating the table: building a prompt
     is a read, and a bare database must stay bare (Gate 11)."""
     row = store._conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'").fetchone()
     if not row:
         return []
-    return TaskStore(store).wake_lines(limit=limit)
+    return TaskStore(store).wake_lines(limit=limit, scope=scope)
 
 
 def _now() -> str:
@@ -47,34 +51,63 @@ def _now() -> str:
 class TaskStore:
     def __init__(self, store: Any):
         """`store` is the MemoryStore: the tasks table lives in its database."""
+        self._store = store
         self._conn = store._conn
         self._lock = store._lock
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            # DREAM-108: a task belongs to a project (its workspace key, 'user', or
+            # 'unassigned'); '' is a legacy row the startup migration has not placed.
+            if "project" not in {r[1] for r in self._conn.execute("PRAGMA table_info(tasks)")}:
+                add_column(self._conn, "tasks", "project", "TEXT NOT NULL DEFAULT ''")
             self._conn.commit()
+
+    def _scope(self, scope: Any) -> tuple[str, ...] | None:
+        if scope is _ALL:
+            default = getattr(self._store, "default_scope", None)
+            return default() if callable(default) else None
+        return None if scope is None else tuple(scope)
+
+    @staticmethod
+    def _where(scope: tuple[str, ...] | None) -> tuple[str, list[Any]]:
+        if scope is None:
+            return "", []
+        if not scope:
+            return " AND 0", []
+        return f" AND project IN ({','.join('?' * len(scope))})", list(scope)
 
     # --- writes ------------------------------------------------------------------------
 
-    def add(self, title: str, notes: str = "", status: str = "open") -> dict[str, Any]:
+    def add(self, title: str, notes: str = "", status: str = "open",
+            project: str | None = None) -> dict[str, Any]:
         title = " ".join(str(title or "").split())
         if not title:
             raise ValueError("a task needs a title")
         if status not in STATUSES:
             raise ValueError(f"status must be one of {', '.join(STATUSES)}")
+        owner = project if project is not None else (getattr(self._store, "project", None) or "")
         now = _now()
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO tasks(title, status, notes, created_at, updated_at) VALUES (?,?,?,?,?)",
-                (title[:200], status, str(notes or "").strip()[:4000], now, now),
+                "INSERT INTO tasks(title, status, notes, created_at, updated_at, project) "
+                "VALUES (?,?,?,?,?,?)",
+                (title[:200], status, str(notes or "").strip()[:4000], now, now, owner),
             )
             self._conn.commit()
             return self.get(int(cur.lastrowid))  # type: ignore[return-value]
 
     def update(self, task_id: int, *, title: str | None = None, status: str | None = None,
-               notes: str | None = None, append_note: str | None = None) -> dict[str, Any] | None:
+               notes: str | None = None, append_note: str | None = None,
+               project: str | None = None) -> dict[str, Any] | None:
+        """``project`` moves the task to that project (DREAM-108)."""
         cur = self.get(task_id)
         if cur is None:
             return None
+        if project is not None and project != cur.get("project"):
+            with self._lock:
+                self._conn.execute("UPDATE tasks SET project=? WHERE id=?", (project, task_id))
+                self._conn.commit()
+            cur = self.get(task_id)
         # An update that changes nothing must not reorder the list by touching
         # updated_at (Gate 11): an empty append is not a touch.
         if (title is None and status is None and notes is None
@@ -98,37 +131,45 @@ class TaskStore:
 
     # --- reads -------------------------------------------------------------------------
 
-    def count_open(self) -> int:
+    def count_open(self, scope: Any = None) -> int:
+        where, params = self._where(self._scope(scope))
         with self._lock:
             return int(self._conn.execute(
-                "SELECT count(*) FROM tasks WHERE status != 'done'").fetchone()[0])
+                "SELECT count(*) FROM tasks WHERE status != 'done'" + where, params).fetchone()[0])
 
     def get(self, task_id: int) -> dict[str, Any] | None:
+        """One task by id, whatever its project: callers check ``project`` first."""
         with self._lock:
             row = self._conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             return dict(row) if row else None
 
-    def list(self, status: str | None = None, include_done: bool = False, limit: int = 100) -> list[dict[str, Any]]:
+    def list(self, status: str | None = None, include_done: bool = False, limit: int = 100,
+             scope: Any = _ALL) -> list[dict[str, Any]]:
         """Open work first (active, blocked, open — in that order), newest-updated
-        first within a status; done only when asked."""
+        first within a status; done only when asked. ``scope``: the projects listed
+        (DREAM-108) -- default the store's project and user-wide, None every project."""
+        where, params = self._where(self._scope(scope))
         with self._lock:
             if status:
                 rows = self._conn.execute(
-                    "SELECT * FROM tasks WHERE status=? ORDER BY updated_at DESC, id DESC LIMIT ?",
-                    (status, limit)).fetchall()
+                    "SELECT * FROM tasks WHERE status=?" + where
+                    + " ORDER BY updated_at DESC, id DESC LIMIT ?",
+                    (status, *params, limit)).fetchall()
             else:
-                where = "" if include_done else "WHERE status != 'done'"
+                done = "" if include_done else " AND status != 'done'"
                 rows = self._conn.execute(
-                    f"SELECT * FROM tasks {where} ORDER BY CASE status WHEN 'active' THEN 0 "
+                    "SELECT * FROM tasks WHERE 1=1" + done + where
+                    + " ORDER BY CASE status WHEN 'active' THEN 0 "
                     "WHEN 'blocked' THEN 1 WHEN 'open' THEN 2 ELSE 3 END, updated_at DESC, id DESC "
-                    "LIMIT ?", (limit,)).fetchall()
+                    "LIMIT ?", (*params, limit)).fetchall()
             return [dict(r) for r in rows]
 
     # --- the file ----------------------------------------------------------------------
 
     def render_threads(self, limit: int = 40) -> str:
-        """THREADS.md as text: generated, never hand-edited."""
-        rows = self.list(limit=limit)
+        """THREADS.md as text: generated, never hand-edited. It is one file for every
+        project, so from DREAM-108 each task sits under its project's heading."""
+        rows = self.list(limit=limit, scope=None)
         lines = ["# Open threads", "",
                  "Generated from the task store — `task_add` / `task_update` / `/tasks` change "
                  "it, not an editor.", ""]
@@ -138,13 +179,21 @@ class TaskStore:
             lines.append(f"_(the {limit} most recently touched of {self.count_open()}; "
                          "`/tasks all` for the rest)_")
             lines.append("")
+        groups: dict[str, list[dict[str, Any]]] = {}
         for t in rows:
-            mark = {"active": "▶", "blocked": "■", "open": "○"}.get(t["status"], "·")
-            line = f"- {mark} #{t['id']} {t['title']} [{t['status']}]"
-            if t["notes"]:
-                first = t["notes"].splitlines()[0].strip()
-                line += f" — {first[:120]}"
-            lines.append(line)
+            groups.setdefault(t.get("project") or "", []).append(t)
+        for owner, tasks in groups.items():
+            if owner or len(groups) > 1:
+                heading = {USER: "User-wide", UNASSIGNED: "Unassigned", "": "Unassigned"}.get(
+                    owner, f"Project {owner}")
+                lines += ["", f"## {heading}", ""] if lines[-1] else [f"## {heading}", ""]
+            for t in tasks:
+                mark = {"active": "▶", "blocked": "■", "open": "○"}.get(t["status"], "·")
+                line = f"- {mark} #{t['id']} {t['title']} [{t['status']}]"
+                if t["notes"]:
+                    first = t["notes"].splitlines()[0].strip()
+                    line += f" — {first[:120]}"
+                lines.append(line)
         return "\n".join(lines) + "\n"
 
     def write_threads(self) -> Any:
@@ -163,7 +212,7 @@ class TaskStore:
         one task each. Runs only when the store is empty and the file was NOT
         generated, so it never re-imports what it wrote."""
         p = config.THREADS_FILE
-        if self.list(include_done=True, limit=1) or not p.is_file():
+        if self.list(include_done=True, limit=1, scope=None) or not p.is_file():
             return 0
         try:
             text = p.read_text(encoding="utf-8", errors="replace")
@@ -179,7 +228,9 @@ class TaskStore:
         def flush() -> None:
             nonlocal title, notes, made
             if title:
-                self.add(title, "\n".join(notes).strip())
+                # A hand-written file says nothing about projects: the rows start as
+                # legacy ('') and the startup migration files them by evidence.
+                self.add(title, "\n".join(notes).strip(), project="")
                 made += 1
             title, notes = None, []
 
@@ -199,12 +250,12 @@ class TaskStore:
         flush()
         return made
 
-    def wake_lines(self, limit: int = 8) -> list[str]:
+    def wake_lines(self, limit: int = 8, scope: Any = _ALL) -> list[str]:
         """The open work, bounded, for the wake-up context. A title cannot close
         the fence it sits in: its angle brackets become the lookalikes the
-        stray-note fence already uses (Gate 11)."""
+        stray-note fence already uses (Gate 11). Only the scope's tasks (DREAM-108)."""
         out = []
-        for t in self.list(limit=limit):
+        for t in self.list(limit=limit, scope=scope):
             title = t["title"].replace("<", "‹").replace(">", "›")
             out.append(f"- #{t['id']} {title} [{t['status']}]")
         return out

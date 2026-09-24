@@ -21,7 +21,8 @@ _NODE_LAYOUT = {"bin", "include", "lib", "share", "CHANGELOG.md", "LICENSE", "RE
 _NODE_SUBDIRS = {"include": {"node"}, "lib": {"node_modules"}, "share": {"doc", "man", "systemtap"}}
 # ExecutionScope.validate refuses these as roots; one of them here would stop every run_bash call, not just the scripts
 _NEVER = tuple(Path(p) for p in ("/", "/home", "/tmp", "/var", "/etc"))
-_SYSTEM_TREES = tuple(Path(p) for p in ("/proc", "/sys", "/dev", "/run", "/usr", "/bin", "/sbin", "/lib", "/lib64"))
+_SYSTEM_TREES = tuple(Path(p) for p in ("/proc", "/sys", "/dev", "/run", "/usr", "/bin", "/sbin", "/lib", "/lib64",
+                                         "/tmp/.X11-unix"))
 
 
 def _node_only(prefix: Path) -> bool:

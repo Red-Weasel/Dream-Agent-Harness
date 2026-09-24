@@ -71,7 +71,9 @@ def curate(store: Any) -> dict[str, int]:
     ``{"classified": n, "personal": p, "reference": r}``. Memories that stay unsure
     keep an empty facet and are retried on the next pass."""
     classified = personal = reference = 0
-    for m in store.all_memories():
+    # Every project's memories: a facet is a label on a memory, not a move between
+    # projects, so the sweep stays whole (DREAM-108).
+    for m in store.all_memories(scope=None):
         if (m.get("facet") or "") != "":
             continue
         facet = classify_facet(

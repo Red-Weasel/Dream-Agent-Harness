@@ -13,6 +13,8 @@ Three rules shape it:
 - **Names are namespaced** as ``<server>__<tool>``. The policy classifier strips only
   Dream's own ``mcp__dream__`` prefix, so these fall through to MUTATING and are
   gated like any self-built tool — an external tool gets no free pass for existing.
+  (DREAM-109: Dream's own sandboxed live Blender, ``blender``, is the one exception;
+  that name is reserved, so no configured server can take it.)
 - **Sessions live on the engine's loop.** They are opened inside ``Engine._start``
   and closed in ``_cleanup``; a session cannot be carried across event loops, so
   there is no discovery-in-a-throwaway-loop trick here.
@@ -21,6 +23,7 @@ Three rules shape it:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -76,6 +79,13 @@ def load_config(path: str | Path) -> tuple[list[dict[str, Any]], list[str]]:
             # server, which is the shape of a spoof (Gate 2 finding 1). Both refused.
             warnings.append(f"mcp config {p}: server name '{name}' is reserved for "
                             f"Dream's own server — rename it")
+            continue
+        if name.lower() == "blender":
+            # DREAM-109: `blender__*` tools run without approval because Dream's live
+            # Blender confines them (dream.media.blender_live adds that server itself).
+            # A configured server must never borrow that pass.
+            warnings.append(f"mcp config {p}: server name '{name}' is reserved for Dream's "
+                            f"sandboxed live Blender — rename it")
             continue
         if name in seen:
             warnings.append(f"mcp config {p}: duplicate server '{name}' ignored")
@@ -138,6 +148,64 @@ def _text_of(result: Any) -> str:
         else:
             parts.append(f"[{getattr(c, 'type', 'content')} omitted]")
     return "\n".join(parts) if parts else "(no output)"
+
+
+# Pictures in a result (DREAM-109: live Blender's viewport), bounded so a server
+# cannot flood the context: at most this many per result, each at most this size.
+MAX_IMAGES = 4
+MAX_IMAGE_BYTES = 4 * 1024 * 1024
+_IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+
+
+def _multimodal() -> bool:
+    """Whether the calling session's model takes images; no session means no."""
+    from .tools.context import ctx
+
+    try:
+        return bool(ctx().multimodal)
+    except RuntimeError:
+        return False
+
+
+def _content_with_images(result: Any) -> list[dict[str, Any]]:
+    """A result that has pictures: its text first, then the pictures the model can take.
+
+    Like dream.tools.computer_tools.result(): a model without image input gets the
+    text and a note, never raw image blocks."""
+    lines: list[str] = []
+    images: list[Any] = []
+    for c in getattr(result, "content", None) or []:
+        if getattr(c, "type", None) == "image":
+            images.append(c)
+        elif getattr(c, "text", None) is not None:
+            lines.append(str(c.text))
+        else:
+            lines.append(f"[{getattr(c, 'type', 'content')} omitted]")
+    if not _multimodal():
+        lines.append(f"[{len(images)} image(s) not attached: this model has no image input, "
+                     "so appearance is unverified]")
+        return [{"type": "text", "text": "\n".join(lines)}]
+    blocks: list[dict[str, Any]] = []
+    for index, image in enumerate(images):
+        if len(blocks) == MAX_IMAGES:
+            lines.append(f"[{len(images) - index} more image(s) omitted: at most {MAX_IMAGES} per result]")
+            break
+        mime = str(getattr(image, "mimeType", "") or "")
+        data = getattr(image, "data", "")
+        if mime not in _IMAGE_TYPES:
+            lines.append(f"[image omitted: {mime or 'an unknown type'} is not a picture type models accept]")
+            continue
+        try:
+            size = len(base64.b64decode(data, validate=True))
+        except (ValueError, TypeError):
+            lines.append("[image omitted: its data is not valid base64]")
+            continue
+        if size > MAX_IMAGE_BYTES:
+            lines.append(f"[image omitted: {size / 1024 / 1024:.1f} MB is over the "
+                         f"{MAX_IMAGE_BYTES // 1024 // 1024} MB limit]")
+            continue
+        blocks.append({"type": "image", "mimeType": mime, "data": data})
+    return [{"type": "text", "text": "\n".join(lines) or "(no output)"}, *blocks]
 
 
 def prompt_section(servers: dict[str, list[str]]) -> str:
@@ -274,6 +342,9 @@ class McpClients:
                 return {"content": [{"type": "text",
                                      "text": f"{local} failed: {type(e).__name__}: {e}"}],
                         "is_error": True}
+            if any(getattr(c, "type", None) == "image" for c in getattr(result, "content", None) or []):
+                return {"content": _content_with_images(result),
+                        "is_error": bool(getattr(result, "isError", False))}
             return {"content": [{"type": "text", "text": _text_of(result)}],
                     "is_error": bool(getattr(result, "isError", False))}
 

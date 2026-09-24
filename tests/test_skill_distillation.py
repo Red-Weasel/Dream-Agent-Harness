@@ -17,7 +17,12 @@ from dream.memory.store import MemoryStore
 
 
 def _store(**kw) -> MemoryStore:
-    return MemoryStore(Path(tempfile.mkdtemp()) / "t.db", **kw)
+    store = MemoryStore(Path(tempfile.mkdtemp()) / "t.db", **kw)
+    # These stand in for sessions of an Engine() in its default workspace, and consolidation
+    # stays in that workspace's project (DREAM-108), so the store is scoped as the Engine's is.
+    from dream.memory.project import project_key
+    store.project = project_key(config.ROOT)
+    return store
 
 
 class FakeBackend:

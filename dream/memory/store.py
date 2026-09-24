@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import config
+from .project import UNASSIGNED, USER
 
 
 MEM_TYPES = ("user", "feedback", "project", "reference")
@@ -31,9 +32,24 @@ MAX_RECALL_QUERY_CHARS = 256
 MAX_RECALL_RESULTS = 20
 MAX_ALTERNATIVE_QUERIES = 3
 
+# A read that names no scope looks where the store's own session is: its project plus
+# user-wide items (DREAM-108). ``scope=None`` is every project, for maintenance and for an
+# explicit all_projects request.
+_DEFAULT: Any = object()
+
 
 class MemoryIndexError(RuntimeError):
     """The authoritative file was replaced, but SQLite could not commit its index."""
+
+
+class ScopeError(ValueError):
+    """A write named an item that another project owns (DREAM-108)."""
+
+    def __init__(self, what: str, owner: str):
+        self.owner = owner or UNASSIGNED
+        where = ("an unassigned item" if self.owner == UNASSIGNED
+                 else f"project {self.owner}")
+        super().__init__(f"{what} belongs to {where}, not this project")
 
 
 def default_type(kind: str, title: str = "", body: str = "") -> str:
@@ -180,6 +196,26 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def add_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> bool:
+    """ALTER TABLE ... ADD COLUMN, idempotent under a race: two Dream starts on one old
+    database both see the column missing and both add it, and the second ALTER fails with
+    "duplicate column name" (DREAM-108 gate). That error means the column is there, which
+    is all either start wanted. Returns whether this call added it."""
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        return True
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" in str(exc).lower():
+            return False
+        raise
+
+
+# PRAGMA user_version: 1 = turns_fts built (Phase 9b); 2 = the DREAM-108 one-time project
+# migration has run, so a memory file without a project line is no longer legacy: it is
+# one the owner wrote by hand, and it joins the project of the session that starts.
+SCOPE_MIGRATED_VERSION = 2
+
+
 def slugify(text: str, maxlen: int = 60) -> str:
     """kebab-case slug from arbitrary text."""
     s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
@@ -265,6 +301,10 @@ class MemoryStore:
         self.embedder = embedder  # optional; enables semantic (vector) recall
         self.reranker = reranker  # optional; cross-encoder precision rerank
         self.readonly = readonly
+        # The project key of the session this store serves (DREAM-108), set by the Engine:
+        # the default owner of what is written and the default scope of what is read.
+        # None (tests, eval, maintenance) keeps the unscoped behaviour.
+        self.project: str | None = None
         self._lock = threading.RLock()
         # Lazy HNSW ANN index state (built from stored vectors above ANN_THRESHOLD).
         self._ann = None
@@ -296,14 +336,12 @@ class MemoryStore:
             # Migration: the embedding column was added after v0.1.
             cols = {r[1] for r in self._conn.execute("PRAGMA table_info(memories)")}
             if "embedding" not in cols:
-                self._conn.execute("ALTER TABLE memories ADD COLUMN embedding BLOB")
+                add_column(self._conn, "memories", "embedding", "BLOB")
             # Migration: curation tags each memory's facet — 'personal' (about the user,
             # always in the room) vs 'reference' (world/tech, looked up on demand);
             # '' until classified.
             if "facet" not in cols:
-                self._conn.execute(
-                    "ALTER TABLE memories ADD COLUMN facet TEXT NOT NULL DEFAULT ''"
-                )
+                add_column(self._conn, "memories", "facet", "TEXT NOT NULL DEFAULT ''")
             # Migration: Phase 9 — markdown became the source of truth, so a row
             # carries the two fields the file's frontmatter needs and the database
             # did not have: the one-line ``description`` the MEMORY.md index shows,
@@ -311,20 +349,14 @@ class MemoryStore:
             # user asked for. ``kind`` stays beside it: episodic time-scoped recall
             # filters on it, and dropping it would lose what it means.
             if "description" not in cols:
-                self._conn.execute(
-                    "ALTER TABLE memories ADD COLUMN description TEXT NOT NULL DEFAULT ''"
-                )
+                add_column(self._conn, "memories", "description", "TEXT NOT NULL DEFAULT ''")
             if "mem_type" not in cols:
-                self._conn.execute(
-                    "ALTER TABLE memories ADD COLUMN mem_type TEXT NOT NULL DEFAULT ''"
-                )
+                add_column(self._conn, "memories", "mem_type", "TEXT NOT NULL DEFAULT ''")
             # Migration: links gained an ``auto`` flag (0 = written as [[link]] in the
             # body, 1 = discovered by embedding similarity).
             lcols = {r[1] for r in self._conn.execute("PRAGMA table_info(memory_links)")}
             if "auto" not in lcols:
-                self._conn.execute(
-                    "ALTER TABLE memory_links ADD COLUMN auto INTEGER NOT NULL DEFAULT 0"
-                )
+                add_column(self._conn, "memory_links", "auto", "INTEGER NOT NULL DEFAULT 0")
             # Migration: the FTS index gained porter stemming ("concentrating"
             # now matches "concentration" — golden-set recall@1 0.75 → 0.80).
             # A tokenizer is baked in at CREATE time, and the index is derived
@@ -348,8 +380,68 @@ class MemoryStore:
             if self._conn.execute("PRAGMA user_version").fetchone()[0] < 1:
                 self._conn.execute("INSERT INTO turns_fts(turns_fts) VALUES('rebuild')")
                 self._conn.execute("PRAGMA user_version = 1")
+            # Migration: DREAM-108 -- every session, memory and working note names its
+            # project: a workspace key (dream.memory.project), 'user' (user-wide) or
+            # 'unassigned'. '' is a legacy row the startup migration has not placed yet;
+            # it is never shown to a scoped read.
+            for table in ("sessions", "memories", "working_notes"):
+                tcols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+                if "project" not in tcols:
+                    add_column(self._conn, table, "project", "TEXT NOT NULL DEFAULT ''")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project, started_at)")
             self._conn.commit()
         self._mem_cols = self._memory_columns()
+
+    # --- scope (DREAM-108) ---------------------------------------------------------------
+
+    def scope_migrated(self) -> bool:
+        """Whether the DREAM-108 one-time project migration has run on this database."""
+        with self._lock:
+            return self._conn.execute("PRAGMA user_version").fetchone()[0] >= SCOPE_MIGRATED_VERSION
+
+    def mark_scope_migrated(self) -> None:
+        with self._lock:
+            if self._conn.execute("PRAGMA user_version").fetchone()[0] < SCOPE_MIGRATED_VERSION:
+                self._conn.execute(f"PRAGMA user_version = {SCOPE_MIGRATED_VERSION}")
+                self._conn.commit()
+
+    def default_scope(self) -> tuple[str, ...] | None:
+        """Where a read looks when its caller names no scope: this store's project plus
+        user-wide items, or everything for a store opened without a project."""
+        return (self.project, USER) if self.project else None
+
+    def _scope(self, scope: Any) -> tuple[str, ...] | None:
+        if scope is _DEFAULT:
+            return self.default_scope()
+        return None if scope is None else tuple(scope)
+
+    @staticmethod
+    def _scope_sql(column: str, scope: tuple[str, ...] | None) -> tuple[str, list[Any]]:
+        """`` AND <column> IN (...)`` for a scope; nothing for None (every project)."""
+        if scope is None:
+            return "", []
+        if not scope:
+            return " AND 0", []
+        return f" AND COALESCE({column}, '') IN ({','.join('?' * len(scope))})", list(scope)
+
+    def known_owners(self) -> set[str]:
+        """Every project value the database holds, tasks included when that table exists."""
+        tables = ["sessions", "memories", "working_notes"]
+        with self._lock:
+            if self._conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'").fetchone():
+                tables.append("tasks")
+            out: set[str] = set()
+            for table in tables:
+                try:
+                    out.update(r[0] for r in self._conn.execute(
+                        f"SELECT DISTINCT project FROM {table}") if r[0])
+                except sqlite3.OperationalError:
+                    continue
+            return out
 
     def _memory_columns(self) -> str:
         """Every ``memories`` column except the embedding BLOB (~1.5KB/row), which no
@@ -486,13 +578,34 @@ class MemoryStore:
 
     # --- episodic: sessions & turns -----------------------------------------
 
-    def start_session(self, session_id: str, title: str | None = None) -> None:
+    def start_session(
+        self, session_id: str, title: str | None = None, project: str | None = None
+    ) -> None:
+        owner = project if project is not None else (self.project or "")
         with self._lock:
             self._conn.execute(
-                "INSERT OR IGNORE INTO sessions(id, title, started_at) VALUES (?,?,?)",
-                (session_id, title, _now()),
+                "INSERT OR IGNORE INTO sessions(id, title, started_at, project) VALUES (?,?,?,?)",
+                (session_id, title, _now(), owner),
             )
             self._conn.commit()
+        # Memory files the owner wrote by hand since the last start belong to the project
+        # of the session that starts now (DREAM-108; a no-op before the one-time migration).
+        if owner:
+            from . import longterm
+            longterm.adopt_orphans(self, owner)
+
+    def move_session(self, session_id: str, project: str) -> int | None:
+        """Give a session, and the working notes it wrote, to another project. Returns how
+        many notes moved, or None when there is no such session."""
+        with self._lock:
+            cur = self._conn.execute("UPDATE sessions SET project=? WHERE id=?", (project, session_id))
+            if cur.rowcount == 0:
+                self._conn.rollback()
+                return None
+            notes = self._conn.execute(
+                "UPDATE working_notes SET project=? WHERE session_id=?", (project, session_id)).rowcount
+            self._conn.commit()
+            return notes
 
     def end_session(self, session_id: str, summary: str | None = None) -> None:
         with self._lock:
@@ -537,24 +650,27 @@ class MemoryStore:
             return turn_id
 
     def search_turns(
-        self, query: str, limit: int = 10, *, exclude_session_id: str | None = None
+        self, query: str, limit: int = 10, *, exclude_session_id: str | None = None,
+        scope: Any = _DEFAULT,
     ) -> list[dict[str, Any]]:
-        """Topic search over every session's turns: the matching turn (id, session,
-        role, time, an excerpt) with the session's title. Newest first among
-        equal ranks, so a topic that recurs leads with the latest time."""
+        """Topic search over the sessions in scope: the matching turn (id, session,
+        role, time, an excerpt) with the session's title and project. Newest first
+        among equal ranks, so a topic that recurs leads with the latest time."""
         q = _fts_query(query)
         if not q:
             return []
+        where, params = self._scope_sql("s.project", self._scope(scope))
         with self._lock:
             rows = self._conn.execute(
                 "SELECT t.id, t.session_id, t.role, t.ts, t.tool_name, "
                 "snippet(turns_fts, 0, '', '', '…', 24) AS excerpt, "
-                "s.title AS session_title, s.started_at, bm25(turns_fts) AS rank "
+                "s.title AS session_title, s.started_at, s.project AS project, "
+                "bm25(turns_fts) AS rank "
                 "FROM turns_fts JOIN turns t ON t.id = turns_fts.rowid "
                 "LEFT JOIN sessions s ON s.id = t.session_id "
-                "WHERE turns_fts MATCH ? AND (? IS NULL OR t.session_id != ?) "
-                "ORDER BY rank, t.id DESC LIMIT ?",
-                (q, exclude_session_id, exclude_session_id, limit),
+                "WHERE turns_fts MATCH ? AND (? IS NULL OR t.session_id != ?)" + where
+                + " ORDER BY rank, t.id DESC LIMIT ?",
+                (q, exclude_session_id, exclude_session_id, *params, limit),
             ).fetchall()
             return [dict(r) for r in rows]
 
@@ -603,22 +719,24 @@ class MemoryStore:
             return row[0]
 
     def recent_sessions(
-        self, limit: int = 10, *, exclude_session_id: str | None = None
+        self, limit: int = 10, *, exclude_session_id: str | None = None, scope: Any = _DEFAULT,
     ) -> list[dict[str, Any]]:
+        where, params = self._scope_sql("project", self._scope(scope))
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM sessions WHERE (? IS NULL OR id != ?) "
-                "ORDER BY started_at DESC LIMIT ?",
-                (exclude_session_id, exclude_session_id, limit),
+                "SELECT * FROM sessions WHERE (? IS NULL OR id != ?)" + where
+                + " ORDER BY started_at DESC LIMIT ?",
+                (exclude_session_id, exclude_session_id, *params, limit),
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def previous_session(self, current_id: str) -> dict[str, Any] | None:
+    def previous_session(self, current_id: str, scope: Any = _DEFAULT) -> dict[str, Any] | None:
+        where, params = self._scope_sql("project", self._scope(scope))
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM sessions WHERE id!=? AND ended_at IS NOT NULL "
-                "ORDER BY started_at DESC LIMIT 1",
-                (current_id,),
+                "SELECT * FROM sessions WHERE id!=? AND ended_at IS NOT NULL" + where
+                + " ORDER BY started_at DESC LIMIT 1",
+                (current_id, *params),
             ).fetchone()
             return dict(row) if row else None
 
@@ -635,21 +753,22 @@ class MemoryStore:
 
     # --- long-term memory ----------------------------------------------------
 
-    def _free_slug(self, kind: str, title: str) -> str:
+    def _free_slug(self, kind: str, title: str, owner: str | None = None) -> str:
         """Slug for an upsert that didn't name one. A derived slug is not an identity
         claim — unrelated memories can share a title, and any two titles that agree in
         their first 60 characters slugify identically — so only a row with the same
-        kind AND title is the memory this call means to update. Anything else takes the
-        next free ``-N`` suffix instead of being silently overwritten. An explicitly
-        passed slug still means "update that memory": consolidation depends on it.
-        Call with the lock held."""
+        kind AND title (AND project, when the write has one: DREAM-108) is the memory
+        this call means to update. Anything else takes the next free ``-N`` suffix
+        instead of being silently overwritten. An explicitly passed slug still means
+        "update that memory": consolidation depends on it. Call with the lock held."""
         base = config.free_memory_name(slugify(title))
         slug, n = base, 1
         while True:
             row = self._conn.execute(
-                "SELECT kind, title FROM memories WHERE slug=?", (slug,)
+                "SELECT kind, title, project FROM memories WHERE slug=?", (slug,)
             ).fetchone()
-            if row is None or (row["kind"] == kind and row["title"] == title):
+            if row is None or (row["kind"] == kind and row["title"] == title
+                               and (owner is None or (row["project"] or "") == owner)):
                 return slug
             n += 1
             slug = f"{base}-{n}"
@@ -669,20 +788,29 @@ class MemoryStore:
         persist_markdown: bool = False,
         embed: bool = True,
         created_at: str | None = None,
+        project: str | None = None,
+        reassign: bool = False,
     ) -> dict[str, Any]:
         """Upsert a searchable memory; optionally persist its file before commit.
 
         ``embed=False`` leaves semantic indexing to ``backfill_embeddings`` and
         never calls the embedder. Markdown persistence excludes the derived index.
+
+        DREAM-108: a new memory belongs to ``project`` (default: this store's project;
+        '' for a store without one). An update keeps the memory's project and is refused
+        with ScopeError when that project is neither the write's nor user-wide, unless
+        ``reassign`` -- then the memory moves to ``project`` (the file sync and a
+        deliberate scope change do that).
         """
         if kind not in ("semantic", "procedural", "episodic"):
             raise ValueError(f"kind must be semantic|procedural|episodic, got {kind!r}")
         if mem_type and mem_type not in MEM_TYPES:
             raise ValueError(f"type must be one of {', '.join(MEM_TYPES)}, got {mem_type!r}")
+        owner = project if project is not None else self.project
         now = _now()
         with self._lock, self._conn:
             if not slug:  # the remember tool forwards the model's empty string as-is
-                slug = self._free_slug(kind, title)
+                slug = self._free_slug(kind, title, owner)
             else:
                 # A caller-supplied slug is model-supplied: normalize it here so a
                 # traversal slug can never reach the markdown mirror or an index.
@@ -693,8 +821,11 @@ class MemoryStore:
                 # so the row, the file, and the index all agree on the name.
                 slug = config.free_memory_name(slugify(slug))
             existing = self._conn.execute(
-                "SELECT id, title, body FROM memories WHERE slug=?", (slug,)
+                "SELECT id, title, body, project FROM memories WHERE slug=?", (slug,)
             ).fetchone()
+            if (existing is not None and owner is not None and not reassign
+                    and (existing["project"] or "") not in (owner, USER)):
+                raise ScopeError(f"memory {slug!r}", existing["project"] or "")
             body_changed = existing is None or existing["body"] != body
             content_changed = body_changed or existing["title"] != title
             if existing:
@@ -702,9 +833,10 @@ class MemoryStore:
                     "UPDATE memories SET kind=?, title=?, body=?, tags=?, salience=?, "
                     "source_session=COALESCE(?, source_session), updated_at=?, "
                     "description=COALESCE(NULLIF(?, ''), description), "
-                    "mem_type=COALESCE(NULLIF(?, ''), mem_type) WHERE slug=?",
+                    "mem_type=COALESCE(NULLIF(?, ''), mem_type), project=? WHERE slug=?",
                     (kind, title, body, tags, salience, source_session, now,
-                     description, mem_type, slug),
+                     description, mem_type,
+                     owner if reassign and owner is not None else existing["project"], slug),
                 )
                 if existing["body"] != body:
                     # The content changed, so past conflict adjudications involving
@@ -716,10 +848,10 @@ class MemoryStore:
             else:
                 self._conn.execute(
                     "INSERT INTO memories(slug, kind, title, body, tags, salience, "
-                    "source_session, created_at, updated_at, description, mem_type) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    "source_session, created_at, updated_at, description, mem_type, project) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (slug, kind, title, body, tags, salience, source_session, now, now,
-                     description, mem_type or default_type(kind, title, body)),
+                     description, mem_type or default_type(kind, title, body), owner or ""),
                 )
             if content_changed and existing:
                 self._conn.execute("UPDATE memories SET embedding=NULL WHERE slug=?", (slug,))
@@ -773,11 +905,21 @@ class MemoryStore:
         return row
 
     def get_memory(self, slug: str) -> dict[str, Any] | None:
+        """One memory by its exact slug, whatever its project: the caller checks the
+        ``project`` field before it shows or changes another project's memory."""
         with self._lock:
             row = self._conn.execute(
                 f"SELECT {self._mem_cols} FROM memories WHERE slug=?", (slug,)
             ).fetchone()
             return dict(row) if row else None
+
+    def move_memory(self, slug: str, project: str) -> dict[str, Any] | None:
+        """Give a memory to another project (or user-wide); its content is unchanged. The
+        caller rewrites the file so the move survives the next boot's sync."""
+        with self._lock:
+            cur = self._conn.execute("UPDATE memories SET project=? WHERE slug=?", (project, slug))
+            self._conn.commit()
+        return self.get_memory(slug) if cur.rowcount else None
 
     def delete_memory(self, slug: str) -> bool:
         with self._lock:
@@ -818,6 +960,7 @@ class MemoryStore:
         limit: int,
         since: str | None = None,
         until: str | None = None,
+        scope: tuple[str, ...] | None = None,
     ) -> list[int]:
         match = _fts_query(query)
         if match is None:
@@ -832,12 +975,16 @@ class MemoryStore:
             params.append(kind)
         # Constraints must precede LIMIT: filtering after truncation lets strong
         # out-of-window matches crowd the real in-window answer out of the pool.
+        # The project scope is one of them (DREAM-108).
         if since:
             sql += " AND m.created_at >= ?"
             params.append(since)
         if until:
             sql += " AND m.created_at <= ?"
             params.append(until)
+        where, extra = self._scope_sql("m.project", scope)
+        sql += where
+        params.extend(extra)
         # bm25() is NEGATIVE for matches (more-negative = better), sorted ASC.
         # MULTIPLY by (0.5 + salience) so a higher-salience match pushes MORE
         # negative → ranks earlier. Dividing (the old bug) did the opposite,
@@ -851,7 +998,8 @@ class MemoryStore:
             return []
 
     def _load_vectors(
-        self, kind: str | None, since: str | None = None, until: str | None = None
+        self, kind: str | None, since: str | None = None, until: str | None = None,
+        scope: tuple[str, ...] | None = None,
     ):
         """(labels=memory_ids, matrix) over main + chunk embeddings. One memory may
         contribute several rows (its chunks); callers aggregate by max score."""
@@ -867,6 +1015,10 @@ class MemoryStore:
         if until:
             conds.append("m.created_at <= ?")
             params.append(until)
+        scoped, extra = self._scope_sql("m.project", scope)
+        if scoped:
+            conds.append(scoped[len(" AND "):])
+            params.extend(extra)
         where = " AND ".join(conds)
         main = self._conn.execute(
             f"SELECT m.id, m.embedding FROM memories m WHERE {where}", params
@@ -918,10 +1070,11 @@ class MemoryStore:
         limit: int,
         since: str | None = None,
         until: str | None = None,
+        scope: tuple[str, ...] | None = None,
     ) -> list[int]:
         if query_vec is None:
             return []
-        ids, mat = self._load_vectors(kind, since, until)
+        ids, mat = self._load_vectors(kind, since, until, scope)
         if not ids:
             return []
         try:
@@ -930,8 +1083,9 @@ class MemoryStore:
             qv = np.asarray(query_vec, dtype="float32")
             best: dict[int, float] = {}
             # The shared ANN index is unfiltered; any constraint means brute force
-            # over the (already filtered) candidate set.
-            ann = self._ensure_ann(ids, mat) if not (kind or since or until) else None
+            # over the (already filtered) candidate set. A project scope is one.
+            ann = (self._ensure_ann(ids, mat)
+                   if not (kind or since or until or scope is not None) else None)
             if ann is not None:
                 # Map labels through the ids captured at index-build time — a reused
                 # index must not depend on this call's row order matching that one's.
@@ -971,12 +1125,14 @@ class MemoryStore:
         return [by_id[i] for i in ids if i in by_id]
 
     def _augment_with_links(
-        self, ranked: list[dict[str, Any]], kind: str | None, limit: int
+        self, ranked: list[dict[str, Any]], kind: str | None, limit: int,
+        scope: tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
         """Blend 1-hop [[linked]] memories into the result set. Links hold up to
         LINK_RESERVE slots even when ranked hits could fill ``limit`` — associations
         surface alongside similarity, not only when recall comes up short. Never
-        exceeds ``limit``, never violates the ``kind`` filter, and always keeps at
+        exceeds ``limit``, never violates the ``kind`` filter or the project scope (a
+        link, even an auto-link, is no way into another project), and always keeps at
         least the top ranked hit."""
         primary = ranked[:limit]
         if not primary:
@@ -995,6 +1151,8 @@ class MemoryStore:
                     continue
                 m = self.get_memory(slug)
                 if m is None or (kind and m["kind"] != kind):
+                    continue
+                if scope is not None and (m.get("project") or "") not in scope:
                     continue
                 m["via_link"] = True
                 extras.append(m)
@@ -1022,6 +1180,7 @@ class MemoryStore:
         since: str | None = None,
         until: str | None = None,
         bump: bool = True,
+        scope: Any = _DEFAULT,
     ) -> list[dict[str, Any]]:
         """Hybrid recall: keyword (FTS5/BM25) fused with semantic (vector cosine, HNSW
         ANN at scale) via Reciprocal Rank Fusion, then re-scored by a cross-encoder
@@ -1030,23 +1189,25 @@ class MemoryStore:
         into episodic memory ("what happened last week"). Time-scoped recall skips link
         augmentation: an association isn't evidence something happened in the window.
         When nothing matches, the recency fallback is labeled ``via_recency`` so callers
-        can present it as browsing, not as an answer to the query.
+        can present it as browsing, not as an answer to the query. ``scope`` is the
+        projects searched (DREAM-108): default this store's project plus user-wide.
         """
+        scope = self._scope(scope)
         until = self._normalize_until(until)
         time_scoped = bool(since or until)
         query_vec = self.embedder.embed(query) if self._embed_available() else None
         rerank_on = self.reranker is not None and self.reranker.available()
         pool = max(config.RERANK_CANDIDATES, limit) if rerank_on else limit * 3
         with self._lock:
-            fts_ids = self._fts_ids(query, kind, pool, since, until)
-            vec_ids = self._vector_ids(query_vec, kind, pool, since, until)
+            fts_ids = self._fts_ids(query, kind, pool, since, until, scope)
+            vec_ids = self._vector_ids(query_vec, kind, pool, since, until, scope)
             if fts_ids and vec_ids:
                 ordered = self._rrf(fts_ids, vec_ids)
             else:
                 ordered = fts_ids or vec_ids
             if not ordered:
                 fallback = self.recent_memories(
-                    limit=limit, kind=kind, since=since, until=until
+                    limit=limit, kind=kind, since=since, until=until, scope=scope
                 )
                 for r in fallback:
                     r["via_recency"] = True
@@ -1063,7 +1224,7 @@ class MemoryStore:
         if time_scoped:
             top = cand_rows[:limit]
         else:
-            top = self._augment_with_links(cand_rows, kind, limit)
+            top = self._augment_with_links(cand_rows, kind, limit, scope)
         # Reads must not perturb what they measure: the eval harness and read-only
         # stores skip the access bump.
         if bump and not self.readonly:
@@ -1080,6 +1241,7 @@ class MemoryStore:
         since: str | None = None,
         until: str | None = None,
         bump: bool = True,
+        scope: Any = _DEFAULT,
     ) -> list[dict[str, Any]]:
         """Run caller-supplied query alternatives in one bounded recall operation.
 
@@ -1090,15 +1252,17 @@ class MemoryStore:
         if type(limit) is not int or not 1 <= limit <= MAX_RECALL_RESULTS:
             raise ValueError(f"limit must be an integer from 1 to {MAX_RECALL_RESULTS}")
         alternative_queries = _bounded_alternative_queries(query, alternative_queries)
+        scope = self._scope(scope)
         primary = self.search_memories(
-            query, kind=kind, limit=limit, since=since, until=until, bump=False
+            query, kind=kind, limit=limit, since=since, until=until, bump=False, scope=scope
         )
         primary_direct = [row for row in primary if not row.get("via_recency")]
         alternative_hits: list[dict[str, Any]] = []
         seen = {row["id"] for row in primary_direct}
         for alternative in alternative_queries:
             hits = self.search_memories(
-                alternative, kind=kind, limit=limit, since=since, until=until, bump=False
+                alternative, kind=kind, limit=limit, since=since, until=until, bump=False,
+                scope=scope,
             )
             for row in hits:
                 if row.get("via_recency") or row["id"] in seen:
@@ -1126,6 +1290,7 @@ class MemoryStore:
         kind: str | None = None,
         since: str | None = None,
         until: str | None = None,
+        scope: Any = _DEFAULT,
     ) -> list[dict[str, Any]]:
         with self._lock:
             sql = f"SELECT {self._mem_cols} FROM memories WHERE 1=1"
@@ -1139,24 +1304,28 @@ class MemoryStore:
             if until:
                 sql += " AND created_at <= ?"
                 params.append(self._normalize_until(until))
-            sql += " ORDER BY updated_at DESC LIMIT ?"
+            where, extra = self._scope_sql("project", self._scope(scope))
+            sql += where + " ORDER BY updated_at DESC LIMIT ?"
+            params.extend(extra)
             params.append(limit)
             rows = self._conn.execute(sql, params).fetchall()
             return [dict(r) for r in rows]
 
     def top_memories(
-        self, limit: int = 8, prefer_facet: str | None = "personal"
+        self, limit: int = 8, prefer_facet: str | None = "personal", scope: Any = _DEFAULT,
     ) -> list[dict[str, Any]]:
         """The wake-up set: salience blended with recency decay, so memories that haven't
         been touched in a while fade and fresh/frequently-used ones surface. ``prefer_facet``
         (default 'personal') is a *tie-breaker only*: at equal salience-decay score, that
         facet sorts ahead of the rest, so waking up leads with who the user is — without
-        disturbing the primary salience ordering. Pass ``None`` to disable the bias."""
+        disturbing the primary salience ordering. Pass ``None`` to disable the bias.
+        ``scope``: the projects it draws from (DREAM-108), default this store's."""
+        where, params = self._scope_sql("project", self._scope(scope))
         with self._lock:
             rows = [
                 dict(r)
                 for r in self._conn.execute(
-                    f"SELECT {self._mem_cols} FROM memories"
+                    f"SELECT {self._mem_cols} FROM memories WHERE 1=1" + where, params
                 ).fetchall()
             ]
         if not rows:
@@ -1204,7 +1373,8 @@ class MemoryStore:
         survivor, combining every member's unique body and unioning tags, and the rest are
         deleted. Cluster-then-collapse avoids the stale-snapshot corruption of pairwise
         merging. Returns which survivors changed and which slugs were dropped so the caller
-        can keep the markdown mirror in sync."""
+        can keep the markdown mirror in sync. Only memories of ONE project merge with each
+        other (DREAM-108): a duplicate in another project is that project's."""
         empty = MergeResult(0, [], [])
         if not self._embed_available():
             return empty
@@ -1215,7 +1385,7 @@ class MemoryStore:
             rows = [
                 dict(r)
                 for r in self._conn.execute(
-                    "SELECT id, slug, kind, title, body, tags, salience, embedding "
+                    "SELECT id, slug, kind, title, body, tags, salience, embedding, project "
                     "FROM memories WHERE embedding IS NOT NULL AND kind != 'episodic'"
                 ).fetchall()
             ]
@@ -1248,6 +1418,7 @@ class MemoryStore:
             self.upsert_memory(
                 kind=survivor["kind"], title=survivor["title"], body=body,
                 slug=survivor["slug"], tags=",".join(tag_order), salience=survivor["salience"],
+                project=survivor["project"] or "",
             )
             updated.append(survivor["slug"])
             for m in group:
@@ -1263,10 +1434,11 @@ class MemoryStore:
         high: float | None = None,
         skip_pairs: set[tuple[str, str]] | None = None,
     ) -> list[list[int]] | None:
-        """Union-find over the same-kind similarity graph: an edge where
+        """Union-find over the same-kind, same-project similarity graph: an edge where
         ``low <= cosine`` (``< high`` if given) and the slug pair isn't in
         ``skip_pairs``. Returns clusters of row indexes with ≥2 members, or None if
-        the embeddings can't be stacked. Rows must carry kind/slug/embedding."""
+        the embeddings can't be stacked. Rows must carry kind/slug/embedding; rows
+        with a ``project`` never join another project's (DREAM-108)."""
         import numpy as np
 
         try:
@@ -1296,6 +1468,8 @@ class MemoryStore:
             i, j = int(pair[0]), int(pair[1])
             if rows[i]["kind"] != rows[j]["kind"]:
                 continue
+            if (rows[i].get("project") or "") != (rows[j].get("project") or ""):
+                continue
             s = float(sims[i][j])
             if s < low or (high is not None and s >= high):
                 continue
@@ -1310,21 +1484,24 @@ class MemoryStore:
             groups.setdefault(find(i), []).append(i)
         return [g for g in groups.values() if len(g) >= 2]
 
-    def find_conflicts(self) -> list[list[dict[str, Any]]]:
+    def find_conflicts(self, scope: Any = _DEFAULT) -> list[list[dict[str, Any]]]:
         """Same-kind memory clusters in the 'suspiciously similar' band
         [RECONCILE_THRESHOLD, MERGE_THRESHOLD) — similar enough to overlap or
         contradict, not similar enough to auto-merge. Pairs already adjudicated
         (see mark_reconciled) are skipped, so each pair is surfaced at most once.
-        Episodic memories are exempt for the same reason they're exempt from merging."""
+        Episodic memories are exempt for the same reason they're exempt from merging.
+        Only memories in ``scope`` (default this store's project and user-wide) are
+        compared, and only within one project (DREAM-108)."""
         if not self._embed_available():
             return []
+        where, params = self._scope_sql("project", self._scope(scope))
         with self._lock:
             rows = [
                 dict(r)
                 for r in self._conn.execute(
                     "SELECT id, slug, kind, title, body, tags, salience, updated_at, "
-                    "embedding FROM memories "
-                    "WHERE embedding IS NOT NULL AND kind != 'episodic'"
+                    "embedding, project FROM memories "
+                    "WHERE embedding IS NOT NULL AND kind != 'episodic'" + where, params
                 ).fetchall()
             ]
             seen = {
@@ -1375,17 +1552,21 @@ class MemoryStore:
             )
             self._conn.commit()
 
-    def all_memories(self, kind: str | None = None) -> list[dict[str, Any]]:
+    def all_memories(self, kind: str | None = None, scope: Any = _DEFAULT) -> list[dict[str, Any]]:
+        """Every memory in ``scope`` (default this store's project and user-wide; None for
+        every project -- the file sync and curation pass that)."""
+        where, params = self._scope_sql("project", self._scope(scope))
         with self._lock:
             if kind:
                 rows = self._conn.execute(
-                    f"SELECT {self._mem_cols} FROM memories WHERE kind=? "
-                    "ORDER BY updated_at DESC",
-                    (kind,),
+                    f"SELECT {self._mem_cols} FROM memories WHERE kind=?" + where
+                    + " ORDER BY updated_at DESC",
+                    (kind, *params),
                 ).fetchall()
             else:
                 rows = self._conn.execute(
-                    f"SELECT {self._mem_cols} FROM memories ORDER BY updated_at DESC"
+                    f"SELECT {self._mem_cols} FROM memories WHERE 1=1" + where
+                    + " ORDER BY updated_at DESC", params
                 ).fetchall()
             return [dict(r) for r in rows]
 
@@ -1403,14 +1584,31 @@ class MemoryStore:
 
     def add_note(self, session_id: str, note: str) -> int:
         """Returns the note's id: a compaction stub names it so the model can
-        ask for exactly that note back."""
+        ask for exactly that note back. A note belongs to its session's project
+        (DREAM-108); without a session row, to this store's."""
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO working_notes(session_id, note, ts) VALUES (?,?,?)",
-                (session_id, note, _now()),
+                "INSERT INTO working_notes(session_id, note, ts, project) VALUES (?,?,?, "
+                "COALESCE((SELECT NULLIF(project, '') FROM sessions WHERE id=?), ?))",
+                (session_id, note, _now(), session_id, self.project or ""),
             )
             self._conn.commit()
             return int(cur.lastrowid)
+
+    def project_notes(
+        self, query: str, scope: tuple[str, ...] | None, limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Notes of every session in ``scope`` (None: all projects), newest first,
+        with each note's session and project -- the explicit cross-session read."""
+        q = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        where, params = self._scope_sql("project", scope)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, session_id, note, ts, project FROM working_notes "
+                "WHERE note LIKE ? ESCAPE '\\'" + where + " ORDER BY id DESC LIMIT ?",
+                (f"%{q}%", *params, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def search_notes(self, session_id: str, query: str, limit: int = 10) -> list[dict[str, Any]]:
         """Case-insensitive substring match over this session's notes, newest
@@ -1443,12 +1641,16 @@ class MemoryStore:
             )
             self._conn.commit()
 
-    def stray_notes(self, exclude_session: str, limit: int = 20) -> list[dict[str, Any]]:
+    def stray_notes(
+        self, exclude_session: str, limit: int = 20, scope: Any = _DEFAULT,
+    ) -> list[dict[str, Any]]:
         """Unconsolidated notes left behind by *earlier* sessions — the residue of a
         consolidation that failed, or of a session that died before one ran. The next
         session's dreaming picks these up so durable info is never silently stranded.
         Excludes the current session (its own notes go through the normal read_notes
-        path) and any session that still looks alive.
+        path) and any session that still looks alive. Only sessions in ``scope``
+        (default this store's project): another project's notes wait for its own
+        next dream (DREAM-108).
 
         An open session (ended_at IS NULL) either crashed or belongs to a second Dream
         instance running right now; nothing on disk distinguishes them but time. A live
@@ -1460,6 +1662,7 @@ class MemoryStore:
         cutoff = (
             datetime.now(timezone.utc) - timedelta(hours=_CRASHED_SESSION_HOURS)
         ).isoformat(timespec="seconds")
+        where, params = self._scope_sql("s.project", self._scope(scope))
         with self._lock:
             rows = self._conn.execute(
                 "SELECT wn.id, wn.note, wn.ts, wn.session_id "
@@ -1468,9 +1671,9 @@ class MemoryStore:
                 "AND (s.ended_at IS NOT NULL OR MAX("
                 "  COALESCE((SELECT MAX(ts) FROM turns WHERE session_id = s.id), ''), "
                 "  COALESCE((SELECT MAX(ts) FROM working_notes WHERE session_id = s.id), ''), "
-                "  s.started_at) < ?) "
-                "ORDER BY wn.ts LIMIT ?",
-                (exclude_session, cutoff, limit),
+                "  s.started_at) < ?)" + where
+                + " ORDER BY wn.ts LIMIT ?",
+                (exclude_session, cutoff, *params, limit),
             ).fetchall()
             return [dict(r) for r in rows]
 

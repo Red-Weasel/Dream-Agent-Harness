@@ -6,7 +6,9 @@ from typing import Any
 
 from claude_agent_sdk import tool
 
+from ..memory import project as projects
 from .context import ctx, err, in_thread, ok
+from .memory_tools import ALL_PROJECTS_ARG, PROJECT_ARG, read_scope
 
 _NOTE_SCHEMA = {
     "type": "object",
@@ -37,11 +39,27 @@ ELIDED_PREFIX = "[elided "
     "search all notes, elided content included.",
     {"type": "object", "properties": {
         "query": {"type": "string", "description": "Words to match, or '#<id>' for one note."},
-        "limit": {"type": "integer", "description": "Max matches (default 10)."}}, "required": []},
+        "limit": {"type": "integer", "description": "Max matches (default 10)."},
+        "project": PROJECT_ARG, "all_projects": ALL_PROJECTS_ARG}, "required": []},
 )
 async def read_notes(args: dict[str, Any]) -> dict[str, Any]:
     c = ctx()
     query = str(args.get("query") or "").strip()
+    if args.get("project") or args.get("all_projects"):
+        # Other sessions' notes only on request, each with its session and project (DREAM-108).
+        try:
+            scope, current, _cross = read_scope(args)
+            limit = max(1, min(50, int(args.get("limit") or 10)))
+        except (TypeError, ValueError) as e:
+            return err(f"read_notes: {e}.")
+        hits = await in_thread(c.store.project_notes, query, scope, limit)
+        if not hits:
+            return ok(f"No note matches {query!r} there." if query else "No notes there.")
+        lines = [f"{len(hits)} note(s)" + (f" matching {query!r}" if query else "") + ":"]
+        for n in hits:
+            owner = projects.tag(n.get("project") or "", current, cross=True)
+            lines.append(f"\n#{n['id']} ({n['ts']}, session {n['session_id']}){owner}\n{n['note']}")
+        return ok("\n".join(lines))
     if query:
         try:
             limit = max(1, min(50, int(args.get("limit") or 10)))

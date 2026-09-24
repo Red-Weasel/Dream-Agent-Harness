@@ -54,3 +54,5 @@ def test_a_root_the_sandbox_would_refuse_is_dropped_not_passed_on(tmp_path, monk
     monkeypatch.setattr(skill_runtime, "UA_SKILLS", home / "bin")
     assert skill_runtime.script_roots() == ()
     assert skill_runtime.script_env() == {}
+    # the mirror of validate()'s forbidden trees includes the display folder (DREAM-109 gate note)
+    assert not skill_runtime._usable(Path("/tmp/.X11-unix/node"))

@@ -18,6 +18,9 @@ def session(tmp_path, monkeypatch):
     from dream import config
     monkeypatch.setattr(config, 'SESSIONS_DIR', tmp_path / 'sessions')
     store = MemoryStore(tmp_path / 'sessions.db')
+    # The Engine scopes its store to the workspace's project (DREAM-108); so does this one.
+    from dream.memory.project import project_key
+    store.project = project_key(tmp_path)
     store.start_session('past')
     store.start_session('reader')
     context = ToolContext(store, WorkingMemory(store, 'reader'), None, 'reader',

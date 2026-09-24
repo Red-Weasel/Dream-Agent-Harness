@@ -117,6 +117,10 @@ class Engine:
         self.workspace = (
             Path(workspace).expanduser().resolve() if workspace else config.ROOT
         )
+        # DREAM-108: the memory scope of this session -- its workspace's project key.
+        from ..memory.project import project_key
+        self.project = project_key(self.workspace)
+        self.memory_migration = None
         from .execution import ExecutionScope
         self.execution_scope = ExecutionScope(self.workspace, network=True)
         self.execution_capability = None
@@ -170,24 +174,7 @@ class Engine:
                 from ..memory.embeddings import Reranker
 
                 reranker = Reranker(config.RERANK_MODEL)
-        self.store = MemoryStore(config.DB_PATH, embedder=embedder, reranker=reranker)
-        self.imported_memories = longterm.import_markdown(self.store)
-        self.store.start_session(self.session_id)
-        self.working = WorkingMemory(self.store, self.session_id)
-        # Work that outlives the turn: THREADS.md is generated from it, so the
-        # wake-up that reads the file sees the store, never a stale hand edit.
-        from ..memory.tasks import TaskStore
-
-        self.tasks = TaskStore(self.store)
-        try:
-            # The hand-written file becomes tasks once, BEFORE the store
-            # regenerates it — otherwise the first boot would erase it.
-            n = self.tasks.import_threads()
-            if n:
-                self._log_stderr(f"imported {n} thread(s) from THREADS.md into the task store")
-            self.tasks.write_threads()
-        except Exception as e:
-            self._log_stderr(f"THREADS.md not written: {e}")
+        self._open_memory(embedder, reranker)
         self.browser = get_browser()
         self._tool_context = ToolContext(
                 self.store, self.working, self.browser, self.session_id,
@@ -222,7 +209,10 @@ class Engine:
         self._mcp = McpClients()
         mcp_cfgs, mcp_warnings = load_config(config.MCP_CONFIG_PATH)
         mcp_cfgs, merge_warnings = merge_mcp_configs(mcp_cfgs, plugins.mcp_servers())
-        mcp_cfgs = extensions.filter_mcp_configs(mcp_cfgs)
+        # DREAM-109: sandboxed live Blender, bound to THIS session's workspace; the toggles below still apply.
+        from ..media import blender_live
+        live_cfgs, live_warnings = blender_live.managed_servers(self.workspace)
+        mcp_cfgs = extensions.filter_mcp_configs(live_cfgs + mcp_cfgs)
         mcp_tools, connect_warnings = await self._mcp.start(mcp_cfgs)
         extra_tools.extend(mcp_tools)
         built = registry.build(annotate=self._annotate_custom_tool,
@@ -230,7 +220,7 @@ class Engine:
         self._built_tools = built
         self._session_tools = {tool.name: tool for tool in built["tools"]}
         self.tool_warnings = (plugin_warnings + built["warnings"] + mcp_warnings
-                              + merge_warnings + connect_warnings)
+                              + merge_warnings + live_warnings + connect_warnings)
         # What the other loaders said about plugin parts belongs on /plugins,
         # where a person goes looking for it (Gate 12).
         # Provenance, not a text guess: the registry prefixes a plugin's tool
@@ -253,6 +243,54 @@ class Engine:
 
         if config.SEMANTIC_MEMORY:
             self._backfill_task = asyncio.create_task(self._backfill_embeddings())
+
+    def _open_memory(self, embedder: Any = None, reranker: Any = None) -> None:
+        """Open memory for this session, scoped to its project (DREAM-108): legacy items
+        are backed up before anything changes them and filed by evidence, then the store
+        reads and writes this workspace's project, and the session starts in it."""
+        from ..memory import migration
+        from ..memory import project as project_memory
+        from ..memory.tasks import TaskStore
+
+        backup, backup_error = None, None
+        try:
+            backup = migration.prepare(config.DB_PATH)
+        except Exception as e:  # no backup, no migration: legacy items stay hidden
+            backup_error = f"{type(e).__name__}: {e}"
+            self._log_stderr(f"memory backup failed, legacy memory stays unfiled: {backup_error}")
+        self.store = MemoryStore(config.DB_PATH, embedder=embedder, reranker=reranker)
+        self.imported_memories = longterm.import_markdown(self.store)
+        # Work that outlives the turn: THREADS.md is generated from it, so the
+        # wake-up that reads the file sees the store, never a stale hand edit.
+        self.tasks = TaskStore(self.store)
+        try:
+            # The hand-written file becomes tasks once, BEFORE the store
+            # regenerates it — otherwise the first boot would erase it.
+            n = self.tasks.import_threads()
+            if n:
+                self._log_stderr(f"imported {n} thread(s) from THREADS.md into the task store")
+        except Exception as e:
+            self._log_stderr(f"THREADS.md not imported: {e}")
+        if backup_error is None:
+            try:
+                self.memory_migration = migration.run(self.store, backup_path=backup)
+                result = self.memory_migration
+                if result.applied:
+                    unassigned = sum(d.project == project_memory.UNASSIGNED for d in result.decisions)
+                    self._log_stderr(
+                        f"memory filed by project: {len(result.decisions)} legacy item(s), {unassigned} "
+                        f"unassigned; report {result.report}; backup {result.backup}"
+                        + (f"; errors: {'; '.join(result.errors)}" if result.errors else ""))
+            except Exception as e:
+                self._log_stderr(f"memory migration failed, legacy memory stays unfiled: {e}")
+        project_memory.register(self.workspace)
+        self.store.project = self.project
+        self.store.start_session(self.session_id)
+        self.working = WorkingMemory(self.store, self.session_id)
+        try:
+            self.tasks.write_threads()
+        except Exception as e:
+            self._log_stderr(f"THREADS.md not written: {e}")
 
     def _system_prompt(self) -> str:
         """The system prompt for this Engine's current provider, model, profile and vision decision."""
@@ -1591,6 +1629,9 @@ class Engine:
     async def _consolidate(self) -> str | None:
         # Surface possibly-conflicting memories for adjudication. Each pair is asked
         # about once, ever — stable disagreements don't burn tokens every session.
+        # DREAM-108: consolidation stays in this session's project -- its conflicts, its
+        # stranded notes (the store is scoped to it by _open_memory), its episode.
+        # Another project's wait for that project's own dream.
         conflicts: list[list[dict[str, Any]]] = []
         try:
             conflicts = (await in_thread(self.store.find_conflicts))[
@@ -1621,8 +1662,9 @@ class Engine:
             "first — if a matching memory already exists, pass its existing slug to "
             "remember() to update it in place rather than creating a near-duplicate. "
             "Facts about THIS project (what exists, its conventions, decisions, what is left) "
-            "go to project memory with project_note() instead; global memory is for the user "
-            "and what carries across projects.",
+            "go to project memory with project_note() instead. remember() files under this "
+            "project; pass scope='user' only for a general fact or preference the user stated "
+            "about themselves.",
             "3. Adjust salience where this session proved it wrong: if an existing "
             "memory was central to the work, re-remember() it (same slug, same body) "
             "with higher salience; if one kept surfacing without being useful, lower "
@@ -1840,6 +1882,7 @@ class Engine:
                     tags="session",
                     source_session=self.session_id,
                     mem_type="project",
+                    project=self.project,
                 )
                 await in_thread(longterm.write_markdown, mem)
             except Exception as e:

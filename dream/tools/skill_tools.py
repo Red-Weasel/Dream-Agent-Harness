@@ -11,6 +11,7 @@ from typing import Any
 from claude_agent_sdk import tool
 
 from ..memory import longterm, skills
+from ..memory.store import ScopeError
 from .context import ctx, err, in_thread, ok
 
 
@@ -79,17 +80,23 @@ async def skill_save(args: dict[str, Any]) -> dict[str, Any]:
     steps = _lines(args.get("steps"))
     if not steps:
         return err("A skill needs at least one step — what would future-you actually do?")
-    mem = await in_thread(
-        skills.save_skill,
-        c.store,
-        title=args["title"],
-        when_to_use=args.get("when_to_use", ""),
-        steps=steps,
-        pitfalls=_lines(args.get("pitfalls")),
-        verification=args.get("verification", ""),
-        slug=args.get("slug") or None,
-        source_session=c.session_id,
-    )
+    try:
+        mem = await in_thread(
+            skills.save_skill,
+            c.store,
+            title=args["title"],
+            when_to_use=args.get("when_to_use", ""),
+            steps=steps,
+            pitfalls=_lines(args.get("pitfalls")),
+            verification=args.get("verification", ""),
+            slug=args.get("slug") or None,
+            source_session=c.session_id,
+        )
+    except ScopeError as e:
+        # A slug another project owns is that project's skill (DREAM-108): never overwritten from here.
+        where = "is unassigned" if e.owner == "unassigned" else f"belongs to project {e.owner}"
+        return err(f"skill_save: skill {args.get('slug')!r} {where}, not this project. "
+                   "Leave out slug to save this one here.")
     await in_thread(longterm.write_markdown, mem)
     return ok(f"Saved skill '{mem['title']}' (slug: {mem['slug']}).")
 

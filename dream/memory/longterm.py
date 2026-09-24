@@ -14,6 +14,12 @@ A memory carries in its frontmatter:
 - ``kind``        semantic | procedural | episodic — kept beside ``type`` because
                   time-scoped recall filters on it; dropping it would lose meaning
 - ``tags`` / ``salience`` / ``created_at`` / ``updated_at``
+- ``project``     whose memory it is (DREAM-108): a workspace key, ``user`` for a
+                  user-wide memory, ``unassigned`` for legacy data nobody could place.
+                  A file without the line is legacy until the one-time migration has
+                  run; after it, a file the owner writes by hand without the line
+                  joins the project of the session that starts next (``adopt_orphans``),
+                  and a file an older Dream rewrote without it keeps its row's project.
 
 ``memory/MEMORY.md`` is regenerated from the files on every write: one line per
 memory, and nothing else. It is an index, never content.
@@ -28,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import config
+from .project import UNASSIGNED, USER, known as known_projects, resolve as resolve_project, valid_owner
 from .store import MEM_TYPES, MemoryStore, default_type, slugify
 
 # --- provenance ---------------------------------------------------------------------
@@ -113,6 +120,7 @@ def _render(mem: dict[str, Any]) -> str:
         f"salience: {mem.get('salience', 1.0)}",
         f"created_at: {mem.get('created_at', '')}",
         f"updated_at: {mem.get('updated_at', '')}",
+        *([f"project: {owner}"] if (owner := valid_owner(mem.get("project"))) else []),
         "---",
         "",
         str(mem["body"]).rstrip(),
@@ -124,7 +132,8 @@ def _render(mem: dict[str, Any]) -> str:
 def parse_markdown(text: str) -> tuple[dict[str, str], str]:
     """Split a memory file into (frontmatter dict, body). Tolerant of files without
     frontmatter. Fences must be full ``---`` lines so a ``---`` inside the body (a
-    horizontal rule, say) can't truncate content."""
+    horizontal rule, say) can't truncate content. A leading byte-order mark is not content."""
+    text = text.removeprefix("﻿")
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return {}, text.strip()
@@ -218,6 +227,53 @@ def write_markdown(mem: dict[str, Any], *, index: bool = True) -> Path:
     return p
 
 
+def set_project_line(path: Path, owner: str) -> None:
+    """Give a memory file its project (DREAM-108) by editing that one frontmatter line
+    and nothing else, so a hand-added field or a hand-formatted body survives a move
+    or the migration byte for byte. A file without frontmatter gets a minimal one,
+    which reads back as the same memory."""
+    owner = valid_owner(owner)
+    if not owner:
+        raise ValueError("a memory's project must be a project key, 'user' or 'unassigned'")
+    with open(path, encoding="utf-8", newline="") as fh:   # newline="": every line keeps its own ending
+        text = fh.read()
+    # The lines exactly as read_file sees them (universal newlines, then splitlines), each
+    # with its ending, so this edit and parse_markdown can never disagree on the fences.
+    # A leading byte-order mark stays where it is; parse_markdown skips it too.
+    bom = "﻿" if text.startswith("﻿") else ""
+    lines = text[len(bom):].splitlines(keepends=True)
+
+    def ending(line: str) -> str:
+        return line[len(line.splitlines()[0]):] if line.splitlines() else line
+
+    new = None
+    if lines and lines[0].strip() == "---":
+        end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+        if end is not None:
+            fence = [i for i in range(1, end)
+                     if ":" in lines[i] and lines[i].partition(":")[0].strip() == "project"]
+            for i in fence:                       # every project line, so the last one agrees too
+                lines[i] = f"project: {owner}{ending(lines[i]) or ending(lines[end - 1]) or chr(10)}"
+            if not fence:
+                lines.insert(end, f"project: {owner}{ending(lines[end - 1]) or chr(10)}")
+            new = bom + "".join(lines)
+    if new is None:
+        nl = ending(lines[0]) if lines else "\n"
+        nl = nl or "\n"
+        new = f"{bom}---{nl}project: {owner}{nl}---{nl}{nl}{text[len(bom):]}"
+    # Checked before it lands: as Dream reads the file back, only the project may differ.
+    fm, body = parse_markdown(_as_read(text))
+    if parse_markdown(_as_read(new)) != ({**fm, "project": owner}, body):
+        raise ValueError(f"{path.name}: its project line cannot be written without changing the rest "
+                         "of the memory as Dream reads it; left unchanged")
+    _atomic_write(path, new)
+
+
+def _as_read(raw: str) -> str:
+    """A file's text as read_file sees it: universal newlines."""
+    return raw.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def delete_markdown(slug: str, *, index: bool = True) -> None:
     name = slugify(str(slug or ""))  # same reason as path_for: never unlink outside
     if not name or is_reserved(f"{name}.md"):
@@ -253,8 +309,43 @@ def memory_files() -> list[Path]:
         return []
     return sorted(
         f for f in config.MEMORY_DIR.glob("*.md")
-        if f.is_file() and not is_reserved(f.name)
+        if f.is_file() and not is_reserved(f.name) and _utf8_name(f)
     )
+
+
+_bad_names: set[str] = set()
+
+
+def _utf8_name(f: Path) -> bool:
+    """A name that is not valid UTF-8 cannot go into MEMORY.md or a row: such a file is left
+    alone and named once in the boot log (fix list #73: it used to stop every boot)."""
+    try:
+        f.name.encode("utf-8")
+        return True
+    except UnicodeEncodeError:
+        if f.name not in _bad_names:
+            _bad_names.add(f.name)
+            boot_log(f"{f.name.encode('utf-8', 'backslashreplace').decode()}: its file name is not valid "
+                     "UTF-8, so it is not read as a memory; rename it to use it")
+        return False
+
+
+def memory_file_map() -> dict[str, Path]:
+    """Each memory's file by the memory's name, the slug of the file's stem: a hand-written
+    file's name need not be a slug ('My Notes.md' is my-notes). When two files share a slug,
+    the one named exactly wins, else the first by name."""
+    files: dict[str, Path] = {}
+    for f in memory_files():
+        slug = slugify(f.stem)
+        if slug not in files or f.stem == slug:
+            files[slug] = f
+    return files
+
+
+def _why_not(exc: Exception) -> str:
+    if isinstance(exc, UnicodeDecodeError):
+        return "the file is not UTF-8 (save it as UTF-8 so the memory tools see its project)"
+    return str(exc)
 
 
 def is_reserved(fname: str) -> bool:
@@ -297,18 +388,40 @@ def read_file(path: Path, *, allow_reserved: bool = False) -> dict[str, Any] | N
         "description": fm.get("description", ""), "body": body,
         "tags": fm.get("tags", ""), "salience": salience,
         "created_at": fm.get("created_at", ""), "updated_at": fm.get("updated_at", ""),
+        "project": valid_owner(fm.get("project")),
+        # The line as written, None when the file has none: "no line" (legacy, or a file
+        # written by hand) is not the same as a line naming something unusable.
+        "project_line": fm["project"].strip() if "project" in fm else None,
     }
 
 
-def write_index() -> Path:
-    """Regenerate ``memory/MEMORY.md`` from the files. One line per memory, newest
-    first — a pointer, never the content."""
+def _indexed() -> list[tuple[dict[str, Any], str]]:
+    """Every memory file with its name, newest first -- the index's order."""
     rows = []
     for f in memory_files():
         mem = read_file(f)
         if mem:
             rows.append((mem.get("updated_at") or mem.get("created_at") or "", mem, f.name))
     rows.sort(key=lambda r: r[0], reverse=True)
+    return [(mem, fname) for _, mem, fname in rows]
+
+
+def _index_line(mem: dict[str, Any], fname: str) -> str:
+    hook = describe(mem)
+    title = str(mem["title"]).replace("[", "\\[").replace("]", "\\]")
+    return f"- [{title}]({fname})" + (f" — {hook}" if hook else "")
+
+
+def _owner_label(owner: str) -> str:
+    return {USER: " [user-wide]", UNASSIGNED: " [unassigned]"}.get(owner, f" [project: {owner}]")
+
+
+def write_index() -> Path:
+    """Regenerate ``memory/MEMORY.md`` from the files. One line per memory, newest
+    first — a pointer, never the content. The file covers every project, so each
+    line carries its memory's project (DREAM-108); the wake-up loads only its own
+    project's lines (``index_lines(scope=...)``)."""
+    rows = _indexed()
     lines = [
         "# Memory Index",
         "",
@@ -316,18 +429,26 @@ def write_index() -> Path:
         "memory files themselves, not this index.",
         "",
     ]
-    for _, mem, fname in rows:
-        hook = describe(mem)
-        title = str(mem["title"]).replace("[", "\\[").replace("]", "\\]")
-        lines.append(f"- [{title}]({fname})" + (f" — {hook}" if hook else ""))
+    for mem, fname in rows:
+        owner = mem.get("project") or ""
+        lines.append(_index_line(mem, fname) + (_owner_label(owner) if owner else ""))
     if not rows:
         lines.append("_(no memories yet)_")
     _atomic_write(config.MEMORY_INDEX_FILE, "\n".join(lines) + "\n")
     return config.MEMORY_INDEX_FILE
 
 
-def index_lines(limit: int = 40) -> list[str]:
-    """The index as the wake context loads it: the same one-liners, bounded."""
+def index_lines(limit: int = 40, scope: tuple[str, ...] | None = None) -> list[str]:
+    """The index as the wake context loads it: the same one-liners, bounded. With a
+    ``scope`` (DREAM-108) only the memories of those projects, read from the files,
+    user-wide ones labelled; without one, MEMORY.md as it stands."""
+    if scope is not None:
+        out = []
+        for mem, fname in _indexed():
+            owner = mem.get("project") or ""
+            if owner in scope:
+                out.append(_index_line(mem, fname) + (" [user-wide]" if owner == USER else ""))
+        return out[:limit]
     if not config.MEMORY_INDEX_FILE.exists():
         return []
     out = [
@@ -402,7 +523,29 @@ def _same(row: dict[str, Any], mem: dict[str, Any]) -> bool:
         return False
     if describe(row) != describe(mem):
         return False
+    if (mem.get("project") or "") != (row.get("project") or ""):
+        return False  # the file names the project; a hand edit of that line moves it
     return not mem["created_at"] or mem["created_at"] == row.get("created_at", "")
+
+
+def boot_log(line: str) -> None:
+    """A line in Dream's boot log (var/logs/cli.log, where the Engine writes its own), so
+    what the file sync decides about a memory's project is never silent (DREAM-108)."""
+    try:
+        config.LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with (config.LOG_DIR / "cli.log").open("a", encoding="utf-8") as fh:
+            fh.write(f"memory: {line}\n")
+    except OSError:
+        pass
+
+
+def known_keys(store: MemoryStore) -> set[str]:
+    """Projects Dream knows: a recorded workspace (memory/projects/<key>/.workspace) or a
+    session that ran in it, plus 'user' and 'unassigned'."""
+    keys = {USER, UNASSIGNED, *known_projects()}
+    with store._lock:
+        keys.update(r[0] for r in store._conn.execute("SELECT DISTINCT project FROM sessions") if r[0])
+    return keys
 
 
 def sync(store: MemoryStore) -> dict[str, int]:
@@ -412,39 +555,137 @@ def sync(store: MemoryStore) -> dict[str, int]:
     the row is rebuilt from the file. A row whose file is gone is dropped. A file
     with no row is imported. Nothing here needs a tool call, which is the point:
     the user edits a memory in their editor and the next boot knows it.
+
+    The project line (DREAM-108) wins too, with one exception: a file WITHOUT the line
+    whose row names a project was rewritten by an older Dream, so the row keeps its
+    project and the line is written back. A file without the line and without a
+    project row is legacy before the one-time migration (it files it by evidence) and,
+    after it, one the owner wrote by hand: the next session to start adopts it
+    (``adopt_orphans``). A line that is not a known key is resolved the way the memory
+    tools resolve a project name (a folder name, a path, 'global'): one match is written
+    back as the project's key. A line that matches nothing, or several, is kept when it
+    is shaped like a key and otherwise leaves the memory hidden; either way it is named
+    in the boot log, and it never stops the boot.
     """
     counts = {"moved": migrate_layout(), "imported": 0, "updated": 0, "dropped": 0}
     seen: set[str] = set()
+    known = None
     for f in memory_files():
         mem = read_file(f)
         if mem is None:
             continue
         seen.add(mem["name"])
         row = store.get_memory(mem["name"])
-        if row is not None and _same(row, mem):
-            continue  # the file says what the row says: nothing changed
-        try:
-            store.upsert_memory(
-                kind=mem["kind"], title=mem["title"], body=mem["body"], slug=mem["name"],
-                tags=mem["tags"], salience=mem["salience"],
-                description=mem["description"],
-                mem_type=mem["mem_type"] or default_type(mem["kind"], mem["title"], mem["body"]),
-            )
-            # The creation time is what time-scoped recall filters on; the file's
-            # value is the true one.
-            if mem["created_at"]:
-                store.set_created_at(mem["name"], mem["created_at"])
-        except Exception:
-            continue
-        counts["updated" if row is not None else "imported"] += 1
+        heal = False
+        if mem["project_line"] is None:
+            if row is not None and row.get("project"):
+                mem["project"], heal = row["project"], True
+        else:
+            known = known if known is not None else known_keys(store)
+            if mem["project"] not in known:
+                _resolve_line(f, mem, known)
+        if row is None or not _same(row, mem):
+            try:
+                store.upsert_memory(
+                    kind=mem["kind"], title=mem["title"], body=mem["body"], slug=mem["name"],
+                    tags=mem["tags"], salience=mem["salience"],
+                    description=mem["description"],
+                    mem_type=mem["mem_type"] or default_type(mem["kind"], mem["title"], mem["body"]),
+                    # Files win, the project line too (DREAM-108): never the session's
+                    # project, which would claim every legacy file for this workspace.
+                    project=mem.get("project") or "", reassign=True,
+                )
+                # The creation time is what time-scoped recall filters on; the file's
+                # value is the true one.
+                if mem["created_at"]:
+                    store.set_created_at(mem["name"], mem["created_at"])
+            except Exception:
+                continue
+            counts["updated" if row is not None else "imported"] += 1
+        if heal:
+            try:
+                set_project_line(f, mem["project"])
+                boot_log(f"{f.name} had lost its project line (an older Dream rewrote it); "
+                         f"restored {mem['project']!r} from the database")
+            except (OSError, ValueError):
+                pass
 
-    for row in store.all_memories():
+    for row in store.all_memories(scope=None):
         if row["slug"] not in seen:
             store.delete_memory(row["slug"])
             counts["dropped"] += 1
 
     write_index()
     return counts
+
+
+def _resolve_line(f: Path, mem: dict[str, Any], known: set[str]) -> None:
+    """A project line naming no known key (DREAM-108): a folder name, a path, 'global' ... One
+    match: the memory takes that key and the line is rewritten to it. No match, or several: a
+    line shaped like a key is kept as written, anything else leaves the memory hidden. The boot
+    log says which; a hand-written line never costs the boot."""
+    line = mem["project_line"]
+    try:
+        key = resolve_project(line, extra=known)
+    except (ValueError, RuntimeError, OSError) as exc:
+        if mem["project"]:
+            boot_log(f"{f.name} names project {mem['project']!r}, which is not a project Dream knows "
+                     f"({exc}); kept there (memory_list(all_projects=true) shows it)")
+        else:
+            boot_log(f"{f.name}: its project line {line!r} is not a project key ({exc}); "
+                     "the memory stays hidden until the line names one (all_projects=true lists it)")
+        return
+    mem["project"] = key
+    try:
+        set_project_line(f, key)
+        note = "the line now says so"
+    except (OSError, ValueError) as exc:
+        note = f"the line was not rewritten: {_why_not(exc)}"
+    boot_log(f"{f.name}: its project line {line!r} names project {key!r}; {note}")
+
+
+def adopt_orphans(store: MemoryStore, owner: str) -> list[str]:
+    """File the memories with no project line and no project in their row: one an older
+    Dream wrote joins the project of the session that wrote it; one the owner wrote by
+    hand joins ``owner``, the project of the session that is starting. The line is
+    written into each file (DREAM-108). Only after the one-time migration (before it,
+    such a file is legacy and the migration files it by evidence). Two starts at once:
+    the row update is conditional, so one of them adopts each file."""
+    if not valid_owner(owner) or owner in (USER, UNASSIGNED) or not store.scope_migrated():
+        return []
+    with store._lock:
+        rows = store._conn.execute(
+            "SELECT m.slug, COALESCE(s.project, '') FROM memories m "
+            "LEFT JOIN sessions s ON s.id = m.source_session WHERE m.project=''").fetchall()
+    files = memory_file_map()
+    adopted = []
+    for slug, source in rows:
+        target = source if valid_owner(source) and source not in (USER, UNASSIGNED) else owner
+        path = files.get(slug)
+        mem = read_file(path) if path is not None else None
+        if mem is None or mem["project_line"] is not None:
+            continue
+        with store._lock:
+            cur = store._conn.execute(
+                "UPDATE memories SET project=? WHERE slug=? AND project=''", (target, slug))
+            store._conn.commit()
+        if cur.rowcount != 1:
+            continue
+        try:
+            set_project_line(path, target)
+        except (OSError, ValueError) as exc:     # ValueError: a file that is not UTF-8
+            boot_log(f"{path.name}: filed under {target!r}, but its project line was not written: "
+                     f"{_why_not(exc)}")
+        adopted.append((slug, target))
+    if adopted:
+        try:
+            write_index()
+        except OSError:
+            pass
+        boot_log(f"{len(adopted)} memory file(s) without a project line filed under the project of the "
+                 "session that wrote them, or else of the session that started: "
+                 + ", ".join(f"{slug} -> {target}" for slug, target in adopted))
+    return [slug for slug, _ in adopted]
 
 
 def import_markdown(store: MemoryStore) -> int:

@@ -19,6 +19,9 @@ from dream.tools.memory_file_tools import (
 @pytest.fixture
 def store(tmp_path):
     s = MemoryStore(tmp_path / "m.db")
+    # The Engine scopes its store to the workspace's project (DREAM-108); so does this one.
+    from dream.memory.project import project_key
+    s.project = project_key(tmp_path)
     set_context(ToolContext(store=s, working=None, browser=None,  # type: ignore[arg-type]
                             session_id="sess", workspace=tmp_path, emit=None))
     yield s

@@ -13,6 +13,9 @@ from dream.tools.memory_tools import recall
 @pytest.fixture
 def store(tmp_path):
     memory_store = MemoryStore(tmp_path / "memory.db")
+    # The Engine scopes its store to the workspace's project (DREAM-108); so does this one.
+    from dream.memory.project import project_key
+    memory_store.project = project_key(tmp_path)
     set_context(ToolContext(
         store=memory_store,
         working=None,  # type: ignore[arg-type]

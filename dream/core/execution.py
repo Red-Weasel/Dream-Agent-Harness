@@ -21,6 +21,7 @@ import ctypes
 import errno
 import math
 import os
+import re
 import signal
 import socket
 import stat
@@ -121,9 +122,11 @@ class ExecutionScope:
             raise ExecutionRefused("execution scope expired")
         if not self.workspace.is_dir():
             raise ExecutionRefused("execution workspace does not exist")
-        # Mounting a host root or credential/runtime socket tree defeats isolation.
+        # Mounting a host root or credential/runtime socket tree defeats isolation. /tmp/.X11-unix
+        # also holds the host display's sockets, and the live-Blender sandbox mounts its private
+        # display there (DREAM-109).
         forbidden = tuple(Path(p) for p in ("/proc", "/sys", "/dev", "/run",
-                                            "/usr", "/bin", "/sbin", "/lib", "/lib64"))
+                                            "/usr", "/bin", "/sbin", "/lib", "/lib64", "/tmp/.X11-unix"))
         roots = (self.workspace, *self.read_roots, *self.target_roots)
         for root in roots:
             if root in {Path("/"), Path("/home"), Path("/tmp"), Path("/var"), Path("/etc")} or root == Path.home().resolve():
@@ -249,6 +252,119 @@ def _bwrap_argv(scope: ExecutionScope, executable: str, command: Sequence[str], 
     return argv
 
 
+_HOST_X11_DIR = Path("/tmp/.X11-unix")
+
+
+def _system_binds() -> list[str]:
+    """The read-only system trees and /etc files run_bash's profile mounts."""
+    argv: list[str] = []
+    for raw in ("/usr", "/bin", "/sbin", "/lib", "/lib64"):
+        if Path(raw).exists():
+            argv += ["--ro-bind", raw, raw]
+    for raw in ("/etc/ld.so.cache", "/etc/localtime", "/etc/passwd", "/etc/group"):
+        if Path(raw).is_file():
+            argv += ["--ro-bind", raw, raw]
+    alternatives = Path("/etc/alternatives")
+    if alternatives.exists() or alternatives.is_symlink():
+        if not _trusted_runtime_directory(alternatives):
+            raise ExecutionRefused("untrusted runtime alternatives directory")
+        argv += ["--ro-bind", str(alternatives), str(alternatives)]
+    return argv
+
+
+def _private_display_parts(x11_dir: Path, xauth: Path) -> None:
+    """The session's own socket folder and cookie file: never the host's /tmp/.X11-unix."""
+    x11_dir, xauth = Path(x11_dir), Path(xauth)
+    if (not x11_dir.is_absolute() or x11_dir.is_symlink() or not x11_dir.is_dir()
+            or x11_dir.resolve() != x11_dir):
+        raise ExecutionRefused("the nested display's socket folder must be a real, private directory")
+    host = _HOST_X11_DIR.resolve()
+    if x11_dir == host or x11_dir.is_relative_to(host) or host.is_relative_to(x11_dir):
+        raise ExecutionRefused("the host's /tmp/.X11-unix is never mounted for live Blender")
+    if not xauth.is_absolute() or xauth.is_symlink() or not xauth.is_file() or xauth.resolve() != xauth:
+        raise ExecutionRefused("the nested display's cookie must be a regular file")
+
+
+def blender_live_argv(scope: ExecutionScope, executable: str, command: Sequence[str], *,
+                      seccomp_fd: int, mount_fds: Mapping[Path, int], x11_dir: Path, xauth: Path) -> list[str]:
+    """DREAM-109's live-Blender profile: run_bash's boundary plus Blender's own nested display.
+
+    Pair it with ``_socket_filter(inet=True, unix=True)``. Blender draws into a nested X
+    server (Xephyr, ``nested_display_argv``) that Dream starts outside this sandbox; the
+    host's display is never mounted. The openings beyond run_bash's profile:
+    - the session's private socket folder at /tmp/.X11-unix, read-only: it holds only the
+      nested server's socket, never the host's display (not X0, not gdm's);
+    - the session's cookie for that server at /tmp/xauth, read-only;
+    - AF_UNIX sockets, for X11: they reach only socket files mounted here (the nested one,
+      plus any socket file inside the workspace) and abstract sockets of this sandbox's
+      own network namespace. The host display's abstract socket is in another namespace;
+    - AF_INET/AF_INET6 on the private loopback only (no --share-net): the Blender MCP
+      bridge and the add-on talk over 127.0.0.1 inside this sandbox;
+    - one inherited descriptor: the control socket the bridge uses to ask the launcher for
+      the nested display (open, close, window id) and nothing else.
+    Not opened: the host display and its X authority, the network, the home folder, /run
+    (D-Bus), /etc beyond run_bash's files, the host's /tmp, SysV IPC and every device
+    (the nested server offers no DRI3, so Blender renders GL with llvmpipe on the CPU).
+    """
+    scope.validate()
+    if scope.red_team or scope.target_roots or scope.network:
+        raise ExecutionRefused("live Blender runs only in an ordinary workspace scope without network")
+    _private_display_parts(x11_dir, xauth)
+    argv = [executable, "--unshare-user", "--unshare-pid", "--unshare-net", "--unshare-ipc",
+            "--unshare-uts", "--disable-userns", "--die-with-parent", "--new-session",
+            "--cap-drop", "ALL", "--seccomp", str(seccomp_fd), "--clearenv", *_system_binds(),
+            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--dir", "/tmp/home",
+            "--ro-bind", str(x11_dir), "/tmp/.X11-unix", "--ro-bind", str(xauth), "/tmp/xauth"]
+    # The workspace, read roots and .git exactly as run_bash mounts them.
+    for root in scope.read_roots:
+        if scope.workspace.is_relative_to(root):
+            argv += ["--ro-bind-fd", str(mount_fds[root]), str(root)]
+    argv += ["--bind-fd", str(mount_fds[scope.workspace]), str(scope.workspace)]
+    for root in scope.read_roots:
+        if not scope.workspace.is_relative_to(root):
+            argv += ["--ro-bind-fd", str(mount_fds[root]), str(root)]
+    git = scope.workspace / ".git"
+    if git in mount_fds:
+        argv += ["--ro-bind-fd", str(mount_fds[git]), str(git)]
+    argv += ["--remount-ro", "/"]
+    for key, value in (("PATH", "/usr/bin:/bin"), ("HOME", "/tmp/home"), ("TMPDIR", "/tmp"),
+                       ("LANG", "C.UTF-8"), ("XAUTHORITY", "/tmp/xauth"), ("PWD", str(scope.workspace))):
+        argv += ["--setenv", key, value]
+    return argv + ["--chdir", str(scope.workspace), "--", *command]
+
+
+def nested_display_argv(executable: str, program: str, *, x11_dir: Path, xauth: Path, host_display: str,
+                        number: int, screen: tuple[int, int], title: str) -> list[str]:
+    """The nested X server (Xephyr) that live Blender draws into, in its own bubblewrap.
+
+    Its /tmp/.X11-unix is the session's private socket folder and its /tmp is private, so it
+    can neither create nor remove anything in the host's /tmp/.X11-unix or its lock files,
+    whatever display number it runs as (DREAM-109 incident, 2026-09-24 13:18: an unconfined
+    Xephyr replaced and then deleted the host's X0 socket). It shares the host's network
+    namespace only to reach the host display through its abstract socket, the only way in
+    from here: the host's socket folder is not mounted. ``-nolisten tcp -nolisten local``
+    leave it no socket but the one in the private folder, and ``-auth`` makes every client
+    present the session's cookie. Its clients get no MIT-SHM (it runs in the host's SysV IPC
+    namespace, so a client's segment id could name one of the owner's segments there), no
+    XVideo (which Xephyr forwards to the host display) and no indirect GLX.
+    """
+    _private_display_parts(x11_dir, xauth)
+    if not re.fullmatch(r":[0-9]{1,4}(\.[0-9]{1,2})?", host_display):
+        raise ExecutionRefused("the host display must be a local X11 display such as :0")
+    width, height = screen
+    if not (0 < number < 10000 and 0 < width <= 8192 and 0 < height <= 8192):
+        raise ExecutionRefused("invalid nested display number or size")
+    return [executable, "--unshare-user", "--unshare-pid", "--unshare-uts", "--disable-userns",
+            "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv", *_system_binds(),
+            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+            "--bind", str(x11_dir), "/tmp/.X11-unix", "--ro-bind", str(xauth), "/tmp/xauth",
+            "--remount-ro", "/", "--setenv", "PATH", "/usr/bin:/bin", "--setenv", "HOME", "/tmp",
+            "--setenv", "DISPLAY", host_display, "--",
+            program, f":{number}", "-auth", "/tmp/xauth", "-nolisten", "tcp", "-nolisten", "local",
+            "-extension", "MIT-SHM", "-noxv", "-iglx",
+            "-screen", f"{width}x{height}", "-no-host-grab", "-title", title]
+
+
 @contextmanager
 def _mount_descriptors(scope: ExecutionScope) -> Iterator[dict[Path, int]]:
     """Pin sources before exec so another tool cannot substitute a mount symlink."""
@@ -279,14 +395,15 @@ def _mount_descriptors(scope: ExecutionScope) -> Iterator[dict[Path, int]]:
 
 
 @contextmanager
-def _socket_filter(inet: bool = False) -> Iterator[int]:
+def _socket_filter(inet: bool = False, unix: bool = False) -> Iterator[int]:
     """Block socket creation, including host Unix sockets in a bound workspace.
 
     Network namespaces alone do not stop filesystem Unix sockets. io_uring can
     create sockets without the socket syscall, so that API is disabled too.
     Private socketpair IPC remains available. libseccomp rejects alternate ABIs.
     inet admits AF_INET/AF_INET6 only: inside the sandbox's own network
-    namespace they reach its loopback and nothing else.
+    namespace they reach its loopback and nothing else. unix (the live-Blender
+    profile only, for X11) also admits AF_UNIX; see blender_live_argv.
     """
     try:
         # Avoid find_library's fallback to executing PATH-selected compiler tools.
@@ -308,10 +425,16 @@ def _socket_filter(inet: bool = False) -> Iterator[int]:
             number = lib.seccomp_syscall_resolve_name(syscall)
             if number < 0:
                 raise ExecutionRefused("could not enforce the required socket filter")
-            if syscall == b"socket" and inet:
+            if syscall == b"socket" and inet and not unix:
                 # Refuse every domain but 2 and 10 (the whole 64-bit register is
                 # compared, so high bits cannot smuggle AF_UNIX past GT 10).
                 rules = [(_SCMP_CMP_LT, 2), (_SCMP_CMP_GT, 10), *((_SCMP_CMP_EQ, d) for d in range(3, 10))]
+            elif syscall == b"socket" and unix:
+                # AF_UNIX (1), plus AF_INET (2) and AF_INET6 (10) when inet; the same
+                # whole-register comparisons refuse everything else, AF_NETLINK included.
+                allowed = (1, 2, 10) if inet else (1,)
+                rules = [(_SCMP_CMP_LT, allowed[0]), (_SCMP_CMP_GT, allowed[-1]),
+                         *((_SCMP_CMP_EQ, d) for d in range(allowed[0] + 1, allowed[-1]) if d not in allowed)]
             else:
                 rules = [None]
             for rule in rules:

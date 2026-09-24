@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from .store import MemoryStore
+from .store import MemoryStore, ScopeError
 
 # The progressive-disclosure budget: N skills cost N short lines, nothing more.
 INDEX_LIMIT = 30
@@ -53,6 +53,13 @@ class Skill:
 
 def _today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
+
+
+def _in_scope(store: MemoryStore, mem: dict[str, Any]) -> bool:
+    """A skill is a procedural memory, so it belongs to a project too (DREAM-108): this
+    store's project and user-wide skills are its own; another project's are not."""
+    scope = store.default_scope()
+    return scope is None or (mem.get("project") or "") in scope
 
 
 def _clean(items: Iterable[str] | None) -> list[str]:
@@ -192,6 +199,8 @@ def patch_skill(
     mem = store.get_memory(slug)
     if mem is None:
         return None
+    if not _in_scope(store, mem):
+        raise ScopeError(f"skill {slug!r}", mem.get("project") or "")
     if mem["kind"] != "procedural":
         raise ValueError(f"'{slug}' is a {mem['kind']} memory, not a skill.")
     skill = parse_skill(slug, title or mem["title"], mem["body"])
@@ -220,12 +229,15 @@ def _one_line(text: str, width: int) -> str:
     return line if len(line) <= width else line[: width - 1].rstrip() + "…"
 
 
-def index_lines(store: MemoryStore, limit: int = INDEX_LIMIT) -> list[str]:
+def index_lines(store: MemoryStore, limit: int = INDEX_LIMIT, scope: Any = None) -> list[str]:
     """One bounded line per skill — the tier that sits in context. Most recently
     updated first, so the cut at ``limit`` drops the coldest skills. A skill with no
-    when-to-use falls back to its title rather than showing a stretch of its body."""
+    when-to-use falls back to its title rather than showing a stretch of its body.
+    Only this store's project's skills and user-wide ones, or ``scope``'s (DREAM-108)."""
     lines: list[str] = []
-    for mem in store.all_memories(kind="procedural")[:limit]:
+    mems = (store.all_memories(kind="procedural") if scope is None
+            else store.all_memories(kind="procedural", scope=scope))
+    for mem in mems[:limit]:
         skill = parse_skill(mem["slug"], mem["title"], mem["body"])
         desc = skill.when_to_use.strip() or mem["title"]
         lines.append(_one_line(f"{mem['slug']} — {desc}", INDEX_LINE_CHARS))
@@ -236,6 +248,6 @@ def load_skill(store: MemoryStore, slug: str) -> str | None:
     """The full body, on demand. Raw, not re-rendered: whatever a hand-edit added
     is part of the skill and should reach the reader."""
     mem = store.get_memory(slug)
-    if mem is None or mem["kind"] != "procedural":
+    if mem is None or mem["kind"] != "procedural" or not _in_scope(store, mem):
         return None
     return mem["body"]

@@ -122,6 +122,7 @@ async def task_engine(tmp_path):
                    base_url='https://fixture.invalid/v1'), model=model, workspace=workspace,
                    can_use_tool=permission, mode_getter=lambda: 'auto')
         e.store = MemoryStore(config.DATA_DIR / f'{e.session_id}.db')
+        e.store.project = e.project  # as Engine._open_memory scopes it (DREAM-108)
         engines.append(e)
         e.store.start_session(e.session_id)
         e.working = WorkingMemory(e.store, e.session_id)

@@ -1,7 +1,7 @@
 {
   "format": "dream-skill/v1",
   "name": "blender-animation",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "portable": true,
   "capabilities": [
     "media_read",

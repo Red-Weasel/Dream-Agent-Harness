@@ -11,10 +11,12 @@ Skill loading alone does not establish improved task performance.
 1. Inspect workspace `.blend` files, scripts, assets, frames and video. Identify
    the deliverable, authoritative revision, fps, frame range and dimensions.
    Preserve source in a new version or authorized working copy.
-2. Use inspected Blender Python through an available shell such as `run_bash`
-   for reproducible edits; reuse the authoritative script. Use the GUI when
-   requested or needed for interactive state, only with actual desktop controls.
-   `media_create` opening a `.blend` supplies neither GUI controls nor a render.
+2. Prefer [live Blender](references/live.md) when `blender__*` tools are listed:
+   MCP for scene and code, screenshots or computer use to look, the owner
+   steering in chat. Else run inspected Blender Python via `run_bash`;
+   reuse the authoritative script. Use the GUI when requested or needed for
+   interactive state, only with actual desktop controls. `media_create` opening
+   a `.blend` supplies neither GUI controls nor a render.
 3. Read [runtime qualification](references/runtime.md) before choosing a renderer
    or launching Blender. Check resources, version, engine and accessible device;
    only an actual render qualifies that pipeline. Do not assume NVIDIA or force

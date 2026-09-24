@@ -9,13 +9,83 @@ from claude_agent_sdk import tool
 
 from .. import config
 from ..memory import longterm
+from ..memory import project as projects
 from ..memory.store import (
     MAX_ALTERNATIVE_QUERIES,
     MAX_RECALL_QUERY_CHARS,
     MAX_RECALL_RESULTS,
     MemoryIndexError,
+    ScopeError,
+    slugify,
 )
 from .context import ctx, err, in_thread, ok
+
+# --- project scope (DREAM-108) ----------------------------------------------------------------
+# Memory belongs to the project of the workspace it was written in. Reads see this
+# project's items and user-wide ones; another project's come only when named, labelled.
+
+PROJECT_ARG = {"type": "string", "description": "Another project (folder name or key): its items, labelled."}
+ALL_PROJECTS_ARG = {"type": "boolean", "description": "Every project's items, unassigned included, labelled."}
+SCOPE_ARG = {"type": "string", "description": "'user' only for a general fact or preference the user "
+             "stated about themselves (shown in every project). Default: this project."}
+FROM_PROJECT_ARG = {"type": "string", "description": "Where it is now; required when that is another project."}
+
+
+def here() -> str:
+    """This session's project key: its workspace's."""
+    return projects.project_key(ctx().workspace)
+
+
+def resolve_project(name: Any) -> str:
+    """The key the model means (folder name, key, 'user', 'unassigned'); ValueError otherwise."""
+    store = ctx().store
+    return projects.resolve(name, store.known_owners() if store is not None else ())
+
+
+def flag(value: Any) -> bool:
+    return value if isinstance(value, bool) else str(value or "").strip().lower() in ("true", "yes", "1")
+
+
+def read_scope(args: dict[str, Any]) -> tuple[tuple[str, ...] | None, str, bool]:
+    """(scope, this project, cross) for a read: this project and user-wide by default,
+    one named project, or every project (None). ValueError names an unknown project."""
+    current = here()
+    if flag(args.get("all_projects")):
+        return None, current, True
+    if args.get("project"):
+        key = resolve_project(args["project"])
+        return (key,), current, key != current
+    return (current, projects.USER), current, False
+
+
+def owned(owner: str, current: str) -> bool:
+    """Whether this project may use an item without naming its owner."""
+    return (owner or "") in (current, projects.USER)
+
+
+def not_here(what: str, owner: str, hint: str) -> str:
+    owner = owner or projects.UNASSIGNED
+    where = "is unassigned" if owner == projects.UNASSIGNED else f"belongs to project {owner}"
+    return f"{what} {where}, not this project. {hint}"
+
+
+def move_refusal(what: str, owner: str, args: dict[str, Any]) -> str | None:
+    """Why a move of an item owned by ``owner`` must not go ahead, or None. This project's,
+    user-wide and unassigned items move on a destination alone; another project's item only
+    when the call names it as the source (``from_project``), so a model that confuses two
+    projects cannot pull an item across by naming where it wants it (DREAM-108 gate)."""
+    owner = owner or projects.UNASSIGNED
+    if args.get("from_project"):
+        try:
+            source = resolve_project(args["from_project"])
+        except ValueError as e:
+            return f"{e}."
+        return None if source == owner else f"{what} is in {owner}, not {source}; nothing moved."
+    if owner in (here(), projects.USER, projects.UNASSIGNED):
+        return None
+    return (f"{what} belongs to project {owner}, not this project; name where it is now "
+            f"(from_project={owner!r}) to move it.")
+
 
 _REMEMBER_SCHEMA = {
     "type": "object",
@@ -44,6 +114,7 @@ _REMEMBER_SCHEMA = {
             "type": "string",
             "description": "stated (default) | observed | inferred — tags each fact line.",
         },
+        "scope": SCOPE_ARG,
     },
     "required": ["title", "body"],
 }
@@ -68,6 +139,16 @@ async def remember(args: dict[str, Any]) -> dict[str, Any]:
     why = suppression(args["body"], args.get("title"), args.get("description"), args.get("tags"))
     if why:
         return err(f"remember: {why}.")
+    scope = str(args.get("scope") or "project").strip().lower()
+    if scope not in ("project", "user"):
+        return err("remember: scope must be 'project' (default) or 'user'.")
+    current = here()
+    owner = projects.USER if scope == "user" else current
+    # scope='user' on this project's own memory promotes it -- deliberately, by name.
+    reassign = False
+    if scope == "user" and args.get("slug"):
+        row = c.store.get_memory(config.free_memory_name(slugify(str(args["slug"]))))
+        reassign = row is not None and (row.get("project") or "") == current
     # A playbook's steps are not facts; provenance tags fact memories.
     body = args["body"] if kind == "procedural" else longterm.tag_body(args["body"], prov)
     try:
@@ -84,7 +165,13 @@ async def remember(args: dict[str, Any]) -> dict[str, Any]:
             mem_type=str(args.get("type") or ""),
             persist_markdown=True,
             embed=False,
+            project=owner,
+            reassign=reassign,
         )
+    except ScopeError as e:
+        hint = ("Leave out slug to save a new memory here; memory_append(name, text, "
+                "if_version, project=...) changes it there.")
+        return err("remember: " + not_here(f"memory {args.get('slug')!r}", e.owner, hint))
     except (ValueError, OSError, sqlite3.Error, MemoryIndexError) as e:
         return err(str(e))
     path = longterm.path_for(mem)
@@ -98,7 +185,8 @@ async def remember(args: dict[str, Any]) -> dict[str, Any]:
     if c.store.embedder is not None:
         warnings.append("Optional semantic indexing is deferred until embedding backfill.")
     return ok(f"Remembered [{kind}/{mem.get('mem_type') or '?'}] '{mem['title']}' "
-              f"(slug: {mem['slug']}) → {path}" + (f"\nNote: {note}." if note else "")
+              f"(slug: {mem['slug']}){projects.tag(mem.get('project') or '', current)} → {path}"
+              + (f"\nNote: {note}." if note else "")
               + ("\n" + "\n".join(warnings) if warnings else ""))
 
 
@@ -138,6 +226,8 @@ _RECALL_SCHEMA = {
             "type": "string",
             "description": "Only memories created on/before this ISO date (optional).",
         },
+        "project": PROJECT_ARG,
+        "all_projects": ALL_PROJECTS_ARG,
     },
     "required": ["query"],
 }
@@ -195,11 +285,16 @@ async def recall(args: dict[str, Any]) -> dict[str, Any]:
     request = _recall_request(args)
     if request is None:
         return err(
-            "recall accepts only query, kind, limit, since, until, and alternative_queries; "
+            "recall accepts only query, kind, limit, since, until, alternative_queries, project "
+            "and all_projects; "
             "query must be a non-empty string up to 256 characters, limit an integer from 1 to 20, "
             "and alternative_queries a list of up to three non-empty strings."
         )
     query, limit, alternatives = request
+    try:
+        scope, current, cross = read_scope(args)
+    except ValueError as e:
+        return err(f"recall: {e}.")
     search = (
         c.store.search_memories_with_alternatives
         if alternatives else c.store.search_memories
@@ -212,6 +307,7 @@ async def recall(args: dict[str, Any]) -> dict[str, Any]:
         limit=limit,
         since=args.get("since"),
         until=args.get("until"),
+        scope=scope,
     )
     if not hits:
         return ok(f"No memories found for '{args['query']}'.")
@@ -225,8 +321,9 @@ async def recall(args: dict[str, Any]) -> dict[str, Any]:
     for h in hits:
         tag = " (linked)" if h.get("via_link") else ""
         matched = f" (matched alternative: {h['matched_query']!r})" if h.get("matched_query") else ""
+        owner = projects.tag(h.get("project") or "", current, cross=cross)
         lines.append(
-            f"\n• [{h['kind']}] {h['title']}{tag}{matched} (slug: {h['slug']}, salience {h['salience']})"
+            f"\n• [{h['kind']}] {h['title']}{tag}{matched} (slug: {h['slug']}, salience {h['salience']}){owner}"
         )
         if h.get("tags"):
             lines.append(f"  tags: {h['tags']}")
@@ -244,6 +341,10 @@ _FORGET_SCHEMA = {
 @tool("forget", "Delete a long-term memory by its slug.", _FORGET_SCHEMA)
 async def forget(args: dict[str, Any]) -> dict[str, Any]:
     c = ctx()
+    row = await in_thread(c.store.get_memory, args["slug"])
+    if row is not None and not owned(row.get("project") or "", here()):
+        return err("forget: " + not_here(f"memory {args['slug']!r}", row.get("project") or "",
+                                        "memory_delete(name, if_version, project=...) deletes it there."))
     deleted = await in_thread(c.store.delete_memory, args["slug"])
     if deleted:
         await in_thread(longterm.delete_markdown, args["slug"])
@@ -257,6 +358,8 @@ _SESSIONS_SCHEMA = {
         "limit": {"type": "integer", "description": "How many (default 8)."},
         "query": {"type": "string", "description": "Topic words; with this, a search over "
                   "every past session's turns instead of the recent list."},
+        "project": PROJECT_ARG,
+        "all_projects": ALL_PROJECTS_ARG,
     },
     "required": [],
 }
@@ -274,29 +377,38 @@ async def recall_sessions(args: dict[str, Any]) -> dict[str, Any]:
     import json
 
     c = ctx()
+    try:
+        scope, current, cross = read_scope(args)
+    except ValueError as e:
+        return err(f"recall_sessions: {e}.")
+    # Opening another project's session needs the same explicit argument again.
+    reopen = ({"all_projects": True} if scope is None
+              else {"project": scope[0]} if cross else {})
     query = str(args.get("query") or "").strip()
     if query:
         hits = await in_thread(c.store.search_turns, query, int(args.get("limit", 8)),
-                               exclude_session_id=c.session_id)
+                               exclude_session_id=c.session_id, scope=scope)
         if not hits:
             return ok(f"No past session mentions '{query}'.")
         lines = [f"{len(hits)} hit(s) for '{query}' (read_session(id, at=turn) opens one):"]
         for h in hits:
             title = h.get("session_title") or "(untitled)"
+            owner = projects.tag(h.get("project") or "", current, cross=cross)
             lines.append(f"\n• session {h['session_id']} — {title} — turn {h['id']} "
-                         f"({h['role']}, {h['ts']})\n  {h['excerpt']}")
+                         f"({h['role']}, {h['ts']}){owner}\n  {h['excerpt']}")
         return ok("\n".join(lines))
     sessions = await in_thread(c.store.recent_sessions, int(args.get("limit", 8)),
-                               exclude_session_id=c.session_id)
+                               exclude_session_id=c.session_id, scope=scope)
     if not sessions:
         return ok("No past sessions recorded yet.")
     lines = ["Recent sessions:"]
     for s in sessions:
         when = s.get("started_at", "?")
         title = s.get("title") or "(untitled)"
-        lines.append(f"\n• {when} — {title} ({s.get('turn_count', 0)} turns)")
+        owner = projects.tag(s.get("project") or "", current, cross=cross)
+        lines.append(f"\n• {when} — {title} ({s.get('turn_count', 0)} turns){owner}")
         lines.append("  Open: read_session(" + json.dumps(
-            {"id": s["id"]}, ensure_ascii=False) + ")")
+            {"id": s["id"], **reopen}, ensure_ascii=False) + ")")
         if s.get("summary"):
             lines.append(f"  {s['summary']}")
     return ok("\n".join(lines))
@@ -322,7 +434,8 @@ async def recall_sessions(args: dict[str, Any]) -> dict[str, Any]:
                    "or indentation (default 0). Requires at. next_offset locates more detail."},
         "chars": {"type": "integer", "minimum": 1, "maximum": 12000,
                   "description": "Maximum raw code points per page (default 12000). "
-                  "Pages may be shorter to fit the serialized result limit. Requires at."}},
+                  "Pages may be shorter to fit the serialized result limit. Requires at."},
+        "project": PROJECT_ARG, "all_projects": ALL_PROJECTS_ARG},
      "required": ["id"]},
 )
 async def read_session(args: dict[str, Any]) -> dict[str, Any]:
@@ -338,14 +451,25 @@ async def read_session(args: dict[str, Any]) -> dict[str, Any]:
                 return err(f"read_session: page mode requires {name} to be an integer "
                            f"from {low} to {high}.")
     c = ctx()
+    try:
+        scope, current, cross = read_scope(args)
+    except ValueError as e:
+        return err(f"read_session: {e}.")
     # Session IDs are opaque. Trimming can select a different stored session,
     # including when following the exact locator from recall_sessions.
     sid = str(args.get("id") or "")
     sess = await in_thread(c.store.get_session, sid)
+    owner = (sess.get("project") or "") if sess else ""
+    if sess and scope is not None and owner not in scope and owner != current:
+        # An exact id is no way around the scope (DREAM-108): another project's session opens
+        # only when asked for by name, and then says whose it is.
+        hint = (f"Pass project={owner!r} or all_projects=true to open it anyway."
+                if owner else "Pass all_projects=true to open it anyway.")
+        return err("read_session: " + not_here(f"session {sid!r}", owner, hint))
     if not sess:
         # Name the stored id the guess contains (a "session-" prefix, a ".md" suffix) WITHOUT opening it:
         # the exact id stays the model's to send (2026-09-23, three misspelt guesses in a row, live session).
-        recent = await in_thread(c.store.recent_sessions, 200)
+        recent = await in_thread(c.store.recent_sessions, 200, scope=scope)
         near = [s["id"] for s in recent if s.get("id") and len(s["id"]) >= 8 and s["id"] in sid][:3]
         hint = (" Did you mean " + " or ".join(f"id={json.dumps(s, ensure_ascii=False)}" for s in near)
                 + "? Send the id exactly as recall_sessions prints it after the word 'session'.") if near else ""
@@ -407,7 +531,8 @@ async def read_session(args: dict[str, Any]) -> dict[str, Any]:
     if not turns:
         return ok(f"Session {sid} ({sess.get('title') or 'untitled'}) has no turns"
                   + (f" at {at}" if at is not None else "") + ".")
-    head = f"Session {sid} — {sess.get('title') or '(untitled)'} — started {sess.get('started_at', '?')}"
+    head = (f"Session {sid} — {sess.get('title') or '(untitled)'} — started {sess.get('started_at', '?')}"
+            + projects.tag(owner, current, cross=cross))
     lines = [head, f"Stored turn IDs {turns[0]['id']}–{turns[-1]['id']}; "
              f"session has {sess.get('turn_count', '?')} records:"]
     if ceiling is not None:

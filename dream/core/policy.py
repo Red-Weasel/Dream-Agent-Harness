@@ -51,6 +51,8 @@ WRITE = "write"
 SHELL = "shell"
 MUTATING = "mutating"
 DESTRUCTIVE = "destructive"
+# DREAM-109: arbitrary code whose only executor is an enforced sandbox (live Blender's).
+CONTAINED = "contained"
 
 # Capabilities that are free in every mode (never gated).
 AUTO_CAPS = frozenset({READONLY, MEMORY})
@@ -95,7 +97,15 @@ _READ_ONLY = {
     # Phase 12: searching and offering plugins and skills changes nothing
     "search_plugins", "search_skills", "suggest_plugin_install", "suggest_skills",
     "demonstration_list", "demonstration_read", "capability_lab_inspect",
+    # DREAM-109: live Blender's scene reads, viewport picture, API lookups and window id
+    "blender__get_scene_info", "blender__get_object_info", "blender__get_viewport_screenshot",
+    "blender__describe_node_type", "blender__bpy_api_lookup", "blender__get_window",
 }
+# DREAM-109: live Blender's code and export tools. They run only inside the live-Blender
+# sandbox (dream.media.blender_live: the workspace read-write, no network, no host
+# fallback), and the server name "blender" is reserved for it (dream.mcp_client), so these
+# names cannot come from any other server.
+_CONTAINED = {"blender__execute_blender_code", "blender__export_scene"}
 # Dream editing its own long-term memory — internal cognition, always allowed.
 _MEMORY = {"remember", "note", "forget", "skill_save", "skill_patch",
            # the plan and the project's name are the session's own mind, not the world
@@ -103,7 +113,9 @@ _MEMORY = {"remember", "note", "forget", "skill_save", "skill_patch",
            # Phase 9b: the file tools on memory, delete included — like forget
            "memory_write", "memory_append", "memory_str_replace", "memory_delete",
            # Phase 11: the task store is the session's own mind about its work
-           "task_add", "task_update"}
+           "task_add", "task_update",
+           # DREAM-108: moving a memory or session between projects is Dream's own memory, like memory_write
+           "memory_move"}
 _WRITE = {"Write", "Edit", "MultiEdit", "NotebookEdit", "write_file", "library_materialize",
           "str_replace_edit", "copy_files", "save_screenshot", "copy_starter_component",
           "super_inline_html", "gen_pptx", "github_import_files",
@@ -173,7 +185,7 @@ def builtin_names() -> frozenset[str]:
     """Every name this classifier recognizes as a built-in identity. The registry
     refuses to register a custom tool that claims one, so a self-built tool can
     never be *mistaken* for the builtin it named itself after."""
-    return frozenset(_READ_ONLY | _MEMORY | _WRITE | _SHELL | _DESTRUCTIVE | _DELEGATING)
+    return frozenset(_READ_ONLY | _MEMORY | _WRITE | _SHELL | _DESTRUCTIVE | _DELEGATING | _CONTAINED)
 
 
 def declare_custom_tools(names: Iterable[str]) -> None:
@@ -224,6 +236,8 @@ def capability(tool_name: str) -> str:
         return MEMORY
     if short in _READ_ONLY:
         return READONLY
+    if short in _CONTAINED:
+        return CONTAINED
     return MUTATING
 
 
@@ -744,6 +758,16 @@ def decide(
         if mode == "auto" and _static_shell_read(command):
             return "allow", ""
         return "ask", "shell command requires verified containment"
+
+    if cap == CONTAINED:
+        # Its executor is the enforced sandbox itself; without one it never runs at all.
+        if mode == "plan":
+            return "deny", "plan mode — no changes"
+        if scoped and execution_scope.red_team:
+            return "deny", "tool has no enforced red-team execution boundary"
+        if mode in ("accept-edits", "auto"):
+            return "allow", "confined to the workspace by the live-Blender sandbox"
+        return "ask", "code in live Blender (confined to the workspace)"
 
     # No executor contract is supplied for arbitrary MCP/custom Python here.
     if mode == "plan":

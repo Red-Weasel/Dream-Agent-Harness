@@ -15,6 +15,9 @@ from dream.tools.memory_tools import remember
 @pytest.fixture
 def store(tmp_path):
     value = MemoryStore(tmp_path / 'fixture.db')
+    # The Engine scopes its store to the workspace's project (DREAM-108); so does this one.
+    from dream.memory.project import project_key
+    value.project = project_key(tmp_path)
     yield value
     value.close()
 
