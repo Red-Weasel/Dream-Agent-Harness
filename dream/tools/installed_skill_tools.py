@@ -150,9 +150,11 @@ def _workspace():
 
 
 def directory_line(skill: loader.FileSkill, workspace) -> str:
-    """DREAM-101: say where the skill lives AND whether run_bash can get there. The sandbox holds only the workspace, so a
-    skill installed elsewhere (a plugin under the home directory) is invisible to `ls`: the model must read its bundled
-    files with skill_file and run its scripts through the matching runner tool instead of cd-ing into the directory."""
+    """DREAM-101/105: say where the skill lives AND what run_bash can do there. The sandbox holds the workspace plus the
+    installed skills' script folders READ-ONLY (dream.core.skill_runtime), so a plugin skill's `<SKILL_DIR>/script`
+    runs with run_bash as written; any other folder outside the workspace is invisible to the shell."""
+    from ..core import skill_runtime
+
     root = skill.root.resolve()
     inside = False
     if workspace is not None:
@@ -163,11 +165,11 @@ def directory_line(skill: loader.FileSkill, workspace) -> str:
             inside = False
     if workspace is None or inside:
         return f"Directory: {root}"
-    tags = f"{skill.source} {skill.parent_extension or ''} {root}".lower()
-    runner = " (understand-anything skills: ua_run, with cwd = the workspace path)" if "understand-anything" in tags else ""
-    return (f"Directory: {root} -- outside the workspace, so run_bash cannot see it (its sandbox holds only the workspace). "
-            f"Read bundled files with skill_file(name=\"{skill.name}\", path=...); run its scripts through the matching runner "
-            f"tool when one is installed{runner}. Do not try to cd or ls there.")
+    if any(root.is_relative_to(r) for r in skill_runtime.script_roots()):
+        return (f"Directory: {root} -- readable in run_bash's sandbox: run its scripts with run_bash as written, using "
+                f"this path for <SKILL_DIR> (read-only; writes stay in the workspace).")
+    return (f"Directory: {root} -- outside the workspace, so run_bash cannot see it (its sandbox holds the workspace and the installed skills' script folders, not this one). "
+            f"Read bundled files with skill_file(name=\"{skill.name}\", path=...). Do not try to cd or ls there.")
 
 
 _FILE_SCHEMA = {

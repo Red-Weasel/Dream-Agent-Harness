@@ -10,10 +10,10 @@ two bare names; the plugin's copies stay reachable as `understand-anything:<name
 proved here.
 
 Pinned: (1) the two packages and their texts; (2) a dry run of `understand-domain` through `policy.decide` and the real
-sandboxed `ua_run` -- a project without a map (the plugin's extract-domain-context.py), a project with one (derived),
+run_bash sandbox (DREAM-105) -- a project without a map (the plugin's extract-domain-context.py), a project with one (derived),
 and broken domain.json files named by the glue and never saved; (3) name precedence and the phrase table; (4) the six
 upstream siblings: explicit selection, whole at a 32k window, no plugin paths in the read-only four, and the
-knowledge/figma script calls through the trusted-runner policy (parse-knowledge-base.py runs for real).
+knowledge/figma scripts run with run_bash as their skill text writes them (parse-knowledge-base.py runs for real).
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -41,7 +42,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "skills"
 DASHBOARD, DOMAIN = SKILLS / "understand-dashboard", SKILLS / "understand-domain"
 GLUE = SKILLS / "understand" / "glue.py"
-UA_TOOL = ROOT / "plugins" / "understand-anything" / "tools" / "ua_run.py"
 UA_PLUGIN = Path(os.environ.get("UA_DIR", str(Path.home() / ".understand-anything" / "repo"))).expanduser() / "understand-anything-plugin"
 UA_SKILLS = UA_PLUGIN / "skills"
 CORE_SCHEMA = UA_PLUGIN / "packages" / "core" / "dist" / "schema.js"
@@ -152,7 +152,7 @@ def test_the_dashboard_is_a_pointer_to_the_dock_that_launches_nothing():
 
 def test_the_domain_skill_prescribes_the_runner_call_the_glue_and_the_shape():
     body = _body((DOMAIN / "SKILL.md").read_text(encoding="utf-8"))
-    assert 'ua_run(skill="understand-domain", script="extract-domain-context.py", args=[ROOT], cwd=ROOT)' in body
+    assert 'python3 "$UA_SKILLS/understand-domain/extract-domain-context.py" "$PWD"' in body and "ua_run" not in body
     for needed in (".ua/knowledge-graph.json", ".ua/intermediate/domain-context.json", ".ua/intermediate/domain.json",
                    ".ua/domain-graph.json", "copy_files", "<dir>/../understand/glue.py", ".ua/tmp/ua_glue.py",
                    "`domain-context`", "`domain`", "contains_flow", "flow_step", "cross_domain", "filePath",
@@ -180,22 +180,22 @@ def _session(workspace: Path):
                                     workspace=Path(workspace)))
 
 
-def _ua_call(tool, call, workspace):
-    """One real ua_run call in a session whose workspace is `workspace` (the sandbox boundary)."""
-    with _session(workspace):
-        return asyncio.run(tool.ua_run.handler(call))
+def _sh(command: str, workspace: Path):
+    """One run_bash command exactly as the model's run_bash runs it (DREAM-105): the policy decides first in auto mode
+    (a refusal raises), then the real sandbox runs it with the skills' script folders mounted read-only."""
+    from dream.core.execution import ExecutionContext, ExecutionScope, execute_bash
+    result, contained = asyncio.run(execute_bash(command, ExecutionContext(ExecutionScope(Path(workspace)), mode="auto")))
+    assert contained
+    return result
 
 
-def _ua(tool, skill, script, args, cwd):
-    """The real ua_run, called the way the skill text prescribes (absolute paths, cwd=ROOT) -- and only after the
-    trusted-runner policy has let exactly that call through in auto mode."""
-    from dream.core import policy
-    call = {"skill": skill, "script": script, "args": [str(a) for a in args], "cwd": str(cwd)}
-    with mock.patch.object(policy, "runner_trusted", lambda name: True):
-        assert policy.decide("ua_run", call, "auto", Path(cwd)) == ("allow", "trusted runner inside workspace"), call
-    result = _ua_call(tool, call, Path(cwd))
-    text = result["content"][0]["text"]
-    assert not result.get("is_error"), text
+def _ua(skill, script, args, cwd):
+    """A plugin script run the way the skill texts write it: `node|python3 "$UA_SKILLS/<skill>/<script>" ...` through
+    run_bash from the workspace."""
+    runner = "python3" if script.endswith(".py") else "node"
+    result = _sh(f'{runner} "$UA_SKILLS/{skill}/{script}" ' + " ".join(shlex.quote(str(a)) for a in args), Path(cwd))
+    text = result.output.decode("utf-8", "replace")
+    assert result.returncode == 0, text
     return text
 
 
@@ -304,32 +304,30 @@ def _fixture_repo(root: Path) -> str:
 
 
 needs_domain_script = pytest.mark.skipif(
-    not UA_TOOL.is_file() or not (UA_SKILLS / "understand-domain" / "extract-domain-context.py").is_file()
+    not (UA_SKILLS / "understand-domain" / "extract-domain-context.py").is_file()
     or shutil.which("python3") is None or shutil.which("bwrap") is None,
-    reason="needs the ua_run plugin tool, the Understand-Anything clone (understand-domain/extract-domain-context.py), "
-           "python3 and bubblewrap")
+    reason="needs the Understand-Anything clone (understand-domain/extract-domain-context.py), python3 and bubblewrap")
 
 
 @pytest.fixture(scope="module")
 def scanned(tmp_path_factory):
-    """Steps 1-4 on a project with no map: the glue copied in, the plugin's scan through the real sandboxed ua_run, the
+    """Steps 1-4 on a project with no map: the glue copied in, the plugin's scan through run_bash's real sandbox, the
     listing, the model's domain.json and project.json (hand-written), the glue's build."""
-    if not UA_TOOL.is_file() or not (UA_SKILLS / "understand-domain" / "extract-domain-context.py").is_file() or (
+    if not (UA_SKILLS / "understand-domain" / "extract-domain-context.py").is_file() or (
             shutil.which("python3") is None or shutil.which("bwrap") is None):
-        pytest.skip("needs the ua_run plugin tool, the Understand-Anything clone, python3 and bubblewrap")
+        pytest.skip("needs the Understand-Anything clone, python3 and bubblewrap")
     root = tmp_path_factory.mktemp("shopline")
     head = _fixture_repo(root)
-    tool = _module(UA_TOOL, "ua_run_for_siblings")
     copied = _copy_glue(root)                                                          # step 1
     assert not (root / ".ua/knowledge-graph.json").exists()                            # step 2: no map -> the scan
-    scan = _ua(tool, "understand-domain", "extract-domain-context.py", [root], root)
+    scan = _ua("understand-domain", "extract-domain-context.py", [root], root)
     context = _glue(root, "domain-context")
     (root / ".ua/intermediate/domain.json").write_text(json.dumps(_domain_json(), indent=1))   # step 3
     (root / ".ua/tmp/project.json").write_text(json.dumps(
         {"name": "shopline", "description": "Orders over HTTP and nightly invoices.", "frameworks": ["Flask"]}))
     rc, built, err = _glue_rc(root, "domain")                                         # step 4
     return {"root": root, "head": head, "copied": copied, "scan": scan, "context": context, "rc": rc, "built": built,
-            "err": err, "tool": tool}
+            "err": err}
 
 
 @needs_domain_script
@@ -473,7 +471,7 @@ def test_the_domain_glue_names_missing_inputs_instead_of_a_traceback(tmp_path):
     shutil.copy(GLUE, root / ".ua/tmp/ua_glue.py")
     rc, out, err = _glue_rc(root, "domain-context")                                       # neither the map nor the scan
     assert rc != 0 and "Traceback" not in err
-    assert 'ua_run(skill="understand-domain", script="extract-domain-context.py"' in out, out
+    assert 'python3 "$UA_SKILLS/understand-domain/extract-domain-context.py"' in out, out
     rc, out, err = _glue_rc(root, "domain")                                               # no domain.json yet
     assert rc != 0 and "Traceback" not in err and ".ua/intermediate/domain.json" in out, out
     (root / ".ua/intermediate").mkdir()
@@ -587,8 +585,8 @@ def test_the_curated_skills_win_the_bare_names_and_the_plugin_copies_stay_reacha
 # unchanged.
 UNDERSTAND_FAMILY = {"understand", "understand-dashboard", "understand-domain"}
 ASK = ("Use the understand skill (Understand-Anything) to map this project into .ua/knowledge-graph.json, then tell me "
-       "when the map is ready. Its helper scripts run through the ua_run tool (the plugin is installed and built; skip "
-       "locating it). Exclude Dream's own state folders: pass --exclude \".dream/**,.remember/**\" to the scan.")
+       "when the map is ready. Run its helper scripts with run_bash from $UA_SKILLS (the plugin is installed and built; "
+       "skip locating it). Exclude Dream's own state folders: pass --exclude \".dream/**,.remember/**\" to the scan.")
 
 
 @pytest.mark.parametrize("prompt", [
@@ -912,27 +910,18 @@ def test_the_read_only_four_name_no_plugin_path(name):
     assert "knowledge-graph.json" in text                                                 # all they need is the map
 
 
-def test_knowledge_and_figma_script_calls_through_the_trusted_runner_policy(tmp_path, monkeypatch):
-    """The skill_open runner hint says `ua_run, with cwd = the workspace path`; made that way, every knowledge call and
-    figma's merge are allowed like a workspace write. figma-scan.mjs takes the Figma file key or URL as a bare token,
-    which the rule cannot vouch for, so it asks (it also needs FIGMA_TOKEN and api.figma.com, neither of which the
-    sandbox provides)."""
-    from dream.core import policy
-    ws = tmp_path / "ws"
-    (ws / "wiki").mkdir(parents=True)
-    monkeypatch.setattr(policy, "runner_trusted", lambda name: True)
-    allowed = [{"skill": "understand-knowledge", "script": "parse-knowledge-base.py", "args": [str(ws)], "cwd": str(ws)},
-               {"skill": "understand-knowledge", "script": "parse-knowledge-base.py", "args": [str(ws / "wiki")], "cwd": str(ws)},
-               {"skill": "understand-knowledge", "script": "merge-knowledge-graph.py", "args": [str(ws)], "cwd": str(ws)},
-               {"skill": "understand-figma", "script": "figma-merge.mjs", "args": [str(ws)], "cwd": str(ws)}]
-    for call in allowed:
-        assert policy.decide("ua_run", call, "auto", ws) == ("allow", "trusted runner inside workspace"), call
-        assert policy.decide("ua_run", call, "accept-edits", ws)[0] == "allow"
-    scan = {"skill": "understand-figma", "script": "figma-scan.mjs", "args": [str(ws), "AbCdEf0123456789"], "cwd": str(ws)}
-    decision, reason = policy.decide("ua_run", scan, "auto", ws)
-    assert decision == "ask" and reason.startswith("outside workspace"), (decision, reason)
-    monkeypatch.setattr(policy, "runner_trusted", lambda name: False)                    # untrusted: as before
-    assert policy.decide("ua_run", allowed[0], "auto", ws) == ("ask", "tool may change things")
+def test_knowledge_and_figma_skills_tell_the_model_run_bash_can_run_their_scripts(tmp_path):
+    """DREAM-105: the upstream knowledge and figma skills write `python3 "<SKILL_DIR>/parse-knowledge-base.py" ...`. The
+    plugin's clone is readable in run_bash's sandbox, so skill_open's Directory line tells the model to run them with
+    run_bash as written -- no runner tool. (figma-scan.mjs still needs FIGMA_TOKEN and api.figma.com, which the sandbox
+    does not provide.)"""
+    if not (UA_SKILLS / "understand-knowledge" / "SKILL.md").is_file():
+        pytest.skip("the Understand-Anything clone is not installed")
+    found, _ = loader.discover([UA_SKILLS])
+    for name in ("understand-knowledge", "understand-figma"):
+        skill = next(s for s in found if s.name == name)
+        line = installed_skill_tools.directory_line(skill, tmp_path)
+        assert "readable in run_bash's sandbox" in line and "ua_run" not in line, (name, line)
 
 
 WIKI = {
@@ -948,20 +937,19 @@ WIKI = {
 
 
 def test_parse_knowledge_base_runs_for_real_in_the_sandbox(tmp_path):
-    if not UA_TOOL.is_file() or not (UA_SKILLS / "understand-knowledge" / "parse-knowledge-base.py").is_file() or (
+    if not (UA_SKILLS / "understand-knowledge" / "parse-knowledge-base.py").is_file() or (
             shutil.which("python3") is None or shutil.which("bwrap") is None):
-        pytest.skip("needs the ua_run plugin tool, the Understand-Anything clone, python3 and bubblewrap")
+        pytest.skip("needs the Understand-Anything clone, python3 and bubblewrap")
     ws = tmp_path / "wiki"
     for rel, text in WIKI.items():
         (ws / rel).parent.mkdir(parents=True, exist_ok=True)
         (ws / rel).write_text(text)
-    tool = _module(UA_TOOL, "ua_run_for_knowledge")
-    _ua(tool, "understand-knowledge", "parse-knowledge-base.py", [ws], ws)
+    _ua("understand-knowledge", "parse-knowledge-base.py", [ws], ws)
     manifest = json.loads((ws / ".ua/intermediate/scan-manifest.json").read_text())
     ids = {n["id"] for n in manifest["nodes"]}
     assert {i for i in ids if "attention" in i} and {i for i in ids if "transformer" in i}, sorted(ids)
     assert manifest["edges"], "wikilinks become edges"
-    _ua(tool, "understand-knowledge", "merge-knowledge-graph.py", [ws], ws)
+    _ua("understand-knowledge", "merge-knowledge-graph.py", [ws], ws)
     assembled = json.loads((ws / ".ua/intermediate/assembled-graph.json").read_text())
     assert assembled["nodes"] and assembled["edges"]
     assert {n["id"] for n in manifest["nodes"]} <= {n["id"] for n in assembled["nodes"]}  # nothing the scan found is lost

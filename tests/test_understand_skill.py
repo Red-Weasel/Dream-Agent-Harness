@@ -3,12 +3,13 @@
 Owner, 2026-09-23: "Can you rewrite the skill shorter and get the same result? -- i dont see why youd need 30,000
 characters to accomplish 'map this repo' ... just fix it so it at least behaves correctly." The plugin's 58,868-byte
 SKILL.md is written for Claude Code subagents and a shell that can see the plugin folder; in Dream the scripts run
-through `ua_run`, the sandbox holds only the workspace, and the live MiMo run spent ~90 tool calls re-deriving that.
+with run_bash, whose sandbox shows the plugin folder read-only as `$UA_SKILLS` (DREAM-105), and the live MiMo run spent
+~90 tool calls re-deriving its environment.
 
 What is pinned here: (1) the curated package and its size; (2) the four `.ua/` files in the dashboard's shapes, checked
 by the skill's own glue; (3) the curated `understand` outranks the plugin's for the name and the map phrases while the
 plugin's skill stays reachable; (4) a dry run of every deterministic step on a fixture repository through the real
-`ua_run` code path -- the commands come from the SKILL.md itself -- with the model's part hand-written; (5) the suites.
+run_bash sandbox -- the commands come from the SKILL.md itself -- with the model's part hand-written; (5) the suites.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -34,15 +36,14 @@ from dream.tools import installed_skill_tools
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "understand"
 GLUE = SKILL / "glue.py"
-UA_TOOL = ROOT / "plugins" / "understand-anything" / "tools" / "ua_run.py"
 UA_PLUGIN = Path(os.environ.get("UA_DIR", str(Path.home() / ".understand-anything" / "repo"))).expanduser() / "understand-anything-plugin"
 UA_SKILLS = UA_PLUGIN / "skills"
 SCRIPTS = ("scan-project.mjs", "extract-import-map.mjs", "compute-batches.mjs", "extract-structure.mjs",
            "merge-batch-graphs.py", "build-fingerprints.mjs")
 # the dock's request (dream/gui/static/understand.js ASK), the explicit selection that must keep working
 ASK = ("Use the understand skill (Understand-Anything) to map this project into .ua/knowledge-graph.json, then tell me "
-       "when the map is ready. Its helper scripts run through the ua_run tool (the plugin is installed and built; skip "
-       "locating it). Exclude Dream's own state folders: pass --exclude \".dream/**,.remember/**\" to the scan.")
+       "when the map is ready. Run its helper scripts with run_bash from $UA_SKILLS (the plugin is installed and built; "
+       "skip locating it). Exclude Dream's own state folders: pass --exclude \".dream/**,.remember/**\" to the scan.")
 
 needs_plugin = pytest.mark.skipif(
     not (UA_SKILLS / "understand" / "scan-project.mjs").is_file()
@@ -106,9 +107,10 @@ def test_the_pipeline_is_imperative_and_names_every_script_and_result(skill_text
     for name in ("knowledge-graph.json", "domain-graph.json", "diff-overlay.json", "meta.json", ".understandignore"):
         assert name in body, name
     assert "--exclude-analysis-data" in body and "--exclude" in body
-    assert "ua_run(" in body and "skill_file(" in body
-    # the trusted-runner allowance needs a working directory inside the workspace on every call (gate round 5)
-    assert 'args=[...], cwd=ROOT)' in body and "every call with `cwd=ROOT`" in body
+    assert "skill_file(" in body and "ua_run" not in body
+    # DREAM-105: every script runs with run_bash from $UA_SKILLS, the plugin folder the sandbox shows read-only
+    for script in SCRIPTS:
+        assert f'"$UA_SKILLS/understand/{script}"' in body, script
     # numbered steps a local model follows in order, and every glue command the dry run uses
     steps = re.findall(r"^## (\d+)\. ", body, re.M)
     assert steps == [str(i) for i in range(1, len(steps) + 1)] and len(steps) >= 8, steps
@@ -198,13 +200,13 @@ def test_the_curated_skill_wins_the_name_and_the_plugin_stays_reachable(with_plu
     assert any("reachable as 'understand-anything:understand'" in w for w in installed_skill_tools.warnings())
     # selection: the dock's prompt and $understand pick the curated one; the qualified name picks the plugin's
     picked = select_for_task(ASK, with_plugin, max_chars=guidance_budget(200_000))
-    assert picked.names == ("understand",) and "ua_run(skill=" in picked.text and "Phase 0" not in picked.text
+    assert picked.names == ("understand",) and '"$UA_SKILLS/understand/' in picked.text and "Phase 0" not in picked.text
     assert select_for_task("$understand map it", with_plugin).names == ("understand",)
     assert select_for_task("$understand-anything:understand", with_plugin).names == ("understand-anything:understand",)
     # skill_open: both by name
     ours = asyncio.run(installed_skill_tools.skill_open.handler({"name": "understand"}))
     theirs = asyncio.run(installed_skill_tools.skill_open.handler({"name": "understand-anything:understand"}))
-    assert not ours.get("is_error") and "ua_run(skill=" in ours["content"][0]["text"]
+    assert not ours.get("is_error") and '"$UA_SKILLS/understand/' in ours["content"][0]["text"]
     assert not theirs.get("is_error") and "Phase 0" in theirs["content"][0]["text"]
 
 
@@ -278,7 +280,7 @@ def test_the_domain_check_uses_the_domain_types(glue):
     assert any("type 'file'" in p for p in glue.check_graph(_graph(layers=[], tour=[]), glue.DOMAIN_NODES, glue.DOMAIN_EDGES, layered=False))
 
 
-# ---- (4) the dry run: every deterministic step, the SKILL.md's own commands, the real ua_run ------------------------
+# ---- (4) the dry run: every deterministic step, the SKILL.md's own commands, the real run_bash sandbox --------------
 
 FIXTURE = {
     "README.md": "# Rocketlog\n\nA tiny command-line tool that records rocket launches in a JSON file.\n",
@@ -323,26 +325,22 @@ def _git(root: Path, *args: str) -> str:
                           capture_output=True, text=True).stdout.strip()
 
 
-def _ua_call(tool, call, workspace):
-    """One real ua_run call in a session whose workspace is `workspace` (the sandbox boundary)."""
-    from dream.tools.context import ToolContext, bind_context
-    session = ToolContext(store=None, working=None, browser=None, session_id="ua-test",  # type: ignore[arg-type]
-                          workspace=Path(workspace))
-    with bind_context(session):
-        return asyncio.run(tool.ua_run.handler(call))
+def _sh(command: str, workspace: Path):
+    """One run_bash command exactly as the model's run_bash runs it (DREAM-105): the policy decides first in auto mode
+    (a refusal raises), then the real sandbox runs it with the skills' script folders mounted read-only."""
+    from dream.core.execution import ExecutionContext, ExecutionScope, execute_bash
+    result, contained = asyncio.run(execute_bash(command, ExecutionContext(ExecutionScope(Path(workspace)), mode="auto")))
+    assert contained
+    return result
 
 
-def _ua(tool, skill, script, args, cwd):
-    """The real ua_run, called the way the SKILL.md prescribes (absolute paths, cwd=ROOT) -- and only after the
-    trusted-runner policy has let exactly that call through in auto mode."""
-    from unittest import mock
-    from dream.core import policy
-    call = {"skill": skill, "script": script, "args": [str(a) for a in args], "cwd": str(cwd)}
-    with mock.patch.object(policy, "runner_trusted", lambda name: True):
-        assert policy.decide("ua_run", call, "auto", Path(cwd)) == ("allow", "trusted runner inside workspace"), call
-    result = _ua_call(tool, call, Path(cwd))
-    text = result["content"][0]["text"]
-    assert not result.get("is_error"), text
+def _ua(skill, script, args, cwd):
+    """A plugin script run the way the SKILL.md prescribes: `node|python3 "$UA_SKILLS/<skill>/<script>" ...` through
+    run_bash from the workspace."""
+    runner = "python3" if script.endswith(".py") else "node"
+    result = _sh(f'{runner} "$UA_SKILLS/{skill}/{script}" ' + " ".join(shlex.quote(str(a)) for a in args), Path(cwd))
+    text = result.output.decode("utf-8", "replace")
+    assert result.returncode == 0, text
     return text
 
 
@@ -409,10 +407,10 @@ def _simulate_batches(root: Path, batches: dict, structures: dict[int, dict]) ->
 @pytest.fixture(scope="module")
 def mapped(tmp_path_factory, skill_text):
     """The whole pipeline on the fixture, the model's steps hand-written. Skipped without the plugin."""
-    if not UA_TOOL.is_file() or not (UA_SKILLS / "understand" / "scan-project.mjs").is_file() or not (
-            UA_PLUGIN / "packages" / "core" / "dist" / "index.js").is_file() or shutil.which("node") is None:
-        pytest.skip("needs the ua_run plugin tool, the Understand-Anything clone with its built core, and node")
-    tool = _module(UA_TOOL, "ua_run_for_understand_skill")
+    if not (UA_SKILLS / "understand" / "scan-project.mjs").is_file() or not (
+            UA_PLUGIN / "packages" / "core" / "dist" / "index.js").is_file() or shutil.which("node") is None or (
+            shutil.which("bwrap") is None):
+        pytest.skip("needs the Understand-Anything clone with its built core, node and bubblewrap")
     root = tmp_path_factory.mktemp("rocketlog")
     for rel, text in FIXTURE.items():
         p = root / rel
@@ -432,14 +430,14 @@ def mapped(tmp_path_factory, skill_text):
     (root / ".ua" / "tmp" / "project.json").write_text(json.dumps(
         {"name": "rocketlog", "description": "Records rocket launches from the command line.", "frameworks": ["Docker"]}))
     # step 2 -- scan, import map, scan-result
-    log.append(_ua(tool, "understand", "scan-project.mjs",
+    log.append(_ua("understand", "scan-project.mjs",
                    [root, root / ".ua/tmp/scan.json", "--exclude-analysis-data", "--exclude", ".dream/**,.remember/**"], root))
     log.append(_glue(root, "imports-input"))
-    log.append(_ua(tool, "understand", "extract-import-map.mjs", [root / ".ua/tmp/imports-in.json", root / ".ua/tmp/imports-out.json"], root))
+    log.append(_ua("understand", "extract-import-map.mjs", [root / ".ua/tmp/imports-in.json", root / ".ua/tmp/imports-out.json"], root))
     scan_line = _glue(root, "scan-result")
     log.append(scan_line)
     # step 3 -- batches
-    log.append(_ua(tool, "understand", "compute-batches.mjs", [root], root))
+    log.append(_ua("understand", "compute-batches.mjs", [root], root))
     batch_listing = _glue(root, "batch-inputs")
     log.append(batch_listing)
     batches = json.loads((root / ".ua/intermediate/batches.json").read_text())
@@ -447,12 +445,12 @@ def mapped(tmp_path_factory, skill_text):
     structures, structure_text = {}, ""
     for b in batches["batches"]:
         i = b["batchIndex"]
-        log.append(_ua(tool, "understand", "extract-structure.mjs", [root / f".ua/tmp/extract-in-{i}.json", root / f".ua/tmp/extract-out-{i}.json"], root))
+        log.append(_ua("understand", "extract-structure.mjs", [root / f".ua/tmp/extract-in-{i}.json", root / f".ua/tmp/extract-out-{i}.json"], root))
         structures[i] = json.loads((root / f".ua/tmp/extract-out-{i}.json").read_text())
         structure_text += _glue(root, "structure", str(i))
     _simulate_batches(root, batches, structures)
     # step 5 -- merge
-    merge = _ua(tool, "understand", "merge-batch-graphs.py", [root], root)
+    merge = _ua("understand", "merge-batch-graphs.py", [root], root)
     log.append(merge)
     # step 6 -- layers and tour from the printed node ids
     node_listing = _glue(root, "nodes")
@@ -471,7 +469,7 @@ def mapped(tmp_path_factory, skill_text):
     # step 7 -- assemble, fingerprints
     assemble = _glue(root, "assemble")
     log.append(assemble)
-    log.append(_ua(tool, "understand", "build-fingerprints.mjs", [root / ".ua/intermediate/fingerprint-input.json"], root))
+    log.append(_ua("understand", "build-fingerprints.mjs", [root / ".ua/intermediate/fingerprint-input.json"], root))
     # step 8 -- the domain graph's nodes and edges (the model's); step 9 -- finish
     (root / ".ua/intermediate/domain.json").write_text(json.dumps({
         "nodes": [{"id": "domain:launch-records", "type": "domain", "name": "Launch records", "summary": "Recording launches.",
@@ -613,12 +611,11 @@ def test_a_truncated_batch_file_is_named_and_the_map_is_not_done(mapped, tmp_pat
     warning and exit 0; `nodes`, `assemble` and `finish` must say which scanned files have no node, name the broken
     file, and never print `problems: 0` -- and meta.json must count the files actually in the graph."""
     work = _copy_of(mapped, tmp_path)
-    tool = _module(UA_TOOL, "ua_run_for_truncation")
     path = work / ".ua/intermediate/batch-1.json"
     whole = path.read_text()
     lost = {n["filePath"] for n in json.loads(whole)["nodes"] if n["type"] in glue.FILE_TYPES}
     path.write_text(whole[: len(whole) // 2])
-    _ua(tool, "understand", "merge-batch-graphs.py", [work], work)                # upstream: warning only, exit 0
+    _ua("understand", "merge-batch-graphs.py", [work], work)                # upstream: warning only, exit 0
     rc, out, err = _glue_rc(work, "assemble")
     assert rc != 0 and "Traceback" not in err, (out, err)
     assert re.search(r"\d+ scanned files? ha(?:ve|s) no node", out) and all(p in out for p in sorted(lost)[:2]), out
@@ -633,7 +630,7 @@ def test_a_truncated_batch_file_is_named_and_the_map_is_not_done(mapped, tmp_pat
     assert "have no node" in out or "missing" in out.lower()             # the listing warns before layers are written
     # the whole file back, merge again -> clean
     path.write_text(whole)
-    _ua(tool, "understand", "merge-batch-graphs.py", [work], work)
+    _ua("understand", "merge-batch-graphs.py", [work], work)
     assert "problems: 0" in _glue(work, "assemble") and "problems: 0" in _glue(work, "finish")
 
 
@@ -702,87 +699,14 @@ def test_a_symlink_inside_a_skill_root_does_not_open_the_allowance(tmp_path, mon
     assert decision == "ask" and reason.startswith("outside workspace")
 
 
-def test_a_trusted_runner_tool_runs_inside_the_workspace_without_a_prompt(tmp_path, monkeypatch):
-    from dream.core import policy
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    (tmp_path / "outside").mkdir()
-    call = {"skill": "understand", "script": "scan-project.mjs", "cwd": str(ws),
-            "args": [str(ws), str(ws / ".ua/tmp/scan.json"), "--exclude-analysis-data", "--exclude", ".dream/**,.remember/**"]}
-    monkeypatch.setattr(policy, "runner_trusted", lambda name: False)  # the module is not trusted: as today
-    assert policy.decide("ua_run", call, "auto", ws) == ("ask", "tool may change things")
-    assert policy.decide("ua_run", call, "accept-edits", ws)[0] == "ask"
-    monkeypatch.setattr(policy, "runner_trusted", lambda name: True)
-    assert policy.decide("ua_run", call, "auto", ws) == ("allow", "trusted runner inside workspace")
-    assert policy.decide("ua_run", call, "accept-edits", ws)[0] == "allow"
-    assert policy.decide("ua_run", call, "ask", ws)[0] == "ask"
-    assert policy.decide("ua_run", call, "plan", ws)[0] == "deny"
-    assert policy.decide("mcp__dream__ua_run", call, "auto", ws)[0] == "allow"
-    no_cwd = {k: v for k, v in call.items() if k != "cwd"}
-    (ws / "out-link").symlink_to(tmp_path / "outside")                # a symlink inside the workspace, pointing out of it
-    for outside in (# without a GIVEN working directory ua_run starts the script in Dream's own process directory, where
-                    # a flag the script takes for its output file, an empty argument list or a script default would
-                    # land (the gate's proofs: extract-import-map [in, "--gate-out"], generate-ignore [] and ["--x"])
-                    no_cwd, {**call, "cwd": ""}, {**call, "cwd": None}, {**call, "cwd": 5},
-                    {"skill": "understand", "script": "extract-import-map.mjs", "args": [str(ws / ".ua/tmp/imports-in.json"), "--gate-out"]},
-                    {"skill": "understand", "script": "generate-ignore.mjs", "args": []},
-                    {"skill": "understand", "script": "generate-ignore.mjs", "args": ["--x"]},
-                    {**call, "cwd": str(tmp_path)}, {**call, "cwd": ".."}, {**call, "cwd": "."}, {**call, "cwd": "ws"},
-                    {**call, "cwd": str(ws / "out-link")}, {**call, "cwd": f"{ws}/.ua/../.."}, {**call, "cwd": f"{ws}\x00"},
-                    {**call, "args": ["/home/someone/other-project"]},
-                    {**call, "args": [str(ws), "../sibling/out.json"]},
-                    # a RELATIVE path-like argument is read against whatever base the script picks, so none is vouched
-                    # for: bare `..`, `.`, a bare file name
-                    {**call, "args": [".."]}, {**call, "args": ["."]}, {**call, "args": ["..", "out.json"]},
-                    {**call, "args": [str(ws), "out.json"]},
-                    # a path carried inside a --key=value flag (compute-batches.mjs takes --output=, --scan-result=,
-                    # --changed-files=) is a path too; a non-string argument is a token the scripts read as a path
-                    {**call, "args": [str(ws), f"--output={tmp_path}/escaped.json"]},
-                    {**call, "args": [str(ws), "--output=../escaped.json"]},
-                    {**call, "args": [str(ws), f"--scan-result={tmp_path}/scan.json"]},
-                    {**call, "args": [str(ws), None]}, {**call, "args": [str(ws), ["/etc"]]}, {**call, "args": [str(ws), True]},
-                    {**call, "args": str(ws)}, {**call, "args": {"a": str(ws)}},
-                    # `*`, `?`, `[` and `,` are legal in file names: a path carrying one is still a path
-                    {**call, "args": [str(ws), f"--output={tmp_path}/evil,json"]}, {**call, "args": [f"{tmp_path}/root,x"]},
-                    {**call, "args": [f"{tmp_path}/r*"]}, {**call, "args": ["../a,b"]}, {**call, "args": [",", "*"]},
-                    # a flag is a plain name: one carrying a path is a path (read against the cwd it climbs out)
-                    {**call, "args": [str(ws), "--x/../../../../../../tmp/y"]}, {**call, "args": ["-"]},
-                    {**call, "args": [str(ws), "--../../../x=" + str(ws / "a")]},
-                    # the value after --exclude is a pattern only to scan-project; any other script reads it as a path
-                    {**call, "args": ["--exclude", "x/../../../tmp/evil"]}, {**call, "args": ["--exclude", "../evil"]},
-                    {**call, "args": ["--exclude", "out-link/x"]}, {**call, "args": ["--exclude", f"--output={tmp_path}/x"]},
-                    {**call, "args": ["--exclude", "/etc"]},
-                    # no `..` segment even when the physical path stays inside: scripts normalise lexically
-                    {**call, "args": [f"{ws}/.ua/../x"]}, {**call, "args": [f"--output={ws}/.ua/../x"]},
-                    # unresolvable tokens ask instead of raising
-                    {**call, "args": ["/etc\x00"]}, {**call, "args": [f"--output={ws}/x\x00"]}):
-        decision, reason = policy.decide("ua_run", outside, "auto", ws)
-        assert decision == "ask" and reason.startswith("outside workspace"), (outside, reason)
-    # inside a given cwd, flags, patterns under it and an empty argument list are fine: whatever a script makes of them
-    # lands inside the workspace
-    for inside in ({**call, "args": [str(ws), "--exclude", "vendor", "--exclude-analysis-data"]},
-                   {**call, "args": [str(ws), "--exclude", "tools/**,*.png"]},
-                   {**call, "args": [str(ws), f"--output={ws}/.ua/tmp/batches.json"]},
-                   {**call, "args": [str(ws), "--output="]}, {**call, "args": []}, {**call, "args": [f"{ws}/./", f"{ws}/"]},
-                   {"skill": "understand", "script": "extract-import-map.mjs", "cwd": str(ws),
-                    "args": [str(ws / ".ua/tmp/imports-in.json"), "--gate-out"]},
-                   {"skill": "understand", "script": "generate-ignore.mjs", "cwd": str(ws / ".ua"), "args": []}):
-        assert policy.decide("ua_run", inside, "auto", ws) == ("allow", "trusted runner inside workspace"), inside
-    # another custom tool gets nothing from the rule
-    assert policy.decide("other_tool", {"x": 1}, "auto", ws) == ("ask", "tool may change things")
-
-
-def test_the_runner_is_confined_to_the_workspace_whatever_its_inputs_say(tmp_path, monkeypatch):
-    """Gate round 6: build-fingerprints, extract-structure and extract-import-map take their project root from an INPUT
-    file the model writes, and every script writes through any symlink the workspace holds -- no argument rule sees
-    either. So ua_run runs each script inside run_bash's bubblewrap boundary: the workspace read-write, the plugin
-    clone and the runtime read-only, nothing else of the host. The policy allows all four calls below; the sandbox is
-    what keeps them in."""
-    from dream.core import policy
-    if not UA_TOOL.is_file() or not (UA_SKILLS / "understand" / "build-fingerprints.mjs").is_file() or not (
+def test_the_plugin_scripts_are_confined_to_the_workspace_whatever_their_inputs_say(tmp_path):
+    """DREAM-105, keeping DREAM-102's round-6 guarantee: build-fingerprints, extract-structure and extract-import-map take
+    their project root from an INPUT file the model writes, and every script writes through any symlink the workspace
+    holds. The scripts run with run_bash inside its sandbox -- the workspace read-write, the skills' script folders and
+    node read-only, nothing else of the host -- so neither can reach outside. The policy lets all three commands run."""
+    if not (UA_SKILLS / "understand" / "build-fingerprints.mjs").is_file() or not (
             UA_PLUGIN / "packages" / "core" / "dist" / "index.js").is_file() or not shutil.which("node") or not shutil.which("bwrap"):
-        pytest.skip("needs the ua_run plugin tool, the Understand-Anything clone with its built core, node and bubblewrap")
-    tool = _module(UA_TOOL, "ua_run_confinement")
+        pytest.skip("needs the Understand-Anything clone with its built core, node and bubblewrap")
     ws, outside = tmp_path / "ws", tmp_path / "outside"
     (ws / ".ua" / "tmp").mkdir(parents=True)
     (ws / "sub").mkdir()
@@ -796,14 +720,11 @@ def test_the_runner_is_confined_to_the_workspace_whatever_its_inputs_say(tmp_pat
     st_in.write_text(json.dumps({"projectRoot": str(outside), "batchImportData": {}, "batchFiles": [
         {"path": "src/mod.py", "language": "python", "sizeLines": 6, "fileCategory": "code"},
         {"path": "README.md", "language": "markdown", "sizeLines": 1, "fileCategory": "docs"}]}))
-    calls = [{"skill": "understand", "script": "build-fingerprints.mjs", "args": [str(fp_in)], "cwd": str(ws)},
-             {"skill": "understand", "script": "extract-structure.mjs", "args": [str(st_in), str(st_out)], "cwd": str(ws)},
-             {"skill": "understand", "script": "generate-ignore.mjs", "args": [str(ws / "sub")], "cwd": str(ws)}]
-    monkeypatch.setattr(policy, "runner_trusted", lambda name: True)
     before = sorted(str(p.relative_to(outside)) for p in outside.rglob("*"))
-    for call in calls:
-        assert policy.decide("ua_run", call, "auto", ws) == ("allow", "trusted runner inside workspace"), call
-        _ua_call(tool, call, ws)                                    # the result may be an error; what it touched counts
+    for command in (f'node "$UA_SKILLS/understand/build-fingerprints.mjs" {shlex.quote(str(fp_in))}',
+                    f'node "$UA_SKILLS/understand/extract-structure.mjs" {shlex.quote(str(st_in))} {shlex.quote(str(st_out))}',
+                    f'node "$UA_SKILLS/understand/generate-ignore.mjs" {shlex.quote(str(ws / "sub"))}'):
+        _sh(command, ws)                                            # the exit may be an error; what it touched counts
     assert sorted(str(p.relative_to(outside)) for p in outside.rglob("*")) == before   # nothing written outside
     assert not (outside / ".ua").exists() and not any((outside / "ua-target").iterdir())
     text = st_out.read_text() if st_out.is_file() else ""
@@ -813,23 +734,23 @@ def test_the_runner_is_confined_to_the_workspace_whatever_its_inputs_say(tmp_pat
     (ws / "src" / "mod.py").write_text("def inside_function():\n    return 1\n")
     st_in.write_text(json.dumps({"projectRoot": str(ws), "batchImportData": {}, "batchFiles": [
         {"path": "src/mod.py", "language": "python", "sizeLines": 2, "fileCategory": "code"}]}))
-    result = _ua_call(tool, calls[1], ws)
-    assert not result.get("is_error"), result["content"][0]["text"]
+    _ua("understand", "extract-structure.mjs", [st_in, st_out], ws)
     assert "inside_function" in st_out.read_text()
-    # a working directory outside the workspace is refused before anything runs
-    refused = _ua_call(tool, {**calls[1], "cwd": str(outside)}, ws)
-    assert refused.get("is_error") and "not a directory inside the workspace" in refused["content"][0]["text"]
 
 
-def test_runner_trust_follows_the_extension_settings(monkeypatch):
-    """The real check: trusted means the plugin module's current source hash is the one recorded in Dream's settings."""
-    from dream import extensions
-    from dream.core import policy
-    if not UA_TOOL.is_file():
-        pytest.skip("plugins/understand-anything/tools/ua_run.py is not installed")
-    plugins.load(ROOT / "plugins")                                     # settings are the test's own (conftest)
-    assert policy.runner_trusted("ua_run") is False
-    identifier = extensions.tool_module_id(UA_TOOL, "understand-anything")
-    extensions.trust_module(identifier, extensions.review_module(identifier)["sha256"])
-    assert policy.runner_trusted("ua_run") is True
-    assert policy.runner_trusted("no_such_runner") is False
+def test_the_plugin_scripts_run_with_run_bash_like_any_command(tmp_path):
+    """DREAM-105: no runner tool and no approval step. The plugin's scripts run with run_bash, the way Claude Code runs
+    them with Bash; the sandbox shows the plugin's clone (and node) read-only, and skill_open says so."""
+    from dream.core import skill_runtime
+    from dream.tools import registry
+    assert "ua_run" not in {t.name for t in registry._BASE_TOOLS}
+    assert not (ROOT / "dream" / "tools" / "understand_tools.py").exists()
+    assert not (ROOT / "plugins" / "understand-anything" / "tools" / "ua_run.py").exists()
+    if not (UA_SKILLS / "understand" / "scan-project.mjs").is_file():
+        pytest.skip("the Understand-Anything clone is not installed")
+    assert skill_runtime.UA_ROOT.resolve() in skill_runtime.script_roots()
+    assert skill_runtime.script_env()["UA_SKILLS"] == str(UA_SKILLS.resolve())
+    found, _ = loader.discover([UA_SKILLS])
+    plugin_understand = next(s for s in found if s.name == "understand")
+    line = installed_skill_tools.directory_line(plugin_understand, tmp_path)
+    assert "readable in run_bash's sandbox" in line and "cannot see" not in line, line

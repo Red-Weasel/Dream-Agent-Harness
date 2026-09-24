@@ -8,11 +8,11 @@ description: "Use when the user wants this repository or project mapped into a k
 Result: `.ua/knowledge-graph.json`, `.ua/domain-graph.json`, `.ua/diff-overlay.json` and `.ua/meta.json`, then a one-paragraph report. Do the steps in order, none skipped, without stopping to ask: the user wants the finished map. Announce each step as `[step N/9] <name>`.
 
 Helpers:
-- **Plugin scripts** run only through `ua_run(skill="understand", script="<name>", args=[...], cwd=ROOT)`, every call with `cwd=ROOT`. The plugin folder is outside the sandbox: never cd, ls, find or read it. Paths in `args` are absolute; `ROOT` is the workspace path from run_bash `pwd`.
+- **Plugin scripts** run with run_bash from the workspace, as `node "$UA_SKILLS/understand/<script>" ...` (`python3` for .py). `$UA_SKILLS` is the plugin's skills folder, readable in the sandbox; never cd, ls or edit it.
 - **Glue** is `python3 .ua/tmp/ua_glue.py <command>` through run_bash. It prepares the scripts' inputs, assembles the four files and checks them. Never write those JSON files by hand.
 
 ## 1. Prepare
-- run_bash `pwd` gives ROOT.
+- run_bash `pwd` shows the workspace path.
 - Get the glue: `skill_open(name="understand")` prints `Directory: <dir>`; then `copy_files(files=[{"src": "<dir>/glue.py", "dest": ".ua/tmp/ua_glue.py"}])`. Without copy_files: `skill_file(name="understand", path="glue.py")` and write_file its text (after the `understand/glue.py:` line) to `.ua/tmp/ua_glue.py`.
 - If `.ua/.understandignore` does not exist, write_file it with exactly these lines (keep an existing one unchanged):
 ```
@@ -32,17 +32,17 @@ Helpers:
 - read_file README and the manifest (package.json, pyproject.toml, Cargo.toml, go.mod ...), then write_file `.ua/tmp/project.json`: `{"name": "<project>", "description": "<1-2 sentences>", "frameworks": ["<frameworks you saw>"]}`.
 
 ## 2. Scan
-- ua_run script `scan-project.mjs`, args `[ROOT, ROOT + "/.ua/tmp/scan.json", "--exclude-analysis-data"]`; if the user gave exclusions add `"--exclude", "<p1,p2>"` (comma-separated).
-- glue `imports-input`, then ua_run `extract-import-map.mjs`, args `[ROOT + "/.ua/tmp/imports-in.json", ROOT + "/.ua/tmp/imports-out.json"]`. (A legacy `.understand-anything/` folder makes the glue stop and say so: rename it, `mv .understand-anything .understand-anything.old`, then redo step 2.)
+- `node "$UA_SKILLS/understand/scan-project.mjs" "$PWD" "$PWD/.ua/tmp/scan.json" --exclude-analysis-data`; if the user gave exclusions add `--exclude "<p1,p2>"` (comma-separated).
+- glue `imports-input`, then `node "$UA_SKILLS/understand/extract-import-map.mjs" "$PWD/.ua/tmp/imports-in.json" "$PWD/.ua/tmp/imports-out.json"`. (A legacy `.understand-anything/` folder makes the glue stop and say so: rename it, `mv .understand-anything .understand-anything.old`, then redo step 2.)
 - glue `scan-result` writes `.ua/intermediate/scan-result.json` and prints the file count by category, the excluded count and the languages. Tell the user those numbers (over 100 files: say it will take a while) and continue.
 
 ## 3. Batch
-- ua_run `compute-batches.mjs`, args `[ROOT]` writes `.ua/intermediate/batches.json`.
+- `node "$UA_SKILLS/understand/compute-batches.mjs" "$PWD"` writes `.ua/intermediate/batches.json`.
 - glue `batch-inputs` writes `.ua/tmp/extract-in-<i>.json` per batch and prints each batch: its files (path, language, lines, category) and each file's imports.
 
 ## 4. Analyse every batch
 For each batch index i printed above:
-1. ua_run `extract-structure.mjs`, args `[ROOT + "/.ua/tmp/extract-in-<i>.json", ROOT + "/.ua/tmp/extract-out-<i>.json"]`, then glue `structure <i>`: the functions, classes and exports the parser found (with line ranges) and the sections/services/endpoints/steps/resources of non-code files.
+1. `node "$UA_SKILLS/understand/extract-structure.mjs" "$PWD/.ua/tmp/extract-in-<i>.json" "$PWD/.ua/tmp/extract-out-<i>.json"`, then glue `structure <i>`: the functions, classes and exports the parser found (with line ranges) and the sections/services/endpoints/steps/resources of non-code files.
 2. read_file each source file in the batch: summaries come from the code, not the file name.
 3. write_file `.ua/intermediate/batch-<i>.json` = `{"nodes": [...], "edges": [...]}` in ONE call. Over 40 nodes: write `batch-<i>-part-1.json`, `batch-<i>-part-2.json` ... instead, each a complete `{"nodes","edges"}` for a few files. Never patch a half-written file.
 
@@ -59,7 +59,7 @@ Only these types. A target is a node you wrote or `file:<path>` of another scann
 The lead analyses every batch itself; no subagents.
 
 ## 5. Merge
-ua_run `merge-batch-graphs.py`, args `[ROOT]` writes `.ua/intermediate/assembled-graph.json` (exit 0 required). Read its report: if it dropped nodes or edges you wrote (unknown type, dangling target), fix that batch file and run it again. Keep its "Could not fix" lines for the report.
+`python3 "$UA_SKILLS/understand/merge-batch-graphs.py" "$PWD"` writes `.ua/intermediate/assembled-graph.json` (exit 0 required). Read its report: if it dropped nodes or edges you wrote (unknown type, dangling target), fix that batch file and run it again. Keep its "Could not fix" lines for the report.
 
 ## 6. Layers and tour
 glue `nodes` prints every file-level node id with its summary. Then:
@@ -68,7 +68,7 @@ glue `nodes` prints every file-level node id with its summary. Then:
 
 ## 7. Assemble
 glue `assemble` writes `.ua/knowledge-graph.json`, `.ua/meta.json`, `.ua/diff-overlay.json` and `.ua/intermediate/fingerprint-input.json`, then prints the counts and every problem (a scanned file with no node, a batch file the merge skipped or that changed after it, a type outside the schema, a file node in no layer, an unknown id it dropped). Fix a problem at its source (layers.json, tour.json, or a batch file and step 5) and run `assemble` again until it prints `problems: 0`.
-Then ua_run `build-fingerprints.mjs`, args `[ROOT + "/.ua/intermediate/fingerprint-input.json"]`; it prints `Fingerprints baseline: N files` (a failure is reported, not fatal).
+Then `node "$UA_SKILLS/understand/build-fingerprints.mjs" "$PWD/.ua/intermediate/fingerprint-input.json"`; it prints `Fingerprints baseline: N files` (a failure is reported, not fatal).
 
 ## 8. Domain graph
 write_file `.ua/intermediate/domain.json` = `{"nodes": [...], "edges": [...]}`: 1-6 `domain:<kebab>` nodes (business areas), 1-5 `flow:<kebab>` nodes per domain (a process; `"domainMeta": {"entryPoint": "<trigger>", "entryType": "http|cli|event|cron|manual"}`), 2-8 `step:<flow>:<kebab>` nodes per flow, each with `filePath`; all with `name`, `summary`, `tags`, `complexity`. Edges: `contains_flow` 1.0 (domain -> flow), `flow_step` weights 0.1, 0.2 ... in step order (flow -> step), `cross_domain` 0.6 (domain -> domain). Only what the code really does; a tiny project has one domain.

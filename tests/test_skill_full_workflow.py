@@ -78,11 +78,19 @@ def test_the_directory_line_is_honest_about_the_sandbox(skills, tmp_path):
     assert directory_line(big, None) == f"Directory: {big.root.resolve()}"
 
 
-def test_the_understand_skill_names_its_runner(tmp_path, monkeypatch):
+def test_a_skill_whose_scripts_run_bash_can_reach_says_so(tmp_path, monkeypatch):
+    """DREAM-105: a plugin skill inside a script root (mounted read-only in run_bash's sandbox) runs its scripts with
+    run_bash as written -- no runner tool; a skill anywhere else is still invisible to the shell."""
+    from dream.core import skill_runtime
     make_skill(tmp_path / "understand-anything-plugin" / "skills", "understand", "Phase 0: scan.")
     found, _ = loader.discover([tmp_path / "understand-anything-plugin" / "skills"])
+    monkeypatch.setattr(skill_runtime, "script_roots", lambda: (tmp_path.resolve(),))
     line = directory_line(found[0], tmp_path / "elsewhere")
-    assert "ua_run" in line and "run_bash cannot see it" in line
+    assert "readable in run_bash's sandbox" in line and "<SKILL_DIR>" in line and "cannot see" not in line
+    assert "ua_run" not in line
+    monkeypatch.setattr(skill_runtime, "script_roots", lambda: ())
+    line = directory_line(found[0], tmp_path / "elsewhere")
+    assert "run_bash cannot see it" in line and "ua_run" not in line
 
 
 def test_the_bundled_file_hint_uses_the_tools_real_parameter(skills, tmp_path):

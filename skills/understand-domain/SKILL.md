@@ -8,17 +8,15 @@ description: "Use when the user wants the business domains of this project mappe
 Result: `.ua/domain-graph.json`, then a short report. Do the steps in order without stopping to ask. Announce each as `[step N/5] <name>`. You write the domain graph yourself; do not hand it to another agent.
 
 Helpers:
-- `ROOT` is the workspace path from run_bash `pwd`.
 - **Glue** is `python3 .ua/tmp/ua_glue.py <command>` through run_bash: the `understand` skill's helper. It prints what you need and checks what you write.
-- The plugin's one script runs only as `ua_run(skill="understand-domain", script="extract-domain-context.py", args=[ROOT], cwd=ROOT)`. The plugin folder is outside the sandbox: never cd, ls, find or read it.
+- The plugin's one script runs with run_bash from the workspace: `python3 "$UA_SKILLS/understand-domain/extract-domain-context.py" "$PWD"`. `$UA_SKILLS` is the plugin's skills folder, readable in the sandbox; never cd, ls or edit it.
 
 ## 1. Prepare
-- run_bash `pwd` gives ROOT.
 - `skill_open(name="understand-domain")` prints `Directory: <dir>`. Copy the glue from the sibling `understand` skill, even when `.ua/tmp/ua_glue.py` exists (it may be older): `copy_files(files=[{"src": "<dir>/../understand/glue.py", "dest": ".ua/tmp/ua_glue.py"}])`. Without copy_files: `skill_file(name="understand", path="glue.py")` and write_file its text (after the `understand/glue.py:` line) to `.ua/tmp/ua_glue.py`.
 
 ## 2. Gather
 - list_dir `.ua`. If it lists `knowledge-graph.json`, the map `.ua/knowledge-graph.json` exists: skip the scan.
-- No map: run the ua_run call above. It writes `.ua/intermediate/domain-context.json` (file tree, entry points, exports and imports, README and manifest).
+- No map: run that script command. It writes `.ua/intermediate/domain-context.json` (file tree, entry points, exports and imports, README and manifest).
 - glue `domain-context` prints the material: from the map (layers, every file with its summary and symbols, the links between them) or from the scan (entry points, file signatures, README). A `problem:` line says what to run first.
 - read_file the source behind an entry point only when the listing does not show what it does.
 

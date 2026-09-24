@@ -33,7 +33,7 @@
   document.querySelector('.split').append(panel);
   const frame = byId('ua-frame'), empty = byId('ua-empty'), changes = byId('ua-changes'), status = byId('ua-status');
   const ASK = 'Use the understand skill (Understand-Anything) to map this project into .ua/knowledge-graph.json, then tell me when the map is ready. '
-    + 'Its helper scripts run through the ua_run tool (the plugin is installed and built; skip locating it). '
+    + 'Run its helper scripts with run_bash from $UA_SKILLS (the plugin is installed and built; skip locating it). '
     + "Exclude Dream's own state folders: pass --exclude \".dream/**,.remember/**\" to the scan.";
   let tab = 'map', graph = null, analyzedAt = null, timer = null, loadingChanges = false, workspaceKey = null;
   const token = () => typeof TOKEN === 'string' ? TOKEN : (new URLSearchParams(location.search).get('token') || '');

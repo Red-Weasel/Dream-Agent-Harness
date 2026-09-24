@@ -117,12 +117,6 @@ _SHELL = {"Bash", "run_bash"}
 _DESTRUCTIVE = {"delete_file"}
 _DELEGATING = {"Task"}  # a subagent can write; it is not read-only inspection
 
-# DREAM-102: runner tools that execute only a fixed set of host scripts by file name inside an installed plugin's own
-# tree (ua_run: Understand-Anything's node/python helpers), never a shell. They stay MUTATING by provenance; `decide`
-# treats one like a workspace write ONLY while `runner_trusted` says the module defining it is the exact source the
-# owner approved by hash, and only when its given working directory and every argument stay inside the workspace.
-CONFINED_RUNNERS = frozenset({"ua_run"})
-
 # Self-built tools, by name, as declared by the registry each boot. Provenance —
 # not the name string — decides their capability: a tool Dream wrote for itself is
 # arbitrary Python whatever it calls itself, so naming it "Read" must not hand it
@@ -369,86 +363,6 @@ def _paths(tool_input: dict[str, Any], workspace: Path) -> list[Path]:
             if p is not None:
                 out.append(p)
     return out
-
-
-def runner_trusted(name: str) -> bool:
-    """A runner in CONFINED_RUNNERS is trusted only while the module that defines it -- ``<plugin>/tools/<name>.py`` of
-    an enabled plugin -- carries the source hash the owner approved in Dream's extension settings (the same
-    ``module_status`` check the tool guard runs before every call). Anything else, including a plugin that is not
-    loaded, is not trusted; the rule then changes nothing."""
-    from .. import extensions, plugins
-
-    for plugin in plugins.loaded():
-        path = plugin.tool_dir / f"{name}.py" if plugin.tool_dir else None
-        if plugin.enabled and path is not None and path.is_file():
-            try:
-                return extensions.module_status(path, plugin.name).get("trust_state") == "trusted"
-            except Exception:
-                return False
-    return False
-
-
-_RUNNER_FLAG = re.compile(r"--?[A-Za-z0-9][A-Za-z0-9_-]*")
-
-
-def _runner_outside(tool_input: dict[str, Any], workspace: Path) -> list[Path]:
-    """Runner arguments the allowance cannot vouch for. Structural: ``cwd`` must be GIVEN, absolute and inside the
-    workspace. Without it ua_run starts the script in Dream's own process directory, where a script's default output,
-    a flag it takes for a file name or an empty argument list would land; with it, every name a script resolves against
-    its working directory lands inside the workspace. Each argument must then be one of: an absolute (or ``~``) path
-    inside the workspace; a plain flag (``--name``, ``-n``), bare, ``=`` nothing, or ``=<absolute path inside>``; or
-    the value after ``--exclude`` (an ignore pattern such as ``.dream/**,.remember/**``), read as a path under ``cwd``.
-    No ``..`` segment anywhere: scripts normalise paths lexically while this check resolves them physically, and across
-    a symlink the two part ways. Any other relative token asks: where it lands depends on how the script reads it."""
-    outside: list[Path] = []
-    cwd = tool_input.get("cwd")
-    base = _runner_real(cwd) if isinstance(cwd, str) else None
-    if base is None or not base.is_relative_to(workspace):
-        outside.append(base or Path(f"(cwd {cwd!r})"))
-        base = None
-    args = tool_input.get("args")
-    if args is None:
-        args = []
-    if not isinstance(args, list):
-        return [*outside, Path(repr(args))]
-    previous = ""
-    for arg in args:
-        if not isinstance(arg, (str, int, float)) or isinstance(arg, bool):
-            outside.append(Path(repr(arg)))              # the runner stringifies it into a token the scripts read as a path
-            previous = ""
-            continue
-        raw = str(arg)
-        pattern, previous = previous == "--exclude", raw
-        if raw.startswith("-"):
-            name, _, value = raw.partition("=")
-            if not _RUNNER_FLAG.fullmatch(name):
-                outside.append(Path(repr(raw)))
-            elif value:                                  # --output=<path>, --scan-result=<path>, --changed-files=<path>
-                outside.extend(_runner_path_outside(value, workspace))
-        elif raw.startswith(("/", "~")):
-            outside.extend(_runner_path_outside(raw, workspace))
-        elif pattern and base is not None:               # scan-project's pattern; any other script reads it as a path
-            outside.extend(_runner_path_outside(str(base / raw), workspace))
-        else:
-            outside.append(Path(repr(raw)))
-    return outside
-
-
-def _runner_real(raw: str) -> Path | None:
-    """The real path of an absolute (or ``~``) runner path with no ``..`` segment; None for anything else."""
-    if not raw.startswith(("/", "~")) or ".." in raw.split("/"):
-        return None
-    try:
-        return Path(os.path.expanduser(raw)).resolve()
-    except (OSError, ValueError, RuntimeError):         # a NUL byte, a symlink loop
-        return None
-
-
-def _runner_path_outside(raw: str, workspace: Path) -> list[Path]:
-    real = _runner_real(raw)
-    if real is None:
-        return [Path(repr(raw))]
-    return [] if real.is_relative_to(workspace) else [real]
 
 
 def _bundled_skill_copy(tool_input: dict[str, Any], workspace: Path) -> bool:
@@ -836,12 +750,6 @@ def decide(
         return "deny", "plan mode — no changes"
     if scoped and execution_scope.red_team:
         return "deny", "tool has no enforced red-team execution boundary"
-    if _short(tool_name) in CONFINED_RUNNERS and runner_trusted(_short(tool_name)):
-        # DREAM-102: a trusted runner (see CONFINED_RUNNERS) pointed inside the workspace decides like a workspace write
-        outside = _runner_outside(tool_input, workspace)
-        if outside:
-            return "ask", f"outside workspace: {outside[0]}"
-        return ("allow", "trusted runner inside workspace") if mode in ("accept-edits", "auto") else ("ask", "runner in workspace")
     return "ask", "tool may change things"
 
 

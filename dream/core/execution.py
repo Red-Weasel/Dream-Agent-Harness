@@ -7,7 +7,8 @@ model tool arguments. No environment variable can enable red-team or host access
 
 Bubblewrap options follow https://github.com/containers/bubblewrap/blob/v0.9.0/bwrap.xml.
 Only explicit filesystem mounts are exposed. The host network, host processes,
-devices, agent sockets, and the host home directory are absent. A scope with
+devices, agent sockets, and the host home directory are absent -- except the installed
+skills' script folders and node's runtime, which run_bash mounts read-only (dream.core.skill_runtime). A scope with
 network=True reaches the public internet only, through sandbox_net's proxy.
 Each invocation has a private /tmp (including HOME=/tmp/home). Those files vanish
 when its process tree exits; use a workspace path for persistent output.
@@ -28,7 +29,7 @@ import tempfile
 import time
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterator, Mapping, Sequence
 
@@ -483,9 +484,13 @@ async def run_contained(argv: Sequence[str], scope: ExecutionScope, *, timeout: 
 
 async def execute_bash(command: str, context: ExecutionContext, *, timeout: float = 120,
                        max_output: int = 200_000) -> tuple[ProcessResult, bool]:
-    from dream.core import policy
+    from dream.core import policy, skill_runtime
 
-    scope = context.scope
+    # DREAM-105: installed skills' script folders (and node's runtime) are visible READ-ONLY, so a skill runs its
+    # scripts through the shell like any command; writes still reach only the workspace.
+    scope = replace(context.scope, read_roots=tuple(dict.fromkeys(
+        (*context.scope.read_roots, *skill_runtime.script_roots()))))
+    env = minimal_environment(skill_runtime.script_env())
     scope.validate()
     if not isinstance(command, str) or not command.strip() or "\0" in command:
         raise ExecutionRefused("a non-empty command string is required")
@@ -496,7 +501,7 @@ async def execute_bash(command: str, context: ExecutionContext, *, timeout: floa
     if decision == "deny":
         raise ExecutionRefused(reason)
     approval = context.approval
-    approved = approval is not None and approval.consume(command, scope)
+    approved = approval is not None and approval.consume(command, context.scope)   # approved in the session's scope
     uncontained = bool(approved and approval.allow_uncontained)
     if not capability.available and not uncontained:
         raise ExecutionUnavailable(f"sandbox unavailable: {capability.reason}. Command was not run; "
@@ -510,7 +515,7 @@ async def execute_bash(command: str, context: ExecutionContext, *, timeout: floa
     if scope.expires_at is not None:
         timeout = min(timeout, max(0, scope.expires_at - time.monotonic()))
     if uncontained:
-        result = await run_owned(argv, cwd=scope.workspace, env=minimal_environment(),
+        result = await run_owned(argv, cwd=scope.workspace, env=env,
                                  timeout=timeout, max_output=max_output)
     else:
         async with _network_proxy(scope.network) as net_fd:
@@ -518,7 +523,7 @@ async def execute_bash(command: str, context: ExecutionContext, *, timeout: floa
                 argv = _bwrap_argv(scope, capability.executable, argv, seccomp_fd=fd,
                                    mount_fds=mounts, net_fd=net_fd)
                 extra = () if net_fd is None else (net_fd,)
-                result = await run_owned(argv, cwd=scope.workspace, env=minimal_environment(),
+                result = await run_owned(argv, cwd=scope.workspace, env=env,
                                          timeout=timeout, max_output=max_output,
                                          pass_fds=(fd, *mounts.values(), *extra))
     return result, not uncontained

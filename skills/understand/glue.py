@@ -24,9 +24,9 @@ EDGE_TYPES = ('imports exports contains inherits implements calls subscribes pub
               'triggers migrates documents routes defines_schema').split()
 DOMAIN_NODES, DOMAIN_EDGES = ('domain', 'flow', 'step'), ('contains_flow', 'flow_step', 'cross_domain')
 BATCH_NAME = re.compile(r'^batch-(\d+)(?:-part-(\d+))?\.json$')
-STEP_OF = {'scan.json': 'ua_run scan-project.mjs (step 2)', 'imports-out.json': 'ua_run extract-import-map.mjs (step 2)',
+STEP_OF = {'scan.json': 'scan-project.mjs (step 2)', 'imports-out.json': 'extract-import-map.mjs (step 2)',
            'project.json': 'write_file .ua/tmp/project.json (step 1)', 'scan-result.json': 'glue scan-result (step 2)',
-           'batches.json': 'ua_run compute-batches.mjs (step 3)', 'assembled-graph.json': 'ua_run merge-batch-graphs.py (step 5)',
+           'batches.json': 'compute-batches.mjs (step 3)', 'assembled-graph.json': 'merge-batch-graphs.py (step 5)',
            'layers.json': 'write_file layers.json (step 6)', 'tour.json': 'write_file tour.json (step 6)'}
 
 
@@ -94,7 +94,7 @@ def batch_indices():
 def structure(i):
     path = os.path.join(TMP, 'extract-out-%s.json' % i)
     if not os.path.isfile(path):
-        print('problem: no %s -- the batch indices are %s; run ua_run extract-structure.mjs for batch %s first (step 4.1)'
+        print('problem: no %s -- the batch indices are %s; run extract-structure.mjs for batch %s first (step 4.1)'
               % (rel(path), ', '.join(map(str, batch_indices())) or 'unknown (run step 3)', i))
         return 1
     out = load(path)
@@ -345,7 +345,7 @@ def report(graph, problems):
 
 
 # ---- DREAM-103: the `understand-domain` skill -- a domain graph on its own, without the map's other files -------------
-DOMAIN_SCAN = 'ua_run(skill="understand-domain", script="extract-domain-context.py", args=[ROOT], cwd=ROOT)'
+DOMAIN_SCAN = 'python3 "$UA_SKILLS/understand-domain/extract-domain-context.py" "$PWD"'
 ENTRY_TYPES = ('http', 'cli', 'event', 'cron', 'manual')
 DREAM_STATE = ('.dream/', '.remember/')          # Dream's own state in the workspace; the plugin's scan does not skip it
 TOOL_DATA = ('.git', '.ua', '.dream', '.remember')   # a step's filePath names project code, never these
