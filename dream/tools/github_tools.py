@@ -20,6 +20,7 @@ from typing import Any
 
 from claude_agent_sdk import tool
 
+from . import mirror
 from .context import ctx, err, ok
 
 _MAX_IMPORT_FILES = 60
@@ -208,6 +209,7 @@ async def github_import_files(args: dict[str, Any]) -> dict[str, Any]:
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
+        mirror.file_written(target)   # an imported image shows; the shown page reloads (DREAM-104)
         landed.append(f"{target.relative_to(ws)}  ({len(data):,} B)")
     head = f"Imported {len(landed)} of {len(paths)} file(s) from {full}@{ref} into {dest_rel}/"
     body = ("\n" + "\n".join(landed) if landed else "") + ("\nNot imported:\n" + "\n".join(failed) if failed else "")

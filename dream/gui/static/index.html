@@ -197,6 +197,11 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
 #artbody iframe{width:100%;height:100%;border:0;display:block}
 #artbody pre{margin:0;padding:14px;font:12px/1.6 var(--mono);color:#cbd5e1;white-space:pre-wrap;
   word-break:break-word}
+#artbody.image, .companion #artbody.image{display:flex;align-items:center;justify-content:center;background:#111}
+#artbody.image img{max-width:100%;max-height:100%;object-fit:contain}
+.artfollow{display:flex;align-items:center;gap:5px;font:10px var(--mono);color:var(--dim);cursor:pointer;
+  white-space:nowrap;padding:0 4px}
+.artfollow input{margin:0;accent-color:var(--accent,#7c6cf0)}
 .artnote{padding:7px 12px;font:10px var(--mono);color:var(--faint);border-top:1px solid var(--line);
   background:var(--bg2);flex:0 0 auto}
 /* Phase 6: forms, tweaks, point mode */
@@ -312,6 +317,7 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
       </div>
       <button id="arttweaks" class="artmode" style="display:none" title="show the page's Tweaks panel">Tweaks</button>
       <button id="artpoint" class="artmode" title="point at an element; your next message names it">point</button>
+      <label class="artfollow" id="artfollow" title="Follow the model's view: what it loads in its hidden frame, each edit to that file and each screenshot it saves appear here live, so you can steer as it works. Off: only what it shows you explicitly. Starting state: studio.follow_model_view in the runtime settings."><input type="checkbox" id="artfollowbox" checked> follow</label>
       <button class="artclose" id="artclose" title="close">&times;</button>
     </div>
     <div id="artbody"></div>
@@ -568,16 +574,46 @@ function handle(m){
       // Dream asked to show a file (show_to_user / done). Same pipeline as a
       // written file, so the chip write_file made is reused, not duplicated.
       const d = m.data || {};
+      if(d.op === 'follow'){ setFollow(!!d.on); break; }
+      if(d.op === 'removed'){
+        // The model deleted the file the owner was looking at (DREAM-104): the canvas
+        // empties and says so; nothing moves focus or the view.
+        const key = `file:${d.path}`, wasOpen = artOpen === key;
+        artifacts.delete(key);
+        if(wasOpen){
+          closeArtifactFrame(); artOpen = null;
+          $('artname').textContent = `${d.title || d.path} — removed`;
+          $('artnote').textContent = 'the model deleted this file';
+          companion?.frameLoaded();
+        }
+        companion?.artifacts();
+        break;
+      }
+      if(d.op === 'show' && d.kind === 'image'){
+        // A screenshot the model saved, or an image a tool wrote (DREAM-104).
+        mirroring = d.source === 'mirror';
+        try{ openImage(d, replay); }
+        catch(e){ console.error(e); companion?.error('The image could not be shown. Ask Dream to show it again.'); }
+        finally{ mirroring = false; }
+        break;
+      }
       if(d.op === 'show'){
         // Reconnect replays the same explicit show. Keep live form values and
         // the user's chosen view when that exact preview is already open.
         const shown = COMPANION && artifacts.get(artOpen);
         if(replay && shown && artOpen === `file:${d.path}` && shown.versions[shown.versions.length-1] === d.content
             && (artView === 'code' || artbody.querySelector('iframe'))) break;
-        if(COMPANION) artView = 'preview';
+        // A mirrored show is the model's own view, not a handoff (DREAM-104): a reload
+        // of the page already open keeps the view the owner chose.
+        const mirror = d.source === 'mirror';
+        if(COMPANION && !(mirror && artOpen === `file:${d.path}`)) artView = 'preview';
+        // Every paint this show causes (addArtifact repaints an open artifact before
+        // openArtifact runs) must say it is mirrored, or the navigation would switch views.
+        mirroring = mirror;
         try{ const a = artifactFromWrite({path: d.path, content: d.content});
-          if(a) openArtifact(a.key); else companion?.error('This file cannot be previewed. Ask Dream to show an HTML or SVG version.'); }
+          if(a) openArtifact(a.key, {mirror}); else companion?.error('This file cannot be previewed. Ask Dream to show an HTML or SVG version.'); }
         catch(e){ console.error(e); companion?.error('The preview could not be opened. Ask Dream to show it again.'); }
+        finally{ mirroring = false; }
       } else if(d.op === 'eval' || d.op === 'snapshot'){
         askFrame(d);
       } else if(d.op === 'ask'){
@@ -721,7 +757,7 @@ function connect(){
   clearTimeout(reconnectTimer);
   if(socket && socket.readyState < 2) return;
   socket = new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}&history=1`);
-  socket.onopen = () => { retry = 0; replayOnConnect = true; busy(false); companion?.connection(true); };
+  socket.onopen = () => { retry = 0; replayOnConnect = true; busy(false); setFollow(true); companion?.connection(true); };
   socket.onmessage = e => { try{ handle(JSON.parse(e.data)); }catch(err){ console.error(err); } };
   socket.onclose = () => {
     busy(false); $('dot').className='dot off'; $('stat').textContent='reconnecting';
@@ -1113,6 +1149,7 @@ const ART_BRIDGE = `<script>(function(){
 
 const artifacts = new Map();       // key -> {key,title,kind,versions:[str]}
 let artOpen = null, artVerIdx = 0, artView = 'preview';
+let mirroring = false;             // a mirrored show (the model's own view) is being applied (DREAM-104)
 const panel = $('artpanel'), artbody = $('artbody');
 
 const RENDERABLE = {html:'HTML', svg:'SVG', xml:'SVG'};
@@ -1143,7 +1180,7 @@ function renderChip(a){
   if(COMPANION) return;
   let chip = document.querySelector(`.artchip[data-k="${CSS.escape(a.key)}"]`);
   const n = a.versions.length;
-  const html = `<div class="ic">${a.kind === 'svg' ? 'SVG' : '&lt;/&gt;'}</div>
+  const html = `<div class="ic">${a.kind === 'svg' ? 'SVG' : a.kind === 'image' ? 'IMG' : '&lt;/&gt;'}</div>
     <div class="t"><b>${esc(a.title)}</b>
       <span>${a.kind.toUpperCase()} · ${n} version${n>1?'s':''} · click to open</span></div>
     <div class="go">open →</div>`;
@@ -1154,7 +1191,7 @@ function renderChip(a){
   stream.appendChild(chip); scroll();
 }
 
-function openArtifact(key){
+function openArtifact(key, opts){
   const a = artifacts.get(key); if(!a) return;
   artOpen = key; artVerIdx = a.versions.length - 1;
   // Three columns is one too many at laptop widths — the transcript ends up
@@ -1162,22 +1199,86 @@ function openArtifact(key){
   // brings it back if you want both.
   if(window.innerWidth < 1500) rail.classList.add('hide');
   panel.classList.add('open');
-  companion?.openArtifact();
-  paintArtifact();
+  companion?.openArtifact(opts);
+  paintArtifact(opts);
 }
 
-function paintArtifact(){
+/* ---------- following the model's view (DREAM-104) --------------------------- */
+// The pane mirrors what the model loads in its hidden frame, each edit to that file
+// and each screenshot it saves, unless this is off. The state lives on the server
+// (one per session): the model's tools consult it, every pane hears a change, and a
+// pane that connects assumes on until the server says otherwise.
+let followModel = true;
+function setFollow(on){ followModel = !!on; $('artfollowbox').checked = followModel; }
+$('artfollowbox').onchange = async e => {
+  const on = e.target.checked;
+  try{
+    const r = await fetch('/api/follow', {method:'POST', headers:{'Content-Type':'application/json','X-Dream-Token':TOKEN},
+      body: JSON.stringify({on})});
+    const j = await r.json(); if(!r.ok) throw new Error(j.error || 'could not change following');
+    setFollow(j.on);
+    sysline(on ? "Following the model's view: what it loads, edits and captures appears here."
+               : "Not following the model's view: only what it shows you explicitly appears here.");
+  }catch(err){ setFollow(!on); sysline(err.message, 'error'); }
+};
+
+// An image the model saved, served by the token-checked download route (workspace
+// files only, like the visual_check form's images); the stamp makes a re-saved file
+// with the same name load again instead of coming from the cache.
+function imageHref(path, stamp){
+  return '/api/download?path=' + encodeURIComponent(String(path || '')) + '&token=' + encodeURIComponent(TOKEN)
+    + '&v=' + encodeURIComponent(String(stamp || ''));
+}
+function openImage(d, replay){
+  const path = String(d.path || ''); if(!path) return;
+  const key = `file:${path}`, stamp = String(d.stamp || Date.now());
+  let a = artifacts.get(key);
+  if(!a || a.kind !== 'image'){ a = {key, title: path.split('/').pop(), kind: 'image', versions: []}; artifacts.set(key, a); }
+  if(a.versions[a.versions.length-1] !== stamp) a.versions.push(stamp);
+  else if(replay && artOpen === key) return;   // reconnect replays what is already showing
+  a.path = path; a.size = d.size ? (d.size / 1024).toFixed(1) + ' KB' : '';
+  renderChip(a);
+  companion?.artifacts();
+  if(COMPANION && artOpen !== key) artView = 'preview';
+  openArtifact(key, {mirror: d.source === 'mirror'});
+}
+
+function paintArtifact(opts){
   const a = artifacts.get(artOpen); if(!a) return;
   $('artname').textContent = a.title;
   const sel = $('artver');
   sel.innerHTML = a.versions.map((_, i) =>
     `<option value="${i}"${i===artVerIdx?' selected':''}>v${i+1}${i===a.versions.length-1?' (latest)':''}</option>`
   ).join('');
-  sel.style.display = a.versions.length > 1 ? '' : 'none';
+  // An image's versions are only load stamps; the route serves the file as it is now.
+  sel.style.display = a.versions.length > 1 && a.kind !== 'image' ? '' : 'none';
   $('artprev').classList.toggle('on', artView === 'preview');
   $('artcode').classList.toggle('on', artView === 'code');
   companion?.paintArtifact(a);
-  window.dispatchEvent(new Event("dream:artifact"));
+  // The workspace navigation listens: a mirrored show is the model's own view and must
+  // not pull the owner away from the page they chose (DREAM-104, gate 1).
+  const mirror = mirroring || !!(opts && opts.mirror);
+  window.dispatchEvent(new CustomEvent("dream:artifact", {detail: {mirror}}));
+  if(a.kind === 'image'){
+    tweaksAvail = false; $('arttweaks').style.display = 'none';
+    frameReady = false;
+    if(artView === 'code'){
+      artbody.className = 'code';
+      artbody.innerHTML = `<pre>${esc(a.path)}${a.size ? '\n' + esc(a.size) : ''}</pre>`;
+      $('artnote').textContent = 'image file · ' + a.path;
+      companion?.frameLoaded();
+      return;
+    }
+    artbody.className = 'image';
+    const img = document.createElement('img');
+    img.alt = a.title; img.decoding = 'async';
+    img.addEventListener('load', () => companion?.frameLoaded(), {once: true});
+    img.addEventListener('error', () => { $('artnote').textContent = 'the image could not be loaded from the workspace'; companion?.frameLoaded(); }, {once: true});
+    img.src = imageHref(a.path, a.versions[artVerIdx]);
+    artbody.replaceChildren(img);
+    $('artnote').textContent = 'image · ' + a.path + ' · from the workspace, as the model saved it';
+    return;
+  }
   const body = a.versions[artVerIdx] || '';
   if(artView === 'code'){
     artbody.className = 'code';

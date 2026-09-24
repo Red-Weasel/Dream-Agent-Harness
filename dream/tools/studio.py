@@ -29,6 +29,7 @@ from ..core.execution import ExecutionRefused, ExecutionUnavailable, current_exe
 from ..gui.bundle import prepare_studio_media
 from ..gui.preview import MAX_CAPTURE_STEPS, get_preview
 from ..workflows.validation import verify_page
+from . import mirror
 from .context import ctx, err, ok, studio
 
 MULTI_MAX_STEPS = 12
@@ -64,15 +65,27 @@ def _summarize(logs: list[str]) -> str:
     return head + "\n" + "\n".join(logs[:40]) + ("\n… (get_webview_logs for the rest)" if len(logs) > 40 else "")
 
 
+# What the hidden frame holds and the file's (mtime, size) when it loaded it (DREAM-104,
+# gate note 6): a capture after mirrored edit reloads must show the file as it is now,
+# not as the frame first saw it.
+_LOADED: tuple[Path, tuple[int, int] | None] | None = None
+
+
 async def _load(p: Path) -> list[str]:
+    global _LOADED
     try:
-        return await get_preview().load(p)
+        logs = await get_preview().load(p)
     except Exception as e:
         raise RuntimeError(f"the hidden frame could not load {p.name}: {type(e).__name__}: {e}")
+    _LOADED = (p.resolve(), mirror.signature(p))
+    return logs
 
 
-def _show_in_studio(p: Path, given: str) -> bool:
-    """Queue an explicit show, keyed like write_file. True means queued, not visible."""
+def _show_in_studio(p: Path, given: str, *, source: str | None = None) -> bool:
+    """Queue a show for the user's pane, keyed like write_file. True means queued, not
+    visible. ``source="mirror"`` marks a show the model did not ask for (DREAM-104), so
+    the pane changes only its canvas; an explicit show carries no source and its event
+    is exactly what it was before the mirror existed."""
     emit = ctx().emit
     panel = studio()
     if emit is None or panel is None or getattr(panel, "ready", True) is False:
@@ -82,12 +95,42 @@ def _show_in_studio(p: Path, given: str) -> bool:
     except OSError:
         return False
     body = prepare_studio_media(p, body)
-    event = Event("studio", {"op": "show", "path": given, "title": p.name, "content": body})
+    data: dict[str, Any] = {"op": "show", "path": given, "title": p.name, "content": body}
+    if source:
+        data["source"] = source
+    event = Event("studio", data)
     retain = getattr(panel, "retain_show", None)
     if callable(retain):
         retain(event)
     emit(event)
+    mirror.record_shown(p, given, "page")   # a later edit to this file reloads it
     return True
+
+
+def _mirror_page(p: Path, given: str) -> str:
+    """Mirror a hidden-frame load into the user's pane (DREAM-104); one line that tells
+    the model what the user can see, so it never claims the page is private."""
+    panel = studio()
+    if panel is None:
+        return "Studio is not open, so the user sees nothing yet; the hidden frame is yours alone."
+    if not mirror.following():
+        return ("The user turned off following your view, so their pane did not change; call "
+                "show_to_user when you want them to see this (load its schema once with "
+                "tool_schema if it is deferred).")
+    if mirror.workspace_relative(p) is None:
+        return ("Loaded in your hidden frame only; not mirrored: outside the workspace (the "
+                "user's pane renders workspace files only).")
+    try:
+        queued = _show_in_studio(p, given, source="mirror")
+    except ValueError as e:
+        return f"Studio could not mirror it into the user's pane: {e}"
+    if not queued:
+        return "Studio is not ready, so the user's pane did not change."
+    connected = getattr(panel, "client_count", 0)
+    return ("The user's Studio pane shows it too (they follow your view): each edit to this "
+            "file reloads there and each screenshot you save appears there, so they may steer "
+            "you mid-task; use done for the final handoff."
+            + ("" if connected else " No Studio browser is connected yet."))
 
 
 def _delivery_notice(p: Path, queued: bool) -> str:
@@ -106,9 +149,10 @@ def _delivery_notice(p: Path, queued: bool) -> str:
 
 @tool(
     "show_html",
-    "Open an HTML file in YOUR hidden preview frame (not the user's pane). Use this "
-    "before get_webview_logs to check the page loads cleanly. The user's Studio panel "
-    "is not affected — call show_to_user when you want to surface a file in their view.",
+    "Open an HTML file in your hidden preview frame to check it (then get_webview_logs). "
+    "The user's Studio pane follows your view by default, so they see the same file, "
+    "watch it reload as you edit it, and may steer you; the result says what they see. "
+    "show_to_user is for when they turned following off.",
     {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
 )
 async def show_html(args: dict[str, Any]) -> dict[str, Any]:
@@ -123,9 +167,7 @@ async def show_html(args: dict[str, Any]) -> dict[str, Any]:
     note = get_preview().renderer_note()
     return ok(f"Loaded {p} in the hidden frame ({(time.monotonic() - t0) * 1000:.0f} ms): "
               + _summarize(logs) + (f"\n{note}" if note else "")
-              + "\nThis preview is not shown in the user's Studio. When ready to share it, "
-                "call show_to_user with this HTML path; use done for final delivery. "
-                "If the needed signature is deferred, load it once with tool_schema.")
+              + "\n" + _mirror_page(p, str(args["path"])))
 
 
 @tool(
@@ -236,7 +278,11 @@ def _steps(raw: Any, *, code_required: bool, limit: int) -> tuple[list[dict[str,
 
 async def _ensure_loaded(p: Path) -> str | None:
     pv = get_preview()
-    if pv.loaded != p.resolve():
+    rp = p.resolve()
+    # Stale: the frame holds this file, but the file changed since (an edit reloaded
+    # it in the owner's pane); the capture must not show the old page.
+    stale = _LOADED is None or _LOADED[0] != rp or _LOADED[1] != mirror.signature(rp)
+    if pv.loaded != rp or stale:
         try:
             await _load(p)
         except RuntimeError as e:
@@ -322,7 +368,10 @@ async def save_screenshot(args: dict[str, Any]) -> dict[str, Any]:
         paths = await pv.screenshot(steps, hq=bool(args.get("hq")), save_to=target)
     except Exception as e:
         return err(f"Screenshot failed: {type(e).__name__}: {e}")
-    return ok("Saved:\n" + "\n".join(str(x) for x in paths) + "\n" + _visual_next_step())
+    # The owner watches the render too (DREAM-104): the newest capture, in their pane.
+    shown = ("\nThe user's Studio pane shows this capture too."
+             if paths and mirror.show_image(paths[-1]) else "")
+    return ok("Saved:\n" + "\n".join(str(x) for x in paths) + shown + "\n" + _visual_next_step())
 
 
 @tool(
@@ -523,9 +572,10 @@ async def run_script(args: dict[str, Any]) -> dict[str, Any]:
     code = args.get("code")
     if not code:
         return err("run_script needs a 'code' argument.")
+    saved: list[str] = []   # workspace-relative paths the script's saveFile wrote
     try:
         logs = await script_execution.run_script(code, current_execution(ctx().workspace),
-                                                  get_preview().captures)
+                                                  get_preview().captures, saved=saved)
     except asyncio.TimeoutError as e:
         logs = getattr(e, "logs", [])
         return err(f"run_script timed out (limit {script_execution.SCRIPT_TIMEOUT:g} s or scope expiry); "
@@ -539,6 +589,13 @@ async def run_script(args: dict[str, Any]) -> dict[str, Any]:
         return err(f"Execution refused: {type(e).__name__}: {str(e)[:2000]}")
     except Exception as e:
         return err(f"Script error: {type(e).__name__}: {str(e)[:2000]}")
+    finally:
+        # Whatever the script saved before it finished or failed is on disk: an image
+        # goes to the owner's pane, the shown page reloads (DREAM-104).
+        ws = ctx().workspace
+        for rel in saved:
+            mirror.file_written(ws / rel)
+        mirror.refresh_shown()
     return ok("Done." + ("\n" + "\n".join(logs) if logs else " (no log output)"))
 
 

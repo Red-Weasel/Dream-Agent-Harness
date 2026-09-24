@@ -1,0 +1,7 @@
+{
+  "format": "dream-skill/v1",
+  "name": "understand-dashboard",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": ["list_dir"]
+}

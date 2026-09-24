@@ -1561,7 +1561,7 @@ class App(CouncilControls):
 
         set_studio(None)
         try:
-            from ..gui.server import StudioServer
+            from ..gui.server import StudioServer, follow_default
 
             self.studio = StudioServer(
                 self.bus,
@@ -1576,6 +1576,7 @@ class App(CouncilControls):
                 runtime=lambda: self.engine.runtime_status(),
                 learning=self._learning_status,
                 on_control=self._runtime_control,
+                follow_model_view=follow_default(),   # the pane follows the model's view (DREAM-104)
             )
             url = await self.studio.start()
             set_studio(self.studio)

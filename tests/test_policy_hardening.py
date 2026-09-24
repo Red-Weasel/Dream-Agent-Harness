@@ -170,3 +170,20 @@ async def test_confined_commands_still_auto_allow(tmp_path):
                 "grep -rn policy ."]:
         assert policy.decide("run_bash", {"command": cmd}, "auto", tmp_path, **options)[0] == "allow", cmd
     assert policy.decide("run_bash", {"command": "rm -rf build/"}, "auto", tmp_path, **options)[0] == "ask"
+
+
+def test_an_unresolvable_path_asks_instead_of_raising(tmp_path):
+    """A NUL byte, an unknown ~user or a symlink loop used to raise out of decide() (ValueError / RuntimeError from
+    Path.resolve / expanduser) -- a crashed turn instead of a question. Never inside, so the call asks."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "loop").symlink_to(ws / "loop")
+    for tool, tool_input in (("write_file", {"path": "/etc\x00"}), ("write_file", {"path": f"{ws}/x\x00"}),
+                             ("write_file", {"path": "x\x00"}), ("write_file", {"path": "~nosuchuser_dream_test/x"}),
+                             ("write_file", {"path": "loop/x"}),
+                             ("copy_files", {"files": [{"src": "a\x00", "dest": "b"}]}),
+                             ("copy_files", {"files": [{"src": "a", "dest": "b\x00"}]}),
+                             ("delete_file", {"paths": ["x\x00"]})):
+        for mode in ("auto", "accept-edits", "ask"):
+            decision, reason = policy.decide(tool, tool_input, mode, ws)
+            assert decision == "ask" and reason.startswith("outside workspace"), (tool, tool_input, mode, reason)

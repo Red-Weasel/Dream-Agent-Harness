@@ -117,6 +117,12 @@ _SHELL = {"Bash", "run_bash"}
 _DESTRUCTIVE = {"delete_file"}
 _DELEGATING = {"Task"}  # a subagent can write; it is not read-only inspection
 
+# DREAM-102: runner tools that execute only a fixed set of host scripts by file name inside an installed plugin's own
+# tree (ua_run: Understand-Anything's node/python helpers), never a shell. They stay MUTATING by provenance; `decide`
+# treats one like a workspace write ONLY while `runner_trusted` says the module defining it is the exact source the
+# owner approved by hash, and only when its given working directory and every argument stay inside the workspace.
+CONFINED_RUNNERS = frozenset({"ua_run"})
+
 # Self-built tools, by name, as declared by the registry each boot. Provenance —
 # not the name string — decides their capability: a tool Dream wrote for itself is
 # arbitrary Python whatever it calls itself, so naming it "Read" must not hand it
@@ -183,6 +189,17 @@ def declare_custom_tools(names: Iterable[str]) -> None:
     _CUSTOM_NAMES.update(names)
 
 
+def _short(tool_name: str) -> str:
+    """``mcp__<MCP_SERVER_NAME>__<tool>`` -> ``<tool>`` for Dream's OWN server only; every other name stays whole."""
+    if tool_name.startswith("mcp__"):
+        from .. import config
+
+        parts = tool_name.split("__", 2)
+        if len(parts) == 3 and parts[1] == config.MCP_SERVER_NAME:
+            return parts[2]
+    return tool_name
+
+
 def capability(tool_name: str) -> str:
     """Classify a tool (SDK builtin, Dream MCP tool, or self-built custom tool)
     by what it can do. Unknown MCP/custom tools default to MUTATING — a self-built
@@ -194,19 +211,13 @@ def capability(tool_name: str) -> str:
     not exactly a known built-in is MUTATING. And a declared self-built tool is
     MUTATING by provenance before any name is consulted, so wearing a builtin's
     name buys it nothing."""
-    short = tool_name
-    if short.startswith("mcp__"):
-        # mcp__dream__<tool> → <tool>, and ONLY for Dream's own server. Any other
-        # mcp__… name keeps its full form and so can never match a built-in below.
-        # Gate 2 finding 1: an external server that called itself "mcp" minted
-        # `mcp__read_file`, the old tail-strip handed it read_file's free pass, and
-        # the local backend ran it without asking. A custom tool that smuggles
-        # more "__" into its name keeps them for the same reason.
-        from .. import config
-
-        parts = short.split("__", 2)
-        if len(parts) == 3 and parts[1] == config.MCP_SERVER_NAME:
-            short = parts[2]
+    # mcp__dream__<tool> → <tool>, and ONLY for Dream's own server. Any other
+    # mcp__… name keeps its full form and so can never match a built-in below.
+    # Gate 2 finding 1: an external server that called itself "mcp" minted
+    # `mcp__read_file`, the old tail-strip handed it read_file's free pass, and
+    # the local backend ran it without asking. A custom tool that smuggles
+    # more "__" into its name keeps them for the same reason.
+    short = _short(tool_name)
     if short in _CUSTOM_NAMES:
         return MUTATING
     if short in _DESTRUCTIVE:
@@ -330,7 +341,10 @@ def _paths(tool_input: dict[str, Any], workspace: Path) -> list[Path]:
         if isinstance(v, str) and v:
             # Relative paths resolve against the workspace — matching how the
             # native tools execute them.
-            return (workspace / Path(v).expanduser()).resolve()
+            try:
+                return (workspace / Path(v).expanduser()).resolve()
+            except (OSError, ValueError, RuntimeError):  # a NUL byte, ~nosuchuser, a symlink loop: never inside -> ask
+                return Path(repr(v))
         return None
 
     out = []
@@ -355,6 +369,118 @@ def _paths(tool_input: dict[str, Any], workspace: Path) -> list[Path]:
             if p is not None:
                 out.append(p)
     return out
+
+
+def runner_trusted(name: str) -> bool:
+    """A runner in CONFINED_RUNNERS is trusted only while the module that defines it -- ``<plugin>/tools/<name>.py`` of
+    an enabled plugin -- carries the source hash the owner approved in Dream's extension settings (the same
+    ``module_status`` check the tool guard runs before every call). Anything else, including a plugin that is not
+    loaded, is not trusted; the rule then changes nothing."""
+    from .. import extensions, plugins
+
+    for plugin in plugins.loaded():
+        path = plugin.tool_dir / f"{name}.py" if plugin.tool_dir else None
+        if plugin.enabled and path is not None and path.is_file():
+            try:
+                return extensions.module_status(path, plugin.name).get("trust_state") == "trusted"
+            except Exception:
+                return False
+    return False
+
+
+_RUNNER_FLAG = re.compile(r"--?[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
+def _runner_outside(tool_input: dict[str, Any], workspace: Path) -> list[Path]:
+    """Runner arguments the allowance cannot vouch for. Structural: ``cwd`` must be GIVEN, absolute and inside the
+    workspace. Without it ua_run starts the script in Dream's own process directory, where a script's default output,
+    a flag it takes for a file name or an empty argument list would land; with it, every name a script resolves against
+    its working directory lands inside the workspace. Each argument must then be one of: an absolute (or ``~``) path
+    inside the workspace; a plain flag (``--name``, ``-n``), bare, ``=`` nothing, or ``=<absolute path inside>``; or
+    the value after ``--exclude`` (an ignore pattern such as ``.dream/**,.remember/**``), read as a path under ``cwd``.
+    No ``..`` segment anywhere: scripts normalise paths lexically while this check resolves them physically, and across
+    a symlink the two part ways. Any other relative token asks: where it lands depends on how the script reads it."""
+    outside: list[Path] = []
+    cwd = tool_input.get("cwd")
+    base = _runner_real(cwd) if isinstance(cwd, str) else None
+    if base is None or not base.is_relative_to(workspace):
+        outside.append(base or Path(f"(cwd {cwd!r})"))
+        base = None
+    args = tool_input.get("args")
+    if args is None:
+        args = []
+    if not isinstance(args, list):
+        return [*outside, Path(repr(args))]
+    previous = ""
+    for arg in args:
+        if not isinstance(arg, (str, int, float)) or isinstance(arg, bool):
+            outside.append(Path(repr(arg)))              # the runner stringifies it into a token the scripts read as a path
+            previous = ""
+            continue
+        raw = str(arg)
+        pattern, previous = previous == "--exclude", raw
+        if raw.startswith("-"):
+            name, _, value = raw.partition("=")
+            if not _RUNNER_FLAG.fullmatch(name):
+                outside.append(Path(repr(raw)))
+            elif value:                                  # --output=<path>, --scan-result=<path>, --changed-files=<path>
+                outside.extend(_runner_path_outside(value, workspace))
+        elif raw.startswith(("/", "~")):
+            outside.extend(_runner_path_outside(raw, workspace))
+        elif pattern and base is not None:               # scan-project's pattern; any other script reads it as a path
+            outside.extend(_runner_path_outside(str(base / raw), workspace))
+        else:
+            outside.append(Path(repr(raw)))
+    return outside
+
+
+def _runner_real(raw: str) -> Path | None:
+    """The real path of an absolute (or ``~``) runner path with no ``..`` segment; None for anything else."""
+    if not raw.startswith(("/", "~")) or ".." in raw.split("/"):
+        return None
+    try:
+        return Path(os.path.expanduser(raw)).resolve()
+    except (OSError, ValueError, RuntimeError):         # a NUL byte, a symlink loop
+        return None
+
+
+def _runner_path_outside(raw: str, workspace: Path) -> list[Path]:
+    real = _runner_real(raw)
+    if real is None:
+        return [Path(repr(raw))]
+    return [] if real.is_relative_to(workspace) else [real]
+
+
+def _bundled_skill_copy(tool_input: dict[str, Any], workspace: Path) -> bool:
+    """A ``copy_files`` call whose every source is a FILE inside an installed curated skill root (Dream's own
+    ``skills/<name>/`` trees, compared by real path so a symlink out of one does not count) and whose every destination
+    lies inside the workspace, with no ``move`` (a move would delete the bundled file). That is a skill bringing its
+    own bundle into the project -- DREAM-102's ``glue.py`` -- and nothing else."""
+    from .. import config
+
+    files = tool_input.get("files")
+    if not isinstance(files, list) or not files:
+        return False
+    roots: list[Path] = []
+    for root in config.bundled_skill_dirs():
+        try:
+            if root.is_dir():
+                roots.append(root.resolve())
+        except OSError:
+            continue
+    for entry in files:
+        if not isinstance(entry, dict) or entry.get("move") or not entry.get("src") or not entry.get("dest"):
+            return False
+        try:
+            src = (workspace / Path(str(entry["src"])).expanduser()).resolve(strict=True)
+            dest = (workspace / Path(str(entry["dest"])).expanduser()).resolve()
+        except (OSError, ValueError, RuntimeError):
+            return False
+        if not src.is_file() or not any(src.is_relative_to(root) for root in roots):
+            return False
+        if not dest.is_relative_to(workspace):
+            return False
+    return True
 
 
 def _shell_parts(command: str) -> list[list[str]]:
@@ -648,6 +774,9 @@ def decide(
             return ("allow", "contained script") if mode in ("accept-edits", "auto") else ("ask", "workspace script")
         if scoped and execution_scope.red_team and not execution_scope.allows_deletion(paths):
             return "deny", "outside workspace execution scope: red-team writes require an explicit target"
+        if outside and _short(tool_name) == "copy_files" and _bundled_skill_copy(tool_input, workspace):
+            # DREAM-102: a curated skill's bundled file coming into the project is a workspace write, not an outside one
+            return ("allow", "bundled skill file into the workspace") if mode in ("accept-edits", "auto") else ("ask", "write in workspace")
         if outside:
             return "ask", f"outside workspace: {outside[0]}"
         if mode in ("accept-edits", "auto"):
@@ -707,6 +836,12 @@ def decide(
         return "deny", "plan mode — no changes"
     if scoped and execution_scope.red_team:
         return "deny", "tool has no enforced red-team execution boundary"
+    if _short(tool_name) in CONFINED_RUNNERS and runner_trusted(_short(tool_name)):
+        # DREAM-102: a trusted runner (see CONFINED_RUNNERS) pointed inside the workspace decides like a workspace write
+        outside = _runner_outside(tool_input, workspace)
+        if outside:
+            return "ask", f"outside workspace: {outside[0]}"
+        return ("allow", "trusted runner inside workspace") if mode in ("accept-edits", "auto") else ("ask", "runner in workspace")
     return "ask", "tool may change things"
 
 

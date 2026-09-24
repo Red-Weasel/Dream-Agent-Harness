@@ -35,12 +35,20 @@ def make_skill(root, name, *, filename='SKILL.md', text='Apply the specific work
 
 def test_default_catalog_is_small_and_all_workflows_are_packaged(curated):
     assert {s.name for s in curated} == set(config.CURATED_SKILLS)
-    assert len(curated) == 16
+    assert len(curated) == 19
     # 10 workflows fit in 16k; the four process skills added 2026-09-22 (brainstorming,
     # debugging, gated-build, frontend-design) bring the curated set to 14 at ~2.1k each;
-    # grill-me and handoff (owner request 2026-09-23, DREAM-090) bring it to 16 at ~1.5k each.
-    assert sum(len(s.manifest.read_text()) for s in curated) < 28000
-    assert len('\n'.join(loader.index_lines(curated))) < 1900
+    # grill-me and handoff (owner request 2026-09-23, DREAM-090) bring it to 16 at ~1.5k each;
+    # understand (DREAM-102) is a whole nine-step pipeline for a local model at ~7.9k, so 17 skills
+    # are under 36k. Its index line takes the joined index past 1,900 chars; note that the wake
+    # index (installed_skill_tools.index_lines) already stops at 1,600 chars, so the last skills by
+    # name (research, understand, verifying, writing) are not in the wake context today.
+    # DREAM-103 adds understand-dashboard (1,443 chars) and understand-domain (4,141): the 17 texts
+    # summed 34,981, so 34,981 + 1,443 + 4,141 = 40,565 < 41,000; their index lines (173 and 170
+    # chars, one newline each) take the joined index from 2,010 to 2,010 + 174 + 171 = 2,355 < 2,400.
+    # Like the others after `understand` by name, neither is in the 1,600-char wake index.
+    assert sum(len(s.manifest.read_text()) for s in curated) < 41000
+    assert len('\n'.join(loader.index_lines(curated))) < 2400
     project = tomllib.loads((ROOT/'pyproject.toml').read_text())
     wheel = project['tool']['hatch']['build']['targets']['wheel']
     selected = set(wheel['only-include'])

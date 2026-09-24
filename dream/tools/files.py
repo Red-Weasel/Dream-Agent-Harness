@@ -23,6 +23,7 @@ from typing import Any
 
 from claude_agent_sdk import tool
 
+from . import mirror
 from .context import ctx, err, in_thread, ok
 
 _NEAR_MISS_QUOTE = 600
@@ -193,6 +194,7 @@ async def str_replace_edit(args: dict[str, Any]) -> dict[str, Any]:
             fh.write(new)
     except Exception as e:
         return err(f"{type(e).__name__}: {e}")
+    mirror.file_written(p)   # the shown page reloads in the owner's pane (DREAM-104)
     return ok(f"Edited {p}: {len(edits)} replacement(s).")
 
 
@@ -336,7 +338,12 @@ async def copy_files(args: dict[str, Any]) -> dict[str, Any]:
             return err(f"files[{i}]: cannot copy a folder into itself ({src}). "
                        f"Nothing was copied.")
         plan.append((src, dest, bool(f.get("move"))))
-    return await in_thread(_copy, plan)
+    result = await in_thread(_copy, plan)
+    if not result.get("is_error"):
+        for _, dest, _ in plan:   # a copied image shows in the owner's pane (DREAM-104)
+            if dest.is_file():
+                mirror.file_written(dest)
+    return result
 
 
 def _copy(plan: list[tuple[Path, Path, bool]]) -> dict[str, Any]:
@@ -395,7 +402,11 @@ async def delete_file(args: dict[str, Any]) -> dict[str, Any]:
             # enough — this tool never deletes outside the workspace at all.
             return err(f"Refusing to delete outside the workspace: {where}. Nothing was "
                        f"deleted. If you really mean it, use run_bash, which will ask.")
-    return await in_thread(_delete, targets)
+    result = await in_thread(_delete, targets)
+    for t in targets:   # the pane drops a file the owner was looking at (DREAM-104)
+        if not t.exists() and not t.is_symlink():
+            mirror.file_removed(t)
+    return result
 
 
 def _delete(targets: list[Path]) -> dict[str, Any]:

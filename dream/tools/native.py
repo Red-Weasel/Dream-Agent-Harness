@@ -12,6 +12,7 @@ from typing import Any
 
 from claude_agent_sdk import tool
 
+from . import mirror
 from .context import ctx, err, ok
 
 _MAX_READ = 200_000
@@ -114,6 +115,7 @@ async def write_file(args: dict[str, Any]) -> dict[str, Any]:
             p.write_text(content, encoding="utf-8")
     except Exception as e:
         return err(f"{type(e).__name__}: {e}")
+    mirror.file_written(p)   # the shown page reloads in the owner's pane (DREAM-104)
     note = (f"Appended {len(content)} chars to {p} (now {p.stat().st_size:,} bytes)" if append
             else f"Wrote {len(content)} chars to {p}")
     asset = str(args.get("asset") or "").strip()
@@ -243,6 +245,9 @@ async def run_bash(args: dict[str, Any]) -> dict[str, Any]:
                    "this failure; report the prerequisite issue and await an environment change.")
     except Exception as e:
         return err(f"{type(e).__name__}: {e}")
+    # A script that rewrote the page the owner is watching: one stat, then a reload
+    # (DREAM-104). Files it created are not searched for.
+    mirror.refresh_shown()
     text = result.output.decode("utf-8", "replace")
     if result.truncated:
         text += "\n[...truncated]"

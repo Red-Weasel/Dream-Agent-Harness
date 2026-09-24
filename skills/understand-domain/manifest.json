@@ -1,0 +1,7 @@
+{
+  "format": "dream-skill/v1",
+  "name": "understand-domain",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": ["run_bash", "list_dir", "copy_files", "skill_open", "write_file", "read_file", "skill_file"]
+}

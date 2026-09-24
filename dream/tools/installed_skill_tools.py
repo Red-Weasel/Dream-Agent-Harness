@@ -15,13 +15,14 @@ mid-flight.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import tool
 
 from .. import config
 from ..skills import loader
-from .context import err, in_thread, ok
+from .context import ctx, err, in_thread, ok
 
 # Discovered once and reused. None = not yet loaded this process.
 _CACHE: list[loader.FileSkill] | None = None
@@ -138,7 +139,35 @@ async def skill_open(args: dict[str, Any]) -> dict[str, Any]:
     body = await in_thread(loader.load_body, skill)
     if isinstance(body, loader.SkillReadFailure):
         return err(body)
-    return ok(f"Skill '{skill.name}' (installed, from {skill.source}):\nDirectory: {skill.root.resolve()}\n\n{body}")
+    return ok(f"Skill '{skill.name}' (installed, from {skill.source}):\n{directory_line(skill, _workspace())}\n\n{body}")
+
+
+def _workspace():
+    try:
+        return ctx().workspace
+    except RuntimeError:          # no live session (standalone caller)
+        return None
+
+
+def directory_line(skill: loader.FileSkill, workspace) -> str:
+    """DREAM-101: say where the skill lives AND whether run_bash can get there. The sandbox holds only the workspace, so a
+    skill installed elsewhere (a plugin under the home directory) is invisible to `ls`: the model must read its bundled
+    files with skill_file and run its scripts through the matching runner tool instead of cd-ing into the directory."""
+    root = skill.root.resolve()
+    inside = False
+    if workspace is not None:
+        try:
+            root.relative_to(Path(workspace).resolve())
+            inside = True
+        except ValueError:
+            inside = False
+    if workspace is None or inside:
+        return f"Directory: {root}"
+    tags = f"{skill.source} {skill.parent_extension or ''} {root}".lower()
+    runner = " (understand-anything skills: ua_run, with cwd = the workspace path)" if "understand-anything" in tags else ""
+    return (f"Directory: {root} -- outside the workspace, so run_bash cannot see it (its sandbox holds only the workspace). "
+            f"Read bundled files with skill_file(name=\"{skill.name}\", path=...); run its scripts through the matching runner "
+            f"tool when one is installed{runner}. Do not try to cd or ls there.")
 
 
 _FILE_SCHEMA = {

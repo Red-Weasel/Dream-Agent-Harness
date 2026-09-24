@@ -318,10 +318,13 @@ if(COMPANION){
           fs.querySelectorAll('.qsvg input').forEach((c, j) => { c.hidden = false; c.setAttribute('aria-label', `Option ${j + 1}`); });
         });
       },
-      openArtifact(){
-        closeInspector(); body.classList.add('has-artifact'); $('studio-empty').hidden = true;
+      openArtifact(opts){
+        // A mirrored show is the model's own view, not a handoff (DREAM-104): it
+        // changes the canvas only; the owner's drawer, inspector and focus stay put.
+        if(!opts?.mirror) closeInspector();
+        body.classList.add('has-artifact'); $('studio-empty').hidden = true;
         artifactsChanged();
-        if(!stream.querySelector('.qform')) drawer(false);
+        if(!opts?.mirror && !stream.querySelector('.qform')) drawer(false);
       },
       closeArtifact(){
         clearTimeout(frameTimer); frameReady = false;

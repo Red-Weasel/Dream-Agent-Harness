@@ -136,6 +136,14 @@ def test_show_sequence_counts_explicit_handoffs_only_and_never_replay():
                 assert sequence() == 1
         srv.retain_show(Event("studio", {"op": "show", "path": "same.html", "content": "two"}))
         assert sequence() == 2
+        # DREAM-104: a mirrored show is the model's own view -- retained for replay, but
+        # not a handoff, or the desktop would navigate to Studio on every model edit.
+        srv.retain_show(Event("studio", {"op": "show", "path": "same.html", "content": "three", "source": "mirror"}))
+        assert sequence() == 2
+        with client.websocket_connect(f"/ws?token={srv.token}") as ws:
+            ws.receive_json()
+            assert ws.receive_json()["data"]["content"] == "three"
+            assert sequence() == 2
 
 
 @pytest.mark.asyncio

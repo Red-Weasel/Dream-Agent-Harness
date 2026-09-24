@@ -50,7 +50,8 @@ only-include = [
     "skills/documents", "skills/data-analysis", "skills/media", "skills/library",
     "skills/verifying", "skills/computer-use", "skills/blender-animation",
     "skills/brainstorming", "skills/debugging", "skills/gated-build", "skills/frontend-design",
-    "skills/grill-me", "skills/handoff",
+    "skills/grill-me", "skills/handoff", "skills/understand",
+    "skills/understand-dashboard", "skills/understand-domain",
     "skills/illuminati-handshake",
 ]
 

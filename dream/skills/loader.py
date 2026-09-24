@@ -248,22 +248,32 @@ def discover(dirs: Iterable[Path | str]) -> tuple[list[FileSkill], list[str]]:
             desc = str(meta.get("description") or "").strip()
             if not desc:
                 warnings.append(f"skill '{name}' has no description — it will be hard to find")
-            key = name.casefold()
-            if key in found:
-                warnings.append(
-                    f"skill '{name}' at {manifest.parent} shadowed by "
-                    f"{found[key].root} — first root wins"
-                )
-                continue
-            seen_roots.add(skill_root)
-            package, notes = _package_metadata(manifest.parent, name)
-            warnings.extend(notes)
-            if meta.get("hooks") or meta.get("permissions"):
-                warnings.append(f"skill '{name}': hook/permission instructions are metadata only; no automatic execution")
             from .. import config, plugins
             from ..extensions import extension_id
 
-            plugin = plugins.owner(manifest)
+            # plugins.owner resolves symlinks, and a plugin's skills tree may be a symlink into another checkout
+            # (plugins/understand-anything/skills -> ~/.understand-anything/...): the discovery root names the owner then.
+            plugin = plugins.owner(manifest) or next((p for p in plugins.loaded() if p.skill_dir == root), None)
+            declared, key = name, name.casefold()
+            if key in found:
+                # DREAM-102: a plugin's skill whose name a curated skill already holds stays reachable under its owner's
+                # name -- the Understand-Anything plugin's `understand` becomes `understand-anything:understand` (for
+                # skill_open, skill_file and `$understand-anything:understand`). A plain duplicate is dropped as before.
+                alias = f"{plugin.name}:{name}" if plugin else None
+                if alias is None or alias.casefold() in found:
+                    warnings.append(
+                        f"skill '{name}' at {manifest.parent} shadowed by "
+                        f"{found[key].root} — first root wins"
+                    )
+                    continue
+                warnings.append(f"skill '{name}' at {manifest.parent} shadowed by {found[key].root} — first root wins; "
+                                f"it stays reachable as '{alias}'")
+                name, key = alias, alias.casefold()
+            seen_roots.add(skill_root)
+            package, notes = _package_metadata(manifest.parent, declared)
+            warnings.extend(notes)
+            if meta.get("hooks") or meta.get("permissions"):
+                warnings.append(f"skill '{name}': hook/permission instructions are metadata only; no automatic execution")
             provenance = "dream-plugin" if plugin else "dream-owned" if skill_root.is_relative_to(config.ROOT) else "external-read-only"
             found[key] = FileSkill(
                 name=name, description=desc, manifest=manifest,

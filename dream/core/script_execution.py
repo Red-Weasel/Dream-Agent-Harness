@@ -54,7 +54,11 @@ def _runtime() -> tuple[Path, tuple[Path, ...]]:
 
 
 async def run_script(code: str, context: ExecutionContext,
-                     captures: Mapping[str, Sequence[bytes]], *, timeout: float | None = None) -> list[str]:
+                     captures: Mapping[str, Sequence[bytes]], *, timeout: float | None = None,
+                     saved: list[str] | None = None) -> list[str]:
+    """Run the script in the contained worker and return its log lines. `saved`, when
+    given, collects the workspace-relative paths its saveFile wrote (the Studio mirror
+    shows images among them, DREAM-104)."""
     if not isinstance(code, str) or not code.strip():
         raise ExecutionRefused("run_script needs a non-empty JavaScript code string")
     if len(code.encode("utf-8")) > MAX_CODE_BYTES:
@@ -86,6 +90,9 @@ async def run_script(code: str, context: ExecutionContext,
             logs.append(str(event.get("text", "")))
         elif event.get("kind") == "error":
             errors.append(str(event.get("text", "script failed")))
+        elif event.get("kind") == "saved":
+            if saved is not None:
+                saved.append(str(event.get("text", "")))
         elif event.get("kind") == "done":
             completed = True
     if result.timed_out:
@@ -131,6 +138,7 @@ async def save(source, raw, value, binary):
         path.write_bytes(base64.b64decode(value))
     else:
         path.write_text(value, encoding="utf-8")
+    emit("saved", str(path.relative_to(workspace)))
     return str(path.relative_to(workspace))
 
 async def listing(source, raw):

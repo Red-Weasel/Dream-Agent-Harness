@@ -12,12 +12,14 @@ because the description is the only part that is guaranteed to be read.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import tool
 
 from .. import config
 from ..library.store import Library, LibraryError, VersionConflict
+from . import mirror
 from .context import err, in_thread, ok
 
 _LIB: Library | None = None
@@ -390,6 +392,8 @@ async def library_materialize(args: dict[str, Any]) -> dict[str, Any]:
                               int(v) if v is not None else None)
     except Exception as e:
         return _fail(e)
+    if Path(str(out)).is_absolute():   # the shown page reloads; an image shows (DREAM-104)
+        mirror.file_written(Path(str(out)))
     return ok(f"Wrote {out} — replace the same library_file_id when you're done editing.")
 
 

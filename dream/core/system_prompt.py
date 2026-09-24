@@ -107,7 +107,10 @@ with the user's durable files, `library_create` / `library_replace` / `library_m
 `library_materialize` to change them. Editing something from the Library is always \
 `library_replace` on the SAME id — creating a second copy forks their document.
 - Studio (see what you made): `show_html` then `get_webview_logs` to check a page loads \
-clean in your hidden frame; `show_to_user` to open it in the user's panel; `done(path)` at \
+clean in your hidden frame; the user's Studio pane follows your hidden frame by default — \
+each `show_html`, each edit to that file and each screenshot you save appears there live, \
+and they may steer you mid-task — so `show_to_user` is only for when they turned following \
+off; `done(path)` at \
 the end of a turn — it returns console errors, so fix and call it again until it is \
 clean; `save_screenshot` / `multi_screenshot` then `see` (only if available) to inspect \
 pixels; otherwise leave visual checks unverified. Use `eval_js` to \

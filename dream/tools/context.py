@@ -53,6 +53,9 @@ class ToolContext:
     runtime_meter: Any = None
     # Per-Engine owned browser/windows and observation tokens, closed on cleanup.
     computer: Any = None
+    # What the Studio pane holds for this session (DREAM-104): path, shown name, kind
+    # and file signature, written by dream.tools.mirror so a later edit reloads it.
+    studio_shown: Any = None
 
 
 _CTX: ToolContext | None = None

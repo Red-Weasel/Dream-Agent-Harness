@@ -82,7 +82,7 @@ MCP_CONFIG_PATH = Path(os.environ.get("DREAM_MCP_CONFIG", str(ROOT / "mcp.json")
 CURATED_SKILLS = ('coding', 'research', 'writing', 'documents', 'data-analysis',
                   'media', 'library', 'verifying', 'computer-use', 'blender-animation',
                   'brainstorming', 'debugging', 'gated-build', 'frontend-design',
-                  'grill-me', 'handoff')
+                  'grill-me', 'handoff', 'understand', 'understand-dashboard', 'understand-domain')
 
 
 def bundled_skill_dirs() -> list[Path]:

@@ -58,6 +58,20 @@ def _jsonable(value: Any) -> Any:
     return repr(value)
 
 
+def follow_default() -> bool:
+    """The mirror's starting state for a session (DREAM-104): `studio.follow_model_view`
+    in the runtime settings file (DATA_DIR/runtime-settings.json), on unless it says
+    false. A missing or unreadable file means on; the pane must never fail to start
+    over a settings key."""
+    from ..core.profiles import read_settings
+
+    try:
+        section = read_settings().get("studio")
+    except (ValueError, OSError):
+        return True
+    return not (isinstance(section, dict) and section.get("follow_model_view") is False)
+
+
 class StudioServer:
     """Serves the GUI for one Dream session."""
 
@@ -80,10 +94,15 @@ class StudioServer:
         learning: Callable[[], dict] | None = None,
         on_control: Callable[[dict], Any] | None = None,
         on_workflow: Callable[[str, dict], Any] | None = None,
+        follow_model_view: bool = True,
     ) -> None:
         self.bus = bus
         self.port = port
         self.token = secrets.token_urlsafe(32)
+        # "Follow the model's view" (DREAM-104): while on, the model's hidden-frame
+        # loads, edits to the shown file and saved screenshots go to the pane too.
+        # One state per session, read by the Studio tools and toggled from the pane.
+        self.follow_model_view = bool(follow_model_view)
         self._on_prompt = on_prompt
         self._on_steer = on_steer
         self._on_optimize_prompt = on_optimize_prompt
@@ -150,6 +169,7 @@ class StudioServer:
             Route("/api/learning", self._learning_info),
             Route("/api/learning/{identifier}/draft", self._learning_draft),
             Route("/api/control", self._control, methods=["POST"]),
+            Route("/api/follow", self._follow, methods=["POST"]),
             Route("/api/assets", self._assets),
             Route("/api/frame_reply", self._frame_reply, methods=["POST"]),
             Route("/api/answer", self._answer, methods=["POST"]),
@@ -233,6 +253,24 @@ class StudioServer:
         except (ValueError, OSError, KeyError, TypeError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
+    async def _follow(self, request):
+        """The pane's follow toggle (DREAM-104). Off, only explicit show_to_user / done
+        reach the pane; every connected pane hears the change."""
+        if not self._authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        origin = request.headers.get("origin")
+        if origin and origin.rstrip("/") != str(request.base_url).rstrip("/"):
+            return JSONResponse({"error": "origin does not match this Studio session"}, status_code=403)
+        try:
+            payload = json.loads(await request.body())
+        except ValueError:
+            return JSONResponse({"error": "Expected a JSON object"}, status_code=400)
+        if not isinstance(payload, dict) or not isinstance(payload.get("on"), bool):
+            return JSONResponse({"error": 'Expected {"on": true|false}'}, status_code=400)
+        self.follow_model_view = payload["on"]
+        self.bus.publish(Event("studio", {"op": "follow", "on": payload["on"]}))
+        return JSONResponse({"ok": True, "on": payload["on"]})
+
     async def _learning_draft(self, request):
         if not self._authorized(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -280,19 +318,29 @@ class StudioServer:
         self.bus.publish(Event('project_view_reset', {}))
 
     def retain_show(self, ev: Any) -> None:
-        """Keep only the latest explicit show, never eval requests or tool output.
+        """Keep only the latest show, never eval requests or tool output.
 
         Called synchronously by the session event funnel before bus publication,
-        including when there are no browser subscriptions yet.
+        including when there are no browser subscriptions yet. A mirrored show
+        (DREAM-104, ``source: mirror``) is retained for replay but is not a handoff:
+        the desktop polls ``show_sequence`` and navigates to Studio when it grows,
+        which must not happen on every model edit. A ``removed`` op for the retained
+        file drops it, so a reconnect does not replay a page that is gone.
         """
         data = getattr(ev, "data", None)
-        if (getattr(ev, "kind", None) == "studio" and isinstance(data, dict)
-                and data.get("op") == "show" and ev is not self._last_show_event):
+        if getattr(ev, "kind", None) != "studio" or not isinstance(data, dict):
+            return
+        if data.get("op") == "show" and ev is not self._last_show_event:
             # Tools and the App funnel can both retain the SAME event. Count
-            # that once; a fresh show of the same file is a new user handoff.
+            # that once; a fresh explicit show of the same file is a new user handoff.
             self._last_show = {"kind": "studio", "data": _jsonable(dict(data))}
             self._last_show_event = ev
-            self._show_sequence += 1
+            if data.get("source") != "mirror":
+                self._show_sequence += 1
+        elif (data.get("op") == "removed" and self._last_show is not None
+                and self._last_show["data"].get("path") == data.get("path")):
+            self._last_show = None
+            self._last_show_event = None
 
     async def _telemetry_info(self, request):
         """GPU + inference telemetry, polled by the pane.
@@ -723,6 +771,9 @@ class StudioServer:
                     await ws.send_text(json.dumps({"kind": "permission", "data": _jsonable(permission)}))
                 if last_show is not None:
                     await ws.send_text(json.dumps(last_show))
+                if not self.follow_model_view:
+                    # A pane assumes following is on; only the off state needs saying.
+                    await ws.send_text(json.dumps({"kind": "studio", "data": {"op": "follow", "on": False}}))
 
                 async def send_events() -> None:
                     while True:

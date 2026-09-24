@@ -828,6 +828,22 @@ class Engine:
             if getattr(self, "_tool_context", None) is not None:
                 self._tool_context.multimodal = self.backend.provider.multimodal
 
+    def _guidance_window(self) -> int | None:
+        """The model window skill guidance may be sized for: the server's loaded n_ctx when the backend knows it, else the
+        profile's window (its context limit or assumed context), else None (the short default)."""
+        n_ctx = getattr(self.backend, "n_ctx", None)
+        if isinstance(n_ctx, int) and n_ctx > 0:
+            return n_ctx
+        window = getattr(self.profile, "window", None)      # the profile's effective window: context_limit or assumed_context
+        if callable(window):
+            try:
+                value = window(None)
+            except (TypeError, ValueError):
+                value = None
+            if isinstance(value, int) and value > 0:
+                return value
+        return None
+
     def set_tool_budget(self, limit: int | None) -> None:
         """Cap tool calls per prompt (None = unlimited). Takes effect next turn."""
         self.tool_budget.limit = limit
@@ -1389,10 +1405,11 @@ class Engine:
 
         # Supply a short real workflow before inference. The original request is
         # already logged above; process guidance is not attributed to the user.
-        from ..skills.selection import select_for_task
+        from ..skills.selection import guidance_budget, select_for_task
         from ..projects import build_context
         with self.turn_timing.phase("preparation") if self.turn_timing else nullcontext():
-            guidance = await in_thread(select_for_task, prompt)
+            # DREAM-101: a large window carries the whole workflow of the skill the request asked for
+            guidance = await in_thread(select_for_task, prompt, max_chars=guidance_budget(self._guidance_window()))
             project_context = await in_thread(build_context, self.workspace, prompt)
         for warning in guidance.warnings:
             yield Event("system", "Workflow not loaded: " + warning)

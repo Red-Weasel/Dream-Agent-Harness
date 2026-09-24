@@ -15,6 +15,7 @@ from typing import Any
 
 from claude_agent_sdk import tool
 
+from . import mirror
 from .context import ctx, err, ok
 
 STARTERS_DIR = Path(__file__).resolve().parent.parent / "gui" / "starters"
@@ -124,6 +125,7 @@ async def copy_starter_component(args: dict[str, Any]) -> dict[str, Any]:
             copied.append(str(dest_dir / "vendor") + "/ (React, ReactDOM, Babel)")
     except OSError as e:
         return err(f"Could not copy {kind}: {type(e).__name__}: {e}")
+    mirror.file_written(dest_dir / kind)   # dropped onto the shown page: it reloads there (DREAM-104)
     content = src.read_text(encoding="utf-8")
     return ok(
         f"Copied {kind} — {_WHAT[kind]}.\n" + "\n".join(f"  {c}" for c in copied)

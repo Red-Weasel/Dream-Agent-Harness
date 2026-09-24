@@ -22,6 +22,7 @@ from claude_agent_sdk import tool
 
 from .. import config
 from ..gui.preview import get_preview
+from . import mirror
 from .context import ctx, err, in_thread, ok
 
 _EMU_PER_PX = 9525  # 96 dpi
@@ -68,6 +69,7 @@ async def super_inline_html(args: dict[str, Any]) -> dict[str, Any]:
         return err(f"Bundling failed: {type(e).__name__}: {e}")
     d.parent.mkdir(parents=True, exist_ok=True)
     d.write_text(html, encoding="utf-8")
+    mirror.file_written(d)   # a bundle written over the shown page reloads it (DREAM-104)
     inlined = sum(r.startswith("inlined") for r in report)
     left = [r for r in report if r.startswith("left alone")]
     return ok(f"Wrote {d} ({len(html):,} chars): {inlined} asset(s) inlined."

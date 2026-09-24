@@ -47,14 +47,20 @@ def _failed(res) -> bool:
 
 
 @pytest.mark.asyncio
-async def test_show_html_loads_the_hidden_frame_only_and_reports_errors(ws):
+async def test_show_html_loads_the_hidden_frame_reports_errors_and_mirrors_to_the_pane(ws):
+    """Changed by DREAM-104 (owner request): the pane follows the model's hidden frame,
+    so a show_html is no longer private -- the same file reaches the owner's pane as a
+    mirrored show, and the result says so instead of calling the preview private."""
     root, emitted = ws
     (root / "p.html").write_text(BROKEN)
     res = await show_html.handler({"path": "p.html"})
     assert not _failed(res)
     out = _text(res)
     assert "hidden frame" in out and "1 error(s)" in out and "undefinedThing" in out
-    assert emitted == [], "show_html must not touch the user's panel"
+    (ev,) = emitted
+    assert ev.kind == "studio" and ev.data["op"] == "show" and ev.data["source"] == "mirror"
+    assert ev.data["path"] == "p.html" and ev.data["content"] == BROKEN
+    assert "Studio pane shows it too" in out
 
 
 @pytest.mark.asyncio
@@ -215,10 +221,13 @@ async def test_a_model_can_close_the_loop_write_done_fix_done_screenshot(ws):
                                           "old_string": "textContent = missingVar",
                                           "new_string": "textContent = 'Hi'"})
     assert not _failed(fix)
-    # 3. done comes back clean and the user's panel was shown the page both times
+    # 3. done comes back clean and the user's panel was shown the page both times --
+    #    and once in between: since DREAM-104 the pane follows the model, so the
+    #    surgical fix to the shown deck reloaded it there (the mirrored show).
     second = await done.handler({"path": "deck.html"})
     assert not _failed(second) and "clean" in _text(second)
-    assert [e.data["op"] for e in emitted] == ["show", "show"]
+    assert [e.data["op"] for e in emitted] == ["show", "show", "show"]
+    assert [e.data.get("source") for e in emitted] == [None, "mirror", None]
     # 4. a screenshot lands where `see` can open it
     shot = await save_screenshot.handler({"path": "deck.html", "steps": [{}], "save_path": "deck.jpg"})
     assert not _failed(shot)
