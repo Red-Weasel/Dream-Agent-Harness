@@ -263,9 +263,11 @@ class EndpointCoordinator:
                 # 2026-09-20 the owner read the bare refusal as "the harness hung" --
                 # the turn had in fact been cut off mid-stream hours earlier and every
                 # request since was refused in a quarter of a second.
-                # NOT auto-cleared on the server's own /health: on 2026-09-19 the engine
-                # reported inflight=0 while still burning nine cores on an aborted
-                # generation, which is exactly the case this lease exists to catch.
+                # This module never probes the server. The HTTP backend clears such a record
+                # itself (DREAM-110, openai_compat._enter_lease) once the engine's /health says
+                # status "ok", inflight 0 and queued 0, through reconcile() below: ie serve frees
+                # inflight only after the generation returns, and 09-19's "inflight=0 while
+                # burning nine cores" predates the engine's 09-21 OpenMP block-time fix.
                 when = previous.get('updated_at') or previous.get('started_at')
                 ago = ''
                 if isinstance(when, (int, float)):

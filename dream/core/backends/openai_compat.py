@@ -12,16 +12,20 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import os
 import re
+import statistics
 import sys
 import time
 import uuid
+from collections import deque
 from contextvars import ContextVar
 from contextlib import aclosing, asynccontextmanager, nullcontext
 from copy import copy, deepcopy
-from typing import Any, AsyncIterator, Callable, Iterable
+from typing import Any, AsyncIterator, Callable, Iterable, NamedTuple
+from urllib.parse import urlsplit
 
 import httpx
 from anyio import CancelScope, current_effective_deadline, current_time, fail_after
@@ -29,12 +33,13 @@ from anyio.lowlevel import checkpoint_if_cancelled
 
 from ... import config
 from ...telemetry.runtime import RunLimit
-from .. import policy, tool_budget_schemas
+from .. import handoff, policy, tool_budget_schemas
 from ..providers import Provider
 from ..profiles import RuntimeProfile
-from ..context_budget import ContextOverflow, admit, account
+from ..context_budget import IMAGE_TOKENS, ContextOverflow, admit, account, estimate_parts
 from .base import Backend, Event, PermissionCallback, content_to_text
 
+_LOG = logging.getLogger(__name__)
 _AGENT_ACTIVITY = ContextVar("dream_agent_activity", default=None)
 _REQUEST_INTERRUPTION = ContextVar("dream_request_interruption", default=None)
 _IO_OPERATION = ContextVar("dream_io_operation", default=None)
@@ -214,6 +219,32 @@ _RETRY_BACKOFF_S = (0.5, 2.0)
 # like a hang. Honor it, but never past this.
 _RETRY_MAX_WAIT_S = 30.0
 
+# Fixes #72 and #34: how long a request waits for a cut-off request's lease to settle -- for the
+# local engine to report nothing in flight -- before it is refused. The lease's own wait for a
+# LIVE Dream request (120 s, inference_coordination) is separate and unchanged.
+_LEASE_WAIT_DEFAULT_S = 20.0
+_LEASE_WAIT_MAX_S = 600.0
+_LEASE_POLL_S = 0.25
+
+
+def _lease_wait_s(raw: str | None) -> float:
+    """DREAM_LEASE_WAIT_S, checked like engine_guard's grace (the DREAM-110 gate): "nan" or "inf" would
+    unbound the wait, a negative value switch it off, and a word stop this module from importing, so
+    Dream would not start. Seconds from 0 to 600 are taken; anything else is the default, said once."""
+    if raw is None:
+        return _LEASE_WAIT_DEFAULT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if math.isfinite(value) and 0 <= value <= _LEASE_WAIT_MAX_S:
+        return value
+    _LOG.warning("DREAM_LEASE_WAIT_S must be a number of seconds from 0 to %g; using the default %g s.",
+                 _LEASE_WAIT_MAX_S, _LEASE_WAIT_DEFAULT_S)
+    return _LEASE_WAIT_DEFAULT_S
+
+
+_LEASE_WAIT_S = _lease_wait_s(os.environ.get("DREAM_LEASE_WAIT_S"))
 
 
 def _stream_failure(label: str, exc: Exception) -> str:
@@ -249,7 +280,13 @@ def _stream_failure(label: str, exc: Exception) -> str:
     return f"{label} request failed: {name}: {exc}"
 
 class _RequestFailed(Exception):
-    """An HTTP failure that survived every retry. Carries the message to show."""
+    """An HTTP failure that survived every retry. Carries the message to show and, for the
+    runtime log, a short failure code plus the server's own message when it sent one (fix #64)."""
+
+    def __init__(self, text: str = "", *, code: str | None = None, message: str | None = None):
+        super().__init__(text)
+        self.code = code
+        self.message = message
 
 
 class _ServerGenerationError(_RequestFailed):
@@ -257,12 +294,78 @@ class _ServerGenerationError(_RequestFailed):
 
     def __init__(self, error: Any):
         fields = error if isinstance(error, dict) else {}
-        self.code = str(fields.get("code") or fields.get("type") or "server_error")
-        message = fields.get("message") or (str(error) if error else "generation failed")
-        self.message = str(message)[:1000]
-        super().__init__(f"{self.code}: {self.message}")
+        code = str(fields.get("code") or fields.get("type") or "server_error")
+        message = str(fields.get("message") or (str(error) if error else "generation failed"))[:1000]
+        super().__init__(f"{code}: {message}", code=code, message=message)
         self.subtype = ("context_overflow" if "context" in self.code.lower()
                         else "server_error")
+
+
+def _http_error_fields(status: int, body: str) -> tuple[str, str]:
+    """The code and message of an HTTP error response (fix #64): the server's own, from the OpenAI
+    error shape the engine sends (error_json), else ``http_<status>`` and the body's text."""
+    try:
+        data = json.loads(body)
+    except ValueError:
+        data = None
+    error = data.get("error") if isinstance(data, dict) else None
+    if isinstance(error, dict) and error.get("message"):
+        return (str(error.get("code") or error.get("type") or f"http_{status}")[:80],
+                str(error["message"])[:1000])
+    if isinstance(error, str) and error.strip():
+        return f"http_{status}", error.strip()[:1000]
+    return f"http_{status}", body.strip()[:1000]
+
+
+def _uncertain_local_http(status: int, code: str, message: str):
+    """A local 408/5xx leaves the outcome unknown, so the lease stays fenced; what the server said is
+    kept and shown (fix #64: the engine's 503 'engine unavailable: device lost' used to vanish)."""
+    from ..inference_coordination import CoordinationError
+    text = f"Local HTTP {status}: upstream outcome is uncertain. Check server idle in Controls."
+    if message:
+        text += f" The server said ({code}): {message}"
+    error = CoordinationError(text)
+    error.code, error.message = code, message or None
+    return error
+
+
+class _EngineReport(NamedTuple):
+    """What the local server's /health said about work in flight (fixes #72, #34)."""
+    kind: str                  # idle | busy | unhealthy | unreachable | unreported | unchecked
+    said: str                  # a clause after "the local engine at host:port"
+    inflight: int | None = None
+    queued: int | None = None
+
+
+def _lease_owner_alive(record: dict) -> bool:
+    pid = record.get("pid")
+    if type(pid) is not int or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _lease_unsettled(record: dict) -> bool:
+    """A record no live Dream request stands behind: a cut-off request's, or a gone owner's."""
+    return record.get("state") == "uncertain" or (
+        record.get("state") == "running" and not _lease_owner_alive(record))
+
+
+def _lease_holder(record: dict | None) -> str:
+    """'1a2b3c4d (Dream pid 4242, started 13:19:02)' -- which request holds the lease."""
+    if not record or not isinstance(record.get("request_id"), str):
+        return "(unknown request)"
+    about = []
+    if type(record.get("pid")) is int:
+        about.append(f"Dream pid {record['pid']}")
+    if isinstance(record.get("started_at"), (int, float)):
+        about.append("started " + time.strftime("%H:%M:%S", time.localtime(record["started_at"])))
+    return record["request_id"][:8] + (f" ({', '.join(about)})" if about else "")
 
 
 def _raise_server_error(data: Any) -> None:
@@ -396,18 +499,25 @@ def _elide_args(msg: dict[str, Any]) -> int:
     return n
 
 
-def _msg_chars(m: dict[str, Any]) -> int:
+def _msg_parts(m: dict[str, Any]) -> tuple[int, int]:
+    """(text chars, images) of one message. _msg_chars prices each image at context_budget's flat
+    IMAGE_TOKENS; the calibrated size prices it from what the server counted (Dream fix #65)."""
     content = m.get("content") or ""
     if isinstance(content, list):
-        from ..context_budget import estimate
-        n = estimate(content) * 4
+        text, images = estimate_parts(content)
+        n = text * 4
     else:
-        n = len(content)
+        n, images = len(content), 0
     n += len(m.get("reasoning_content") or "")
     for tc in m.get("tool_calls") or []:
         fn = tc.get("function") or {}
         n += len(fn.get("name") or "") + len(fn.get("arguments") or "")
-    return n
+    return n, images
+
+
+def _msg_chars(m: dict[str, Any]) -> int:
+    chars, images = _msg_parts(m)
+    return chars + images * IMAGE_TOKENS * 4
 
 
 def _est_tokens(messages: list[dict[str, Any]]) -> int:
@@ -415,7 +525,17 @@ def _est_tokens(messages: list[dict[str, Any]]) -> int:
     return sum(_msg_chars(m) for m in messages) // 4
 
 
-def _recent_keep(messages: list[dict[str, Any]], target: int) -> set[int]:
+def _text_and_images(messages: list[dict[str, Any]]) -> tuple[int, int]:
+    """(estimated text tokens, images) of a history: _est_tokens with the images counted apart."""
+    chars = images = 0
+    for m in messages:
+        c, n = _msg_parts(m)
+        chars, images = chars + c, images + n
+    return chars // 4, images
+
+
+def _recent_keep(messages: list[dict[str, Any]], target: int,
+                 msg_size: Callable[[dict[str, Any]], int] | None = None) -> set[int]:
     """Trailing messages small enough to leave verbatim, newest first.
 
     Budget-aware on purpose: a fixed count would be a floor compaction can never
@@ -430,7 +550,7 @@ def _recent_keep(messages: list[dict[str, Any]], target: int) -> set[int]:
     for i in range(len(messages) - 1, 0, -1):
         if len(keep) >= _KEEP_RECENT_MSGS:
             break
-        cost = _msg_chars(messages[i]) // 4
+        cost = msg_size(messages[i]) if msg_size else _msg_chars(messages[i]) // 4
         if used + cost > budget:
             break
         keep.add(i)
@@ -441,9 +561,9 @@ def _recent_keep(messages: list[dict[str, Any]], target: int) -> set[int]:
 
 def _elide_pass(
     messages: list[dict[str, Any]], target: int, keep: set[int], names: dict[Any, str],
-    on_elide: Any = None,
+    on_elide: Any = None, size: Callable[[list[dict[str, Any]]], int] = _est_tokens,
 ) -> int:
-    """Stub message bodies outside `keep` until the history fits `target`.
+    """Stub message bodies outside `keep` until `size` of the history fits `target`.
 
     `on_elide(kind, body)` is told each body before it goes; it returns the id
     of the working note it saved the content to, or None when it saved nothing
@@ -456,7 +576,7 @@ def _elide_pass(
     for roles in (("tool",), ("assistant",), ("assistant", "user")):
         args_pass = roles == ("assistant",)
         for i, m in enumerate(messages):
-            if _est_tokens(messages) <= target:
+            if size(messages) <= target:
                 return elided
             if i in keep or m.get("role") not in roles:
                 continue
@@ -544,11 +664,53 @@ _AUTO_VERIFY = os.environ.get("DREAM_AUTO_VERIFY", "1") == "1"
 # After every turn, the filer reads what was said and files what is durable.
 # Off with DREAM_AUTO_FILE=0. In-turn memory writes are for the user's explicit ask.
 _AUTO_FILE = os.environ.get("DREAM_AUTO_FILE", "1") == "1"
+# How many conversations a local engine keeps cached (Dream fix #71). The engine says so in its
+# /props as `prompt_cache_slots`: an integer >= 1, where 1 is the live conversation only and more
+# means other conversations wait in host slots and come back in about a second. When /props does not
+# say, this table does, by MachX architecture (capabilities) or model name: MiMo-V2.6 keeps only the
+# live conversation until its host slots (#70) are deployed; DeepSeek-V4.1 keeps others in host slots
+# and disk entries (it does not report how many; more than one is what matters). The table applies to
+# the MachX provider only: the same model behind another loopback provider whose /props does not say
+# (a llama.cpp server, say) is unknown, like anything else, and the verifier runs as it always has.
+_CACHE_SLOT_DEFAULTS = (("mimo_v2", "mimo", 1), ("deepseek_v41", "deepseek-v4.1", 2))
 
 
-def _compact_messages(messages: list[dict[str, Any]], target: int, on_elide: Any = None) -> int:
+def _single_slot_verifier() -> str:
+    """What the end-of-turn verifier does on an engine that caches one conversation (fix #71).
+    `skip`, the default: it does not run, and says so, because its separate conversation would evict
+    the lead's and the next message would re-read all of it (live 2026-09-24: 8 minutes).
+    `continue` (DREAM_SINGLE_SLOT_VERIFIER=continue): it runs inside the lead conversation and its
+    rounds stay in the history, so the engine only ever extends its cached prefix."""
+    return "continue" if os.environ.get("DREAM_SINGLE_SLOT_VERIFIER", "").strip().lower() == "continue" else "skip"
+
+
+def _bound_context():
+    """The session's tool context while the engine has it bound (around a turn), else None: never the
+    process-wide fallback another session left behind (the rule bound_runtime_meter follows)."""
+    from ...tools import context as tool_context
+    return tool_context._BOUND.get()
+
+
+def _read_only_call(name: str, arguments: str | None) -> bool:
+    """A look, not a change (fix #17): a policy READONLY tool (read_file, grep, list_dir, eval_js,
+    see, ...), save_screenshot (it writes only its capture), or run_bash with a command
+    policy.shell_read_only classifies as reads."""
+    canonical = _TOOL_ALIASES.get(name.lower(), name)
+    short = canonical.removeprefix(f"mcp__{config.MCP_SERVER_NAME}__")
+    if policy.capability(canonical) == policy.READONLY or short == "save_screenshot":
+        return True
+    if short != "run_bash":
+        return False
+    args, bad = _parse_tool_args(arguments)
+    return bad is None and policy.shell_read_only(str(args.get("command") or ""))
+
+
+def _compact_messages(messages: list[dict[str, Any]], target: int, on_elide: Any = None, *,
+                      size: Callable[[list[dict[str, Any]]], int] = _est_tokens,
+                      msg_size: Callable[[dict[str, Any]], int] | None = None) -> int:
     """Shrink `messages` in place toward `target` tokens; return how many were
-    elided.
+    elided. `size`/`msg_size` measure the history and one message: chars/4 by
+    default, the server-calibrated size for the lead (Dream fix #65).
 
     A tool message is never REMOVED, only stubbed — dropping it would orphan the
     assistant `tool_calls` entry naming its id, which is exactly the 400 this is
@@ -596,10 +758,10 @@ def _compact_messages(messages: list[dict[str, Any]], target: int, on_elide: Any
             k.add(len(messages) - 1)
         return k
 
-    keep = base_keep() | _recent_keep(messages, target)
-    elided += _elide_pass(messages, target, keep, names, on_elide)
-    if _est_tokens(messages) > target:
-        elided += _elide_pass(messages, target, base_keep(), names, on_elide)
+    keep = base_keep() | _recent_keep(messages, target, msg_size)
+    elided += _elide_pass(messages, target, keep, names, on_elide, size)
+    if size(messages) > target:
+        elided += _elide_pass(messages, target, base_keep(), names, on_elide, size)
     return elided
 
 
@@ -765,10 +927,52 @@ class OpenAICompatBackend(Backend):
         # included), _calib_msgs the messages-only estimate compaction uses.
         self._calib = 1.0
         self._calib_msgs = 1.0
-        self._est_at_last = 0
         self._sent_est: tuple[int, int, int] | None = None
+        # Fix #65: the next prompt's size in the server's tokens, text and images priced apart. One
+        # ratio for a history whose share of images keeps changing sent MiMo's compaction to 56k and 66k
+        # against an 85k target (2026-09-24). Fitted over recent lead requests (_refit): rounds that
+        # added no image price text, rounds that added images price an image. _anchor is (text, images)
+        # of the history _last_prompt_tokens counted; what was added since is priced on top of it.
+        self._text_ratio = 1.0
+        self._image_tokens = float(IMAGE_TOKENS)
+        self._cal_totals: deque[tuple[int, int, int]] = deque(maxlen=8)   # (text + tools, images, count)
+        self._cal_deltas: deque[tuple[int, int, int]] = deque(maxlen=8)   # between requests of a growing history
+        self._anchor: tuple[int, int] | None = None
+        self._tools_text = 0
+        self._sent_parts: tuple | None = None
+        # The compaction trigger's upper bound (_fill_bound): the dearest recent text ratio and image
+        # price, and how far recent counts came in above the bound (its margin). Each message keeps what
+        # the server counted for it when it was first counted, so old code is not repriced at today's prose
+        # ratio when compaction removes it (DREAM-112 gate): id -> (its size parts, a, s, the message), and it
+        # costs a + s x the template (_remember_tokens).
+        self._text_high = 1.0
+        self._image_high = float(IMAGE_TOKENS)
+        self._image_max = 0.0            # the dearest image counted this session, for the trigger (_fill_bound)
+        self._bound_misses: deque[int] = deque(maxlen=8)
+        self._msg_tokens: dict[int, tuple[tuple[int, int], float, float, dict[str, Any]]] = {}
+        self._tools_tokens: tuple[int, float] | None = None   # (tools estimate, its share of the first count)
+        # What the chat template costs a message, in the server's tokens: MiMo's until a compaction has
+        # measured the engine's own (_remember_tokens), then the median of its recent measurements; and
+        # whether a counted landing has depended on it yet (_maybe_compact reserves for it until then).
+        self._template = self._TEMPLATE_TOKENS
+        self._templates: deque[float] = deque(maxlen=5)
+        self._template_seen = False
+        self._text_learned = False       # the text ratio has been fitted on text alone (_refit)
+        # Messages whose price is an estimate (a compaction's uncounted round): id -> how far it can be off, squared
+        self._estimated: dict[int, float] = {}
+        # The last cut's projection of the count after it, then how far that count came in above it (None: no
+        # landing counted yet), which the next cut aims below (_maybe_compact).
+        self._projected: int | None = None
+        self._landing_miss: float | None = None
+        # Fix #38: the open work and top-of-mind memory the model knows: the state its system prompt was
+        # built from (SystemPrompt.live_state), then what each note told it.
+        self._live_told: dict | None = None
         self._stable_tools: tuple[Any, list[dict[str, Any]], frozenset[str]] | None = None
         self._phase_reset_pending = False   # a plan phase just finished (update_plan)
+        # DREAM-113: a Fresh start runs between turns only, and hands off the files this session changed.
+        self._turn_active = False
+        self._file_ledger = handoff.FileLedger()
+        self._handoff_notes: list[int] = []   # every note an earlier handoff pointed at, carried to the next one
         self._sampling = self._build_sampling()
         if self._local_options:
             # Explicit zeros/off values must override both Dream and server defaults.
@@ -914,6 +1118,16 @@ class OpenAICompatBackend(Backend):
         task = str(args.get("task") or "").strip()
         if not path:
             return ("Error: nothing to verify — call `done(path)` first, or pass `path`.", True)
+        slots, source = self._prompt_cache_slots()
+        if slots == 1 and (task or _single_slot_verifier() == "skip"):
+            # Fix #71: a separate verifier conversation would evict this one from an engine that
+            # caches one conversation. A check inside this conversation is the model's own.
+            return (f"Not run: this engine keeps one conversation cached ({source}), and a separate "
+                    "verifier conversation would evict this one, so the next request would re-read all "
+                    "of it. " + ("Check it yourself now with show_html, get_webview_logs, "
+                                 "save_screenshot, see and eval_js." if task else
+                                 "The end-of-turn check is skipped on this engine unless "
+                                 "DREAM_SINGLE_SLOT_VERIFIER=continue is set."), bool(task))
         if task:
             return await self._run_subagent("verifier", self._verification_prompt(path, task=task))
         self._verify_at_turn_end = path
@@ -1120,7 +1334,24 @@ class OpenAICompatBackend(Backend):
             self._pending_findings = f"[verifier could not run on {path} — not from the user]\n{text}"
             return [Event("system", f"verifier: unverified ({path}) — {text}")]
         prompt = self._verification_prompt(path)
-        text, failed = await self._run_subagent("verifier", prompt)
+        # Fix #71 (live 2026-09-24: ten verifier requests evicted a 135k-token chat from MiMo's one
+        # cached conversation, and the next message waited 8 minutes for the re-read).
+        slots, source = self._prompt_cache_slots()
+        continuation = slots == 1
+        if continuation and _single_slot_verifier() == "skip":
+            text = (f"skipped on {path}: this engine keeps one conversation cached ({source}), and the "
+                    "verifier's separate conversation would evict this one, so your next message would "
+                    "re-read all of it. DREAM_SINGLE_SLOT_VERIFIER=continue runs the check inside this "
+                    "conversation instead.")
+            self._delivery_review = {"status": "not_requested", "path": path, "reason": "single_slot_engine",
+                                     "summary": text}
+            if self.runtime_meter:
+                self.runtime_meter.record("verifier_skipped", reason="single_slot_engine", source=source)
+            return [Event("system", f"verifier: {text}")]
+        if continuation:
+            text, failed = await self._run_subagent("verifier", prompt, continuation=True)
+        else:
+            text, failed = await self._run_subagent("verifier", prompt)
         marker = text.strip()
         self._delivery_review.update(summary=marker[:2000], summary_truncated=len(marker) > 2000)
         if failed:
@@ -1136,7 +1367,8 @@ class OpenAICompatBackend(Backend):
         # Non-PASS prose may describe either a defect or incomplete inspection.
         # Do not infer an independently confirmed defect from that prose.
         self._delivery_review["status"] = "needs_attention" if marker else "unverified"
-        self._pending_findings = f"[verifier findings for {path} — not from the user]\n{text.strip()}"
+        if not continuation:   # a check inside the conversation left its report in the history already
+            self._pending_findings = f"[verifier findings for {path} — not from the user]\n{text.strip()}"
         detail = marker[:2000] or "No review evidence was returned."
         return [Event("system", f"verifier: findings on {path} — review did not pass; "
                       f"they open your next turn.\n{detail}")]
@@ -1412,11 +1644,17 @@ class OpenAICompatBackend(Backend):
         return {'available': True, 'source': 'active HTTP client',
                 'read_timeout_s': timeout.read, 'connect_timeout_s': timeout.connect}
 
-    def _failure_info(self, exc: Exception, stage: str) -> dict:
-        """Durable metadata only: never copy response bodies, prompts or URLs."""
+    def _failure_info(self, exc: Exception, stage: str, *, shown: str | None = None) -> dict:
+        """Durable metadata plus the failure's code and message (fix #64, 2026-09-24 12:59: the
+        engine's reason was shown once and kept nowhere). The message is the server's own when it
+        sent one, else the text the owner was shown; at most 1000 characters. Never the request."""
         cause = exc.__cause__ if exc.__cause__ is not None else exc
         timeout = getattr(self._client, 'timeout', None)
+        code = getattr(exc, 'code', None) or (
+            'transport_error' if isinstance(exc, httpx.HTTPError) else 'request_failed')
+        message = getattr(exc, 'message', None) or shown or str(exc)
         info = {'exception_type': type(cause).__name__[:80], 'stage': stage,
+                'code': str(code)[:80], 'message': str(message)[:1000],
                 'read_timeout_known': isinstance(timeout, httpx.Timeout),
                 'read_timeout_s': timeout.read if isinstance(timeout, httpx.Timeout) else None}
         if self.runtime_meter:
@@ -1443,6 +1681,7 @@ class OpenAICompatBackend(Backend):
         """Replace the system message: the engine re-derives its Runtime note once the connected server's image
         readiness is known (DREAM-096), before the first turn."""
         self.messages[0] = {"role": "system", "content": text}
+        self._live_told = None      # what the model knows is now what this prompt was built from (fix #38)
 
     def _offers_see(self, images_enabled: bool) -> bool:
         """`see` stays in the toolset when the model gets images, or when a vision helper describes them for it
@@ -1567,25 +1806,230 @@ class OpenAICompatBackend(Backend):
         return self.profile.window(measured) if self.profile else measured or _ASSUMED_CTX
 
     def _ctx_fill(self) -> int:
-        """Tokens the next request will carry: the server's own count for the
-        last request (exact, a round stale) plus a calibrated estimate of what
-        was appended since; the calibrated estimate alone before any count."""
-        est = _est_tokens(self.messages)
-        if self._last_prompt_tokens:
-            return self._last_prompt_tokens + max(0, int((est - self._est_at_last) * self._calib_msgs))
-        return int(est * self._calib_msgs)
+        """Tokens the next request will carry, in the server's count (fix #65): its exact count of
+        the last request plus what was added since, text and images each at the price the server's
+        counts taught; before any count, or after the history was rewritten, the priced estimate of
+        all of it with the last tools sent."""
+        text, images = _text_and_images(self.messages)
+        if self._last_prompt_tokens and self._anchor is not None:
+            at_text, at_images = self._anchor
+            added = self._text_ratio * (text - at_text) + self._image_tokens * (images - at_images)
+            return self._last_prompt_tokens + max(0, round(added))
+        return round(self._text_ratio * (text + self._tools_text) + self._image_tokens * images)
+
+    def _fill_high(self, image_price: float) -> int:
+        """The next prompt, estimated high (DREAM-112 gate: priced at the average image, 8 of 16 runs sent
+        a prompt past the line). What was added since the last count is priced at the dearest recent
+        rates -- text at the highest recent ratio, each image at `image_price` -- and the largest recent
+        miss of this estimate goes on top."""
+        margin = max(0, max(self._bound_misses, default=0))
+        text, images = _text_and_images(self.messages)
+        if self._last_prompt_tokens and self._anchor is not None:
+            at_text, at_images = self._anchor
+            added = self._text_high * max(0, text - at_text) + image_price * max(0, images - at_images)
+            return self._last_prompt_tokens + round(added) + margin
+        return self._ctx_fill() + margin
+
+    def _fill_bound(self) -> int:
+        """The compaction trigger's view of the next prompt: _fill_high with each added image at the dearest
+        price the engine has counted for an image this session, or at IMAGE_TOKENS before it has counted one
+        (a ceiling no engine Dream drives is known to exceed; MiMo's is 2,048). DREAM-112 gate round 2: 4,096
+        kept as a floor after images had been counted fired a 16k window's compaction at 72 % of its line, 38
+        times in 120 rounds; the dearest of only the recent rounds let 3 of 16 runs of varying price (300-2,048)
+        send a prompt past the line. An image dearer than every one counted so far can still carry one prompt
+        past it, by its excess over that price less the margin."""
+        return self._fill_high(self._image_max or float(IMAGE_TOKENS))
+
+    def _mark_sent(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> None:
+        """What the request about to go out is estimated at, for the calibration its usage teaches.
+        Its history grows the last counted one when no rewrite has reset the count since."""
+        raw = account(messages, tools, self._window(), 0)
+        self._sent_est = (raw.input_tokens, raw.tools, _est_tokens(messages))
+        self._tools_text = len(json.dumps(tools, ensure_ascii=False)) // 4
+        grew = bool(self._last_prompt_tokens) and self._anchor is not None
+        high = self._fill_high(self._image_high) - max(0, max(self._bound_misses, default=0)) if grew else 0
+        self._sent_parts = (*_text_and_images(messages), self._tools_text, grew, len(messages), high)
 
     def _record_calibration(self, prompt_tokens: int) -> None:
-        """Learn the estimate's error from the server's count of the request
-        _admit_request just measured."""
-        if not prompt_tokens or self._sent_est is None:
+        """Learn the estimates' error from the server's count of the request just sent. Called before
+        the reply is appended, so the history is still the one that went out."""
+        if not prompt_tokens:
             return
-        est_input, est_tools, est_msgs = self._sent_est
-        self._calib = min(4.0, max(0.1, prompt_tokens / max(1, est_input)))
-        tools_real = self._calib * est_tools
-        self._calib_msgs = min(4.0, max(0.1, (prompt_tokens - tools_real) / max(1, est_msgs)))
-        self._est_at_last = est_msgs
-        self._sent_est = None
+        if self._sent_est is not None:
+            est_input, est_tools, est_msgs = self._sent_est
+            self._calib = min(4.0, max(0.1, prompt_tokens / max(1, est_input)))
+            tools_real = self._calib * est_tools
+            self._calib_msgs = min(4.0, max(0.1, (prompt_tokens - tools_real) / max(1, est_msgs)))
+            self._sent_est = None
+        if self._sent_parts is not None:
+            text, images, tools, grew, sent_len, high = self._sent_parts
+        else:
+            (text, images), tools, grew, sent_len, high = (_text_and_images(self.messages), self._tools_text,
+                                                           False, len(self.messages), 0)
+        self._sent_parts = None
+        if self._projected is not None:          # a compaction's landing
+            self._landing_miss, self._projected = max(0.0, prompt_tokens - self._projected), None
+        total = text + tools
+        first = not self._cal_totals
+        change = prompt_tokens - self._cal_totals[-1][2] if self._cal_totals else None   # since the last count
+        if grew and self._cal_totals:
+            last_total, last_images, last_count = self._cal_totals[-1]
+            if (total, images) != (last_total, last_images) and total >= last_total \
+                    and images >= last_images and prompt_tokens >= last_count:
+                growth = prompt_tokens - last_count
+                self._cal_deltas.append((total - last_total, images - last_images, growth))
+            self._bound_misses.append(prompt_tokens - high)
+        self._cal_totals.append((total, images, prompt_tokens))
+        self._anchor = (text, images)
+        self._refit()
+        # Every message of the counted history without a record of its own gets one (_remember_tokens): a
+        # round's new messages, and after a compaction its stubs and the round that set it off (whose own
+        # count never came). The tools' share is fixed at the first count, so a text ratio that drifts
+        # later does not move it.
+        if first:
+            self._tools_tokens = (tools, self._text_ratio * tools)
+        if self._tools_tokens is not None and self._tools_tokens[0] == tools:
+            fresh = [m for m in self.messages[:sent_len]
+                     if (entry := self._msg_tokens.get(id(m))) is None or entry[0] != _msg_parts(m)]
+            if fresh:
+                self._remember_tokens(fresh, change, grew=grew)
+
+    def _remember_tokens(self, fresh: list[dict[str, Any]], change: int | None, *, grew: bool) -> None:
+        """Keep what the server counted for the `fresh` messages of the history it just counted, `change`
+        tokens more than the count before (None: no count before), so compaction later removes each at its
+        own price (DREAM-112 gate: old code-heavy results priced at the recent prose ratio landed compaction at
+        0.68x its target).
+
+        A message costs its text and images plus the chat template around it, and the template's cost is
+        measured, not assumed (gate round 2: 16 a message, where MiMo charges about 4, put each compaction's
+        stubs 12 tokens too dear; the count pushed the difference into the live messages counted with them, a
+        later compaction removed those at too low a price, and the landings drifted from 0.998 to 0.764 of the
+        target). A record is (parts, a, s, the message): it costs a + s x the template (_template). It holds
+        the message, so a message deleted before the next count cannot pass its id to a new one.
+
+        A growing history: the new messages cost exactly what the count grew by (_split_round).
+
+        A rewritten one (a compaction), from the count's change: every message the compaction left alone was
+        in both counts at its real cost, so the change is what the rewritten messages (the stubs) cost now
+        less what they cost before, plus the round it ran in, which was never counted (a rewrite that also
+        deleted messages, a Fresh start say, is not measured: every deleted price's error would enter).
+        A stub costs its text at the text ratio and a template. A rewritten message's old price moved with the
+        template by s, its stub's by 1: where s is not 1 (a round's text, whose share of its count was taken
+        after the templates) the change shows the template, which a growing history never does, since its
+        rounds all add the same few messages. What the prices leave unexplained is either the template or an
+        error in a price, so the template is measured only through prices it can trust: nothing deleted, a text
+        ratio fitted on text alone at least once (a round with images prices its text at that ratio and gives
+        the images the rest, so in a session with a screenshot in every message from the start both are
+        guesses), and estimates -- the uncounted round, and an earlier compaction's uncounted round rewritten
+        now -- known to within about 2 tokens a template, judged by how far recent image prices and text ratios
+        spread (a screenshot of a price that varies leaves the template where it was). The template is the
+        median of the last five measurements: a switch from code to prose in the very round a compaction ran
+        in is invisible until counted, and measured through, its 911-token error read as a template of 38.6.
+        Otherwise the template stays, and the landing feedback in _maybe_compact covers it. No price takes up
+        what the count leaves, so an error in one is never passed on to another."""
+        live = {id(m) for m in self.messages}
+        gone = [v for k, v in self._msg_tokens.items() if k not in live]      # deleted since the last count
+        self._msg_tokens = {k: v for k, v in self._msg_tokens.items() if k in live}
+        was = {id(m): self._msg_tokens[id(m)] for m in fresh if id(m) in self._msg_tokens}
+        new = [m for m in fresh if id(m) not in was]
+        guessed = sum(self._estimated.get(k, 0.0) for k in was)   # rewritten prices that were only estimates
+        self._estimated = {k: v for k, v in self._estimated.items() if k in live and k not in was}
+        if grew and change is not None and change >= 0 and not was and not gone:
+            self._split_round(new, change)
+            return
+        priced = {id(m): self._text_ratio * c / 4 + self._image_tokens * n for m in fresh for c, n in [_msg_parts(m)]}
+        grown = sum(priced[id(m)] for m in new)
+        # How far an estimate can be off (tokens squared): an image by the spread of recent image prices
+        # (IMAGE_TOKENS before one was counted), text by that of recent text ratios, and a few tokens of rounding.
+        image = IMAGE_TOKENS if self._image_tokens == IMAGE_TOKENS else self._image_high - self._image_tokens
+        doubt = {id(m): (image * n) ** 2 + ((self._text_high - self._text_ratio) * c / 4) ** 2 + 16
+                 for m in new for c, n in [_msg_parts(m)]}
+        units = sum(1 - s for _, _, s, _ in was.values())
+        self._template_seen |= not grew and change is not None and units > 0
+        if not grew and change is not None and not gone and self._text_learned and units > 0 \
+                and sum(doubt.values()) + guessed + 16 * len(was) <= (2 * units) ** 2:   # good to ~2 tokens
+            o = (change - sum(priced[k] - a for k, (_, a, _, _) in was.items()) - grown) / units
+            if 0 <= o <= 64:
+                self._templates.append(o)
+                self._template = statistics.median(self._templates)
+        for m in fresh:
+            if id(m) in was:
+                self._msg_tokens[id(m)] = (_msg_parts(m), priced[id(m)], 1.0, m)
+        self._split_round(new, grown)
+        self._estimated.update(doubt)
+
+    def _split_round(self, messages: list[dict[str, Any]], total: float) -> None:
+        """Share a round's `total` among its messages. How it splits between their templates and their text is
+        not known, so each takes the template and text alone shares the rest, in proportion; with images, text
+        takes the text ratio and the images the rest (an image's price varies far more than text's). The
+        round's total stays `total` whatever the template turns out to be."""
+        parts = [_msg_parts(m) for m in messages]
+        text = [self._text_ratio * chars / 4 for chars, _ in parts]
+        estimate = [t + self._image_tokens * n for t, (_, n) in zip(text, parts)]
+        n, o = len(messages), self._template
+        images = sum(k for _, k in parts)
+        if images and (total - n * o - sum(text)) / images >= 16:
+            for m, p, t in zip(messages, parts, text):
+                w = p[1] / images
+                self._msg_tokens[id(m)] = (p, t + w * (total - sum(text)), 1 - w * n, m)
+        elif sum(estimate) > 0:
+            scale = (total - n * o) / sum(estimate)
+            for m, p, e in zip(messages, parts, estimate):
+                w = e / sum(estimate)
+                self._msg_tokens[id(m)] = ((p, w * total, 1 - w * n, m) if 0.25 <= scale <= 4.0
+                                           else (p, e * min(4.0, max(0.25, scale)), 1.0, m))
+
+    def _refit(self) -> None:
+        """Price text, then images, from the recent lead requests (fix #65), each from the most
+        direct evidence there is. Text: what the count grew by in rounds that added no image, else
+        the totals while none of them hold an image, else as it was. Images: what the count grew by
+        beyond that text in rounds that added images, else what the totals leave for the images
+        they hold, never above the flat IMAGE_TOKENS. Text is never priced from image rounds: when
+        each round adds the same text and one image (a screenshot loop), those rounds cannot tell
+        the two prices apart, and fitting both from them ran off to nonsense."""
+        r, c = self._text_ratio, self._image_tokens
+        flat = [d for d in self._cal_deltas if d[1] == 0]
+        priced = [d for d in self._cal_deltas if d[1] > 0]
+        text = sum(t for t, _, _ in self._cal_totals)
+        images = sum(n for _, n, _ in self._cal_totals)
+        grown = sum(t for t, _, _ in flat)
+        if grown >= 200:
+            r = sum(p for _, _, p in flat) / grown
+        elif text and not images:
+            r = sum(p for _, _, p in self._cal_totals) / text
+        self._text_learned |= grown >= 200 or bool(text and not images)
+        r = min(4.0, max(0.25, r))
+        if priced:
+            c = min(16384.0, max(16.0, sum(p - r * t for t, _, p in priced) / sum(n for _, n, _ in priced)))
+        elif images:
+            c = min(float(IMAGE_TOKENS), max(16.0, sum(p - r * t for t, _, p in self._cal_totals) / images))
+        self._text_ratio, self._image_tokens = r, c
+        # The dearest recent rates, for the estimates that must not come in low (_fill_high).
+        self._text_high = min(4.0, max([r, *(p / t for t, _, p in flat if t >= 200)]))
+        self._image_high = min(16384.0, max((p - r * t) / n for t, n, p in priced)) if priced else c
+        self._image_max = max(self._image_max, self._image_high if priced else 0.0)
+
+    # What the chat template costs a message until a compaction has measured it (_remember_tokens). MiMo's
+    # renders a message as <|im_start|>role\n ... <|im_end|> (the engine's mimo26_render_chat): about 4 tokens.
+    # Other models start from it too; their first compaction measures their own.
+    _TEMPLATE_TOKENS = 4.0
+
+    def _calibrated_size(self) -> tuple[Callable[[list[dict[str, Any]]], int], Callable[[dict[str, Any]], int]]:
+        """(size of a history, size of one message) in the server's tokens, anchored so that the
+        history's size is its estimate taken high: what compaction removes is priced at what the server
+        counted for it (_remember_tokens), or else at the calibrated rates and template, so the cut lands at
+        or just under its target whatever the history's mix of code, prose and images (fix #65)."""
+        r, c, o = self._text_ratio, self._image_tokens, self._template
+
+        def msg_size(m: dict[str, Any]) -> int:
+            parts = _msg_parts(m)
+            known = self._msg_tokens.get(id(m))
+            if known is not None and known[0] == parts:
+                return round(known[1] + known[2] * o)
+            return round(r * parts[0] / 4 + c * parts[1] + o)
+
+        offset = self._fill_high(self._image_high) - sum(msg_size(m) for m in self.messages)
+        return (lambda messages: offset + sum(msg_size(m) for m in messages)), msg_size
 
     def _keep_reasoning(self, message: dict[str, Any], parts: list[str]) -> None:
         """Keep the model's reasoning on its reply (MachX): V4.1 renders it back
@@ -1602,6 +2046,12 @@ class OpenAICompatBackend(Backend):
         (live: 26K tokens / 93 s per new message, 47K / 178 s per revealed tool).
         For a local backend the list is therefore chosen once and kept; a schema
         fetched with tool_schema arrives in that tool's result instead."""
+        return self._cache_sensitive()
+
+    def _cache_sensitive(self) -> bool:
+        """A local engine: MachX, or any server on a loopback address. It reuses its prompt cache
+        only while the prompt's start is unchanged, and it serves one request at a time. The one
+        predicate the stable tool list and fixes #17, #38 (live state, salvage) and #71 key on."""
         from ..inference_coordination import local_endpoint
         return (getattr(self.provider, "key", "") == "machx"
                 or local_endpoint(getattr(self.provider, "base_url", "") or "") is not None)
@@ -1679,17 +2129,70 @@ class OpenAICompatBackend(Backend):
         self._phase_reset_pending = False
         if self._context_overflow == "error":
             return []
-        before = _est_tokens(self.messages)
+        before = self._ctx_fill()
+        size, msg_size = self._calibrated_size()
         prior = list(self.messages)
-        n = _compact_messages(self.messages, int(self._window() * 0.25 / self._calib_msgs),
-                              on_elide=self._note_elided())
+        n = _compact_messages(self.messages, int(self._window() * 0.25), on_elide=self._note_elided(),
+                              size=size, msg_size=msg_size)
         self._record_council_omissions(prior, self.messages)
         if not n:
             return []
-        self._last_prompt_tokens = 0
-        return [Event("system", f"Phase complete — compacted the conversation ({before:,} to "
-                                f"{_est_tokens(self.messages):,} estimated tokens) so the next phase starts "
+        self._compacted()
+        return [Event("system", f"Phase complete — compacted the conversation ({before:,} to about "
+                                f"{size(self.messages):,} tokens) so the next phase starts "
                                 "lean; PLAN.md carries the plan.")]
+
+    def fresh_start(self) -> list[Event]:
+        """The owner's Fresh start (DREAM-113, fix list #33): the conversation becomes one handoff now
+        (core/handoff.py: the owner's requests and the last reply, the files written or edited this session,
+        the open tasks). The existing compaction does it: _compact_messages to nothing saves what goes as
+        working notes, as every compaction does; the stubs it leaves are then dropped for the handoff, and
+        _compacted() marks the boundary -- the stale count goes, and a cache-sensitive engine's frozen head
+        is refreshed there (DREAM-112). Between turns only: refused while a turn runs."""
+        if self._turn_active:
+            raise ValueError("Fresh start runs between turns only: let this turn finish (or stop it), then "
+                             "start fresh.")
+        if self._council_context is not None:
+            raise ValueError("A Council handoff is waiting for your next message: send it, then start fresh.")
+        if len(self.messages) < 2:
+            return [Event("system", "Fresh start: nothing to hand off yet — the conversation is empty.")]
+        parts = handoff.gather(_bound_context())          # the reads first: one that fails changes nothing
+        before, count = self._ctx_fill(), len(self.messages) - 1
+        size, msg_size = self._calibrated_size()
+        prior = list(self.messages)
+        save, notes = self._note_elided(), []
+
+        def kept(what: str, body: str, turn: str) -> tuple[int | None, str]:
+            note_id, why = save(what, body, turn)
+            if note_id is not None:
+                notes.append(note_id)
+            return note_id, why
+
+        elided = _compact_messages(self.messages, 0, on_elide=kept if save is not None else None,
+                                   size=size, msg_size=msg_size)
+        self._record_council_omissions(prior, self.messages)
+        # The history about to go points at notes: this compaction's, earlier compactions' (in their stubs)
+        # and an earlier handoff's. The new handoff names them all, so none becomes unreachable (DREAM-113 gate).
+        pointed = sorted(set(self._handoff_notes) | handoff.note_refs(self.messages) | set(notes))
+        self.messages[1:] = [{"role": "user", "name": "dream_fresh_start",
+                              "content": handoff.compose(parts, self._file_ledger, pointed)}]
+        self._handoff_notes = pointed
+        self._snips.clear()
+        self._compacted()
+        after = self._ctx_fill()   # the rewritten history priced from scratch: the old count no longer anchors it
+        if self.runtime_meter:
+            self.runtime_meter.record("fresh_start", before=before, after=after, messages=count, elided=elided,
+                                      notes=len(notes), files=len(self._file_ledger), tasks=len(parts.tasks))
+
+        def n(k: int, what: str) -> str:
+            return f"{k:,} {what}{'' if k == 1 else 's'}"
+
+        return [Event("system", f"Fresh start: {n(count, 'message')} (about {before:,} tokens with the system prompt "
+                                f"and tools) became one handoff; the next request starts at about {after:,} tokens. "
+                                f"It carries your {n(len(parts.asked), 'request')}, Dream's last reply, "
+                                f"{n(len(self._file_ledger), 'file')} written or edited and "
+                                f"{n(len(parts.tasks), 'open task')}; earlier detail stays in this session's transcript"
+                                + (f" and {n(len(notes), 'working note')}." if notes else "."))]
 
     def _maybe_compact(self) -> list[Event]:
         """Compact the history if it has crossed the threshold. Returns the
@@ -1697,9 +2200,16 @@ class OpenAICompatBackend(Backend):
         if self._context_overflow == "error":
             return []
         window = self._window()
-        if self._ctx_fill() <= window * compact_at(window):
+        # Decided on the next prompt estimated high, so it fires before the prompt passes the line
+        # (DREAM-112 gate); `fill`, the plain estimate, is what the owner is told.
+        bound, fill = self._fill_bound(), self._ctx_fill()
+        if bound <= window * compact_at(window):
             return []
         before = _est_tokens(self.messages)
+        # Measured in the server's tokens and anchored to its last count, so the cut lands on its
+        # target rather than a third below it (fix #65). Taken before snips move the history.
+        size, msg_size = self._calibrated_size()
+        target = int(window * compact_at(window) / 2)
         events = []
         # What the model itself marked as done goes first — whole exchanges,
         # chosen with judgment — before the blind stubbing below.
@@ -1711,30 +2221,160 @@ class OpenAICompatBackend(Backend):
         # straight back over it on the very next round. What goes is saved to
         # working notes first (Phase 10): the stub names the note.
         prior = list(self.messages)
-        n = _compact_messages(self.messages, int(window * compact_at(window) / 2 / self._calib_msgs),
-                              on_elide=self._note_elided())
+        save = self._note_elided()
+        # Aimed below the target by as much as the last landing came in above its projection (at most 2 % of
+        # the target): a price that runs low the same way every time -- text in rounds with images priced at a
+        # text ratio a little off -- is then paid for.
+        aim = target - round(min(0.02 * target, self._landing_miss or 0))
+        n = _compact_messages(self.messages, aim, on_elide=save, size=size, msg_size=msg_size)
+        if n and (not self._template_seen or not self._text_learned):
+            # Until a landing has shown what the engine's template costs (MiMo's is assumed), each message a cut
+            # rewrites moves its landing by (1 - s) tokens for each token the real one costs more (a record costs
+            # a + s x the template). Cut that much deeper for a template up to 16 tokens dearer, within 3 % of the
+            # target, so a dearer one does not carry the landing past it. A screenshot session's first cuts may
+            # rewrite only text, which shows nothing of the template; once a counted landing has (measured or not),
+            # the landing feedback above covers it. While the text ratio has never been fitted on text alone, every
+            # image round's split is a guess, and every cut keeps the reserve.
+            live = {id(m) for m in self.messages}
+            rewrote = sum(1 - s for k, (p, _, s, m) in self._msg_tokens.items() if k in live and p != _msg_parts(m))
+            reserve = min(0.03 * target, 16 * rewrote)
+            if reserve >= 1:
+                n += _compact_messages(self.messages, int(aim - reserve), on_elide=save, size=size,
+                                       msg_size=msg_size)
         self._record_council_omissions(prior, self.messages)
-        if n:
+        if n or snipped:
             # The stale server count describes the OLD, larger history; keeping
             # it would pin _ctx_fill high and re-trigger compaction every round.
-            self._last_prompt_tokens = 0
+            self._compacted()
         after = _est_tokens(self.messages)
+        projected = size(self.messages)
+        if n or snipped:
+            self._projected = projected       # the next count is this cut's landing (_record_calibration)
         if n:
-            events.append(Event("system", f"compacted context: {before} to {after} "
+            events.append(Event("system", f"compacted context: about {fill:,} to about {projected:,} "
                                           f"tokens ({n} messages elided)"))
             if self.runtime_meter:
                 self.runtime_meter.record("compaction", before=before, after=after, elided=n,
-                                          window=window, threshold=compact_at(window))
-        if after > window:
+                                          window=window, threshold=compact_at(window), fill=fill,
+                                          bound=bound, target=target, projected=projected,
+                                          text_ratio=round(self._text_ratio, 3),
+                                          image_tokens=round(self._image_tokens),
+                                          template_tokens=round(self._template, 1))
+        if projected > window:
             # Nothing left to give: the irreducible history (system prompt, the
             # live turn) is bigger than the window. The request goes out anyway
             # — the server may still cope — but a turn that is about to fail
             # this way must SAY so, never fail mysteriously.
-            events.append(Event("system", f"⚠ context {after} tokens still exceeds "
+            events.append(Event("system", f"⚠ context {projected} tokens still exceeds "
                                           f"the {window}-token window after "
                                           "compacting — the server may refuse or "
                                           "truncate this turn. /new starts fresh."))
         return events
+
+    def _compacted(self) -> None:
+        """The lead history was rewritten from its start: the server's last count describes the old
+        one. On a cache-sensitive engine this is also the moment the head's wake-up may change (fix
+        #38): the history after the head is re-read anyway, and a changed wake-up adds only the head's
+        tail and the tools to that."""
+        self._last_prompt_tokens = 0
+        if self._cache_sensitive():
+            self._refresh_head()
+
+    def _wake_inputs(self, context: Any) -> tuple[str | None, int | None]:
+        """(project, wake-up token budget): what the engine built this session's wake-up with."""
+        from ...memory import project as project_memory
+        project = project_memory.project_key(context.workspace) if context.workspace else None
+        return project, (self.profile.wake_tokens if self.profile is not None else None)
+
+    def _refresh_head(self) -> bool:
+        """Re-render the system prompt's wake-up (open work, top of mind, memory index, skills) from
+        the store; True when it changed. What the model knows is from then on the state the new wake-up
+        was built from. Needs the session's bound tool context and a prompt that build_system_prompt
+        made; anything else is left as it is."""
+        from .. import system_prompt
+        context = _bound_context()
+        head = self.messages[0].get("content") if self.messages and self.messages[0].get("role") == "system" else None
+        if context is None or not isinstance(head, str) or system_prompt.WAKE_HEADER not in head:
+            return False
+        project, budget = self._wake_inputs(context)
+        try:
+            fresh = system_prompt.refresh_wake(head, context.store, context.session_id,
+                                               max_tokens=budget, project=project)
+        except Exception as exc:   # a store that cannot be read keeps the head it has, and says so
+            if self.runtime_meter:
+                self.runtime_meter.record("head_refresh_failed", error=type(exc).__name__)
+            return False
+        if fresh is None:
+            return False
+        self._live_told = fresh.live_state
+        if fresh == head:
+            return False
+        self.messages[0] = {**self.messages[0], "content": fresh}
+        return True
+
+    def _live_state_sync(self) -> list[Event]:
+        """Fix #38, before each new user message, on a cache-sensitive engine only: open work and
+        top-of-mind memory are part of the system prompt's wake-up, and the engine must see that head
+        unchanged. So it stays as built, and a short note -- placed just before the user's message, at
+        the tail -- names what changed since the state the head was built from (SystemPrompt.live_state,
+        all of it, whatever the wake budget let the text show) and since the last note. Any other
+        backend is left exactly as it was: no note, and no rewrite of its prompt (DREAM-112 gate: a
+        hosted provider's prefix cache is worth keeping too)."""
+        from .. import system_prompt
+        context = _bound_context()
+        head = self.messages[0].get("content") if self.messages and self.messages[0].get("role") == "system" else None
+        if (context is None or not self._cache_sensitive() or not isinstance(head, str)
+                or system_prompt.WAKE_HEADER not in head):
+            return []
+        project, _ = self._wake_inputs(context)
+        try:
+            now = system_prompt.live_state(context.store, project)
+        except Exception as exc:
+            return [Event("system", f"Could not read open work and memory for this turn ({type(exc).__name__}); "
+                                    "the model sees them as they were when the session started.")]
+        # A prompt that carries no state (not built by build_system_prompt) starts from the first turn's.
+        told = self._live_told if self._live_told is not None else getattr(head, "live_state", None) or now
+        note = system_prompt.live_state_note(told, now)
+        self._live_told = now
+        if note:
+            self.messages.append({"role": "user", "name": "dream_live_state", "content": note})
+            if self.runtime_meter:
+                self.runtime_meter.record("live_state_note", lines=note.count("\n"))
+        return []
+
+    @staticmethod
+    def _head_hash(payload: dict[str, Any]) -> str:
+        """12 hex of a request's head: its system text and its tools, which render first (fix #38).
+        A prefix-cached engine reuses nothing past the first byte that differs there."""
+        messages = payload.get("messages") or []
+        system = messages[0].get("content", "") if messages and messages[0].get("role") == "system" else ""
+        blob = json.dumps([system, payload.get("tools") or []], sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False)
+        return hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()[:12]
+
+    def _prompt_cache_slots(self) -> tuple[int | None, str]:
+        """How many conversations the local engine keeps cached, and who says so (fix #71): its
+        /props `prompt_cache_slots`, else _CACHE_SLOT_DEFAULTS for a MachX model, else unknown."""
+        props = self._server_props if self.model == self._server_props_model else None
+        reported = props.get("prompt_cache_slots") if isinstance(props, dict) else None
+        if type(reported) is int and reported >= 1:
+            return reported, "the engine's /props"
+        if getattr(self.provider, "key", "") == "machx":
+            capabilities = self._local_capabilities if self.model == self._capabilities_model else {}
+            architecture = capabilities.get("architecture") if isinstance(capabilities, dict) else None
+            for arch, fragment, slots in _CACHE_SLOT_DEFAULTS:
+                if architecture == arch or fragment in str(self.model or "").lower():
+                    return slots, f"Dream's default for {arch}"
+        return None, "unknown"
+
+    def _round_cost(self, calls: list[dict[str, Any]]) -> float:
+        """What a tool round spends of _MAX_TOOL_ROUNDS (fix #17): half on a local engine when every
+        call in it is a look (_read_only_call), else one. Live 2026-09-19: a turn of ~100 cheap
+        eval_js/see/screenshot probes died at the limit mid-sweep."""
+        if calls and self._cache_sensitive() and all(_read_only_call(c.get("name") or "", c.get("args"))
+                                                     for c in calls):
+            return 0.5
+        return 1.0
 
     def _repair_dangling(self) -> None:
         """Fill in tool results that never landed.
@@ -1997,11 +2637,16 @@ class OpenAICompatBackend(Backend):
             # and re-read all of it every time (Dream fix #2).
             prior = list(messages)
             target = min(int(window * compact_at(window) / 2), window - report.tools - report.output - report.margin)
-            elided = _compact_messages(messages, max(0, int(target / self._calib_msgs)),
-                                       on_elide=self._note_elided() if lead else None)
+            if lead and messages is self.messages:   # in the server's tokens, as _maybe_compact (fix #65)
+                size, msg_size = self._calibrated_size()
+                elided = _compact_messages(messages, max(0, target), on_elide=self._note_elided(),
+                                           size=size, msg_size=msg_size)
+            else:
+                elided = _compact_messages(messages, max(0, int(target / self._calib_msgs)),
+                                           on_elide=self._note_elided() if lead else None)
             self._record_council_omissions(prior, messages)
             if elided and lead and messages is self.messages:
-                self._last_prompt_tokens = 0   # the count described the larger history
+                self._compacted()   # the count described the larger history
         try:
             report = admit(messages, schemas, window, output, counter=counter, method=method)
         except ContextOverflow as exc:
@@ -2134,6 +2779,165 @@ class OpenAICompatBackend(Backend):
         except CoordinationError as exc:
             raise ValueError(str(exc)) from exc
 
+    def _lease_record(self, coordinator) -> dict | None:
+        from ..inference_coordination import CoordinationError
+        try:
+            return coordinator.status()
+        except CoordinationError:
+            return None
+
+    def _lease_notice(self, text: str) -> None:
+        """A system line about a wait for the local lease (the DREAM-110 gate: up to 20 s of silence after
+        a Stop reads as a hang). It goes out through the Engine's event funnel, the one background work
+        uses. Display only: a subscriber that fails is logged, and the request goes on."""
+        emit = getattr(self, '_background_emit', None)
+        if emit is None:
+            return
+        try:
+            emit(Event("system", text))
+        except Exception:
+            _LOG.exception("Lease wait notice failed")
+
+    async def _enter_lease(self, coordinator, generation):
+        """Take the local lease. A record a cut-off request left behind -- "uncertain" after a Stop or
+        a disconnect, or "running" for an owner that is gone -- no longer refuses at once (fixes #72,
+        #34): the request waits up to _LEASE_WAIT_S for the engine to report nothing in flight, clears
+        exactly that record and goes on. A lease a live Dream request holds is waited for as before.
+        When a request has to wait at all, the owner sees one line as the wait starts and one as it
+        ends: sent, given up, or stopped by the owner (DREAM-113); a request that never waits shows neither."""
+        from ..inference_coordination import CoordinationError
+        started = deadline = waiting = None
+
+        def announce(text):
+            nonlocal waiting
+            if waiting is None:
+                waiting = time.monotonic()
+                self._lease_notice(text)
+
+        def coordination_event(event):
+            if event.get("state") == "waiting":
+                announce("Waiting for another Dream request on this local engine to finish…")
+
+        def refusal(refused, record, seen, waited):
+            if waiting is not None:
+                self._lease_notice(f"Stopped waiting after {time.monotonic() - waiting:.0f} s; "
+                                   "this request was not sent.")
+            return _RequestFailed(self._lease_refusal(refused, record, seen, waited), code="lease_refused")
+
+        try:
+            while True:
+                lease = coordinator.request(on_event=coordination_event)
+                try:
+                    await self._interruptible_io(lease.__aenter__, generation=generation, check_result=False)
+                except CoordinationError as exc:
+                    refused = exc
+                else:
+                    if waiting is not None:
+                        self._lease_notice(f"The local engine is free after {time.monotonic() - waiting:.0f} s; "
+                                           "sending this request.")
+                    return lease
+                record = self._lease_record(coordinator)
+                if record is None or not _lease_unsettled(record):
+                    raise refusal(refused, record, None, 0.0) from refused
+                if started is None:
+                    started = time.monotonic()
+                    deadline = started + _LEASE_WAIT_S
+                elif time.monotonic() >= deadline:        # cleared once, and another cut-off record came
+                    raise refusal(refused, record, None, 0.0) from refused
+                seen = await self._settle_lease(coordinator, deadline, generation, started, announce)
+                if seen is not None:
+                    raise refusal(refused, self._lease_record(coordinator) or record, seen,
+                                  time.monotonic() - started) from refused
+        except asyncio.CancelledError:
+            # A Stop during the wait skipped both endings above: the owner saw the wait start and never end.
+            if waiting is not None:
+                self._lease_notice("Stopped by you while waiting; this request was not sent.")
+            raise
+
+    async def _settle_lease(self, coordinator, deadline, generation, started, announce) -> _EngineReport | None:
+        """Clear a cut-off request's lease record once the engine reports nothing in flight. None: try
+        the lease again (the record is gone, or a live request holds it now). Otherwise the engine's
+        last report, which keeps the refusal. Only reconcile() clears, so only under the lease's lock
+        and only for the exact request id read here."""
+        from ..inference_coordination import CoordinationError
+        while True:
+            record = self._lease_record(coordinator)
+            if record is None or not _lease_unsettled(record):
+                return None
+            seen = await self._engine_activity(generation)
+            if seen.kind == "idle":
+                try:
+                    coordinator.reconcile(record["request_id"], confirmed_idle=True)
+                except CoordinationError:
+                    pass            # it changed under us, or a live request holds the lock: look again
+                else:
+                    if self.runtime_meter:
+                        self.runtime_meter.record(
+                            "lease_reconciled", request_id=record["request_id"], was=record["state"],
+                            pid=record.get("pid"), cut_off_at=record.get("updated_at") or record.get("started_at"),
+                            waited_s=round(time.monotonic() - started, 2), inflight=seen.inflight, queued=seen.queued)
+                    return None
+            elif seen.kind != "busy":
+                return seen
+            if time.monotonic() >= deadline:
+                return seen
+            if seen.kind == "busy":
+                announce(f"Waiting up to {_LEASE_WAIT_S:g} s for the local engine to finish the interrupted "
+                         f"request {_lease_holder(record)}; it {seen.said}…")
+            await self._interruptible_io(lambda: asyncio.sleep(_LEASE_POLL_S), generation=generation)
+
+    async def _engine_activity(self, generation) -> _EngineReport:
+        """What the local server's /health says about work in flight. Only the engine's own report
+        counts as idle: HTTP 200, status "ok", inflight 0 and queued 0. ie serve frees a request's
+        admission slot (inflight) only after its generation has returned (openai_server.cpp)."""
+        client = self._client
+        if client is None or not hasattr(client, "get"):
+            return _EngineReport("unchecked", "cannot be asked whether it is idle")
+        root = self.provider.base_url.rsplit("/v1", 1)[0]
+        try:
+            resp = await self._interruptible_io(lambda: client.get(f"{root}/health", timeout=3.0),
+                                                generation=generation)
+            data = resp.json()
+        except httpx.HTTPError as exc:
+            return _EngineReport("unreachable", f"did not answer /health ({type(exc).__name__})")
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            return _EngineReport("unreachable", "did not answer /health with a readable report")
+        status, inflight, queued = data.get("status"), data.get("inflight"), data.get("queued")
+        if resp.status_code == 200 and status == "ok":
+            if type(inflight) is not int or type(queued) is not int:
+                return _EngineReport("unreported", "does not report requests in flight on /health")
+            if inflight == 0 and queued == 0:
+                return _EngineReport("idle", "reports nothing in flight", 0, 0)
+            return _EngineReport("busy", f"still reports {inflight} request{'' if inflight == 1 else 's'} "
+                                         f"in flight and {queued} queued", inflight, queued)
+        if isinstance(status, str) and status:
+            reason = f" ({str(data['reason'])[:200]})" if data.get("reason") else ""
+            return _EngineReport("unhealthy", f"reports it is {status[:40]}{reason}")
+        return _EngineReport("unreachable", f"did not answer /health with a readable report (HTTP {resp.status_code})")
+
+    def _lease_refusal(self, refused, record, seen: _EngineReport | None, waited: float) -> str:
+        """Say what holds the lease and what to do (fix #72)."""
+        if seen is None:
+            if record and record.get("state") == "running" and _lease_owner_alive(record):
+                return (f"{refused} The lease is held by Dream request {_lease_holder(record)}: "
+                        "let it finish or stop it, then send your message again.")
+            return str(refused)
+        parsed = urlsplit(self.provider.base_url)
+        where = f"the local engine at {parsed.hostname}:{parsed.port}"
+        after = f" after waiting {waited:.0f} s" if seen.kind in ("busy", "idle") else ""
+        action = {
+            "busy": ("Wait for the engine to finish, then send your message again; once you have checked "
+                     "that the engine is idle you can also confirm it in Controls."),
+            "idle": "Send your message again, or confirm the engine idle in Controls.",
+            "unhealthy": "Restart the engine: pick the model again in the model picker (or restart Dream).",
+            "unreachable": ("If the engine stopped, load the model again; if it is running and idle, "
+                            "confirm it in Controls."),
+        }.get(seen.kind, "Once you have checked that the server is idle, confirm it in Controls.")
+        return (f"The previous local request {_lease_holder(record)} was cut off and its outcome is "
+                f"still uncertain; {where} {seen.said}{after}, so this request was not sent. {action}")
+
     @asynccontextmanager
     async def _request_coordination(self):
         from ..inference_coordination import CoordinationError
@@ -2144,8 +2948,7 @@ class OpenAICompatBackend(Backend):
         completed_error = None
         try:
             generation = self._request_generation()
-            lease = coordinator.request()
-            await self._interruptible_io(lease.__aenter__, generation=generation, check_result=False)
+            lease = await self._enter_lease(coordinator, generation)
             exit_error = (None, None, None)
             try:
                 self._check_interruption(generation)
@@ -2160,7 +2963,8 @@ class OpenAICompatBackend(Backend):
             finally:
                 await lease.__aexit__(*exit_error)
         except CoordinationError as exc:
-            raise _RequestFailed(str(exc)) from exc
+            raise _RequestFailed(str(exc), code=getattr(exc, "code", None) or "local_lease",
+                                 message=getattr(exc, "message", None)) from exc
         if completed_error is not None:
             raise completed_error
 
@@ -2176,11 +2980,14 @@ class OpenAICompatBackend(Backend):
                     self._check_interruption(generation)
                     if not stream.complete:
                         if self._coordinator() is not None:
-                            raise CoordinationError("Local stream ended without a completion signal; check server idle in Controls.")
-                        raise _RequestFailed("Stream ended without a completion signal. No collected tool calls ran; the request was not replayed.")
+                            error = CoordinationError("Local stream ended without a completion signal; check server idle in Controls.")
+                            error.code = "incomplete_stream"
+                            raise error
+                        raise _RequestFailed("Stream ended without a completion signal. No collected tool calls ran; the request was not replayed.",
+                                             code="incomplete_stream")
         except StreamProtocolError as exc:
             # Propagate through the local lease first so uncertainty stays fenced.
-            raise _RequestFailed(str(exc)) from exc
+            raise _RequestFailed(str(exc), code="stream_protocol_error") from exc
 
     @asynccontextmanager
     async def _stream_uncoordinated(self, payload: dict[str, Any]):
@@ -2190,6 +2997,7 @@ class OpenAICompatBackend(Backend):
         self._configure_interrupts()
         generation = self._request_generation()
         last, wait = "", None
+        code = message = None
         for attempt in range(_RETRY_ATTEMPTS):
             if attempt:
                 await self._interruptible_io(lambda: asyncio.sleep(_retry_delay(attempt - 1, wait)), generation=generation)
@@ -2202,6 +3010,7 @@ class OpenAICompatBackend(Backend):
                         e, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
                     raise
                 last = f"request failed: {type(e).__name__}: {e}"
+                code, message = "transport_error", None
                 continue
             if resp.status_code == 200:
                 response = _InterruptibleResponse(resp, self, generation)
@@ -2225,13 +3034,13 @@ class OpenAICompatBackend(Backend):
             finally:
                 await ctx.__aexit__(None, None, None)
             last = f"HTTP {resp.status_code}: {body[:400]}"
+            code, message = _http_error_fields(resp.status_code, body)
             wait = _retry_after(resp)
             if self._coordinator() is not None and (resp.status_code == 408 or resp.status_code >= 500):
-                from ..inference_coordination import CoordinationError
-                raise CoordinationError(f"Local HTTP {resp.status_code}: upstream outcome is uncertain. Check server idle in Controls.")
+                raise _uncertain_local_http(resp.status_code, code, message)
             if not _is_retryable(resp.status_code):
                 break
-        raise _RequestFailed(last)
+        raise _RequestFailed(last, code=code, message=message)
 
     async def _post_with_retry(self, payload: dict[str, Any]) -> Any:
         measurement = self._measurement_request(payload, phase="delegated") if self.turn_timing else None
@@ -2270,6 +3079,7 @@ class OpenAICompatBackend(Backend):
         self._configure_interrupts()
         generation = self._request_generation()
         last, wait = "", None
+        code = message = None
         for attempt in range(_RETRY_ATTEMPTS):
             if attempt:
                 await self._interruptible_io(lambda: asyncio.sleep(_retry_delay(attempt - 1, wait)), generation=generation)
@@ -2281,18 +3091,19 @@ class OpenAICompatBackend(Backend):
                         e, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
                     raise
                 last = f"request failed: {type(e).__name__}: {e}"
+                code, message = "transport_error", None
                 continue
             if resp.status_code == 200:
                 _raise_server_error(resp.json())
                 return resp
             last = f"HTTP {resp.status_code}: {resp.text[:200]}"
+            code, message = _http_error_fields(resp.status_code, resp.text)
             wait = _retry_after(resp)
             if self._coordinator() is not None and (resp.status_code == 408 or resp.status_code >= 500):
-                from ..inference_coordination import CoordinationError
-                raise CoordinationError(f"Local HTTP {resp.status_code}: upstream outcome is uncertain. Check server idle in Controls.")
+                raise _uncertain_local_http(resp.status_code, code, message)
             if not _is_retryable(resp.status_code):
                 break
-        raise _RequestFailed(last)
+        raise _RequestFailed(last, code=code, message=message)
 
     async def _salvage(self, why: str) -> str:
         with self._phase("recovery"):
@@ -2308,13 +3119,19 @@ class OpenAICompatBackend(Backend):
         stopped the turn, and Dream reported "loop guard: ended the turn" and threw
         every one of those results away. The work was done. Nobody got to see it.
 
-        Removing ``tools`` from the payload is what makes this safe: a model that
-        cannot emit a tool call cannot resume the loop that got it here, so the same
-        spiral physically can't repeat. It is one non-streaming call, capped, and a
+        No tool call in this reply ever runs: it is one non-streaming call whose text
+        alone is used, so the loop that got here cannot resume. It is capped, and a
         failure here is silent — salvage must never become a second way to fail.
+
+        Fix #38: on a cache-sensitive engine the payload keeps the lead's own tools
+        (tool_choice "none"), so the prompt's head is the lead's and the engine
+        extends its cached conversation. Without them it re-read all of it (live
+        2026-09-21 00:58: 33,077 tokens, 0 cached, at the round limit). The engine
+        ignores tool_choice, so a reply that is only a tool call is asked for again
+        without tools, as every salvage was before. Elsewhere there are no tools.
         """
         ask = (
-            "STOP. Do not call any more tools — you have none for this reply.\n\n"
+            "STOP. Do not call any more tools — none will run for this reply.\n\n"
             f"This turn is ending early: {why}\n\n"
             "Using ONLY what you already found above, answer the user's request now. "
             "Report what you learned, what it means, and what you were unable to "
@@ -2332,21 +3149,27 @@ class OpenAICompatBackend(Backend):
             "max_tokens": min(self._max_tokens(self._ctx_fill()), _SALVAGE_MAX_TOKENS),
             **self._sampling,
         }
+        if self._cache_sensitive():
+            payload["tools"], payload["tool_choice"] = self._request_tools(), "none"
         try:
             if self.runtime_meter is not None:
                 self.runtime_meter.check()
             if self.profile or self._local_options or self.capability_status()['context_tokens']['known']:
                 payload["max_tokens"] = min(payload["max_tokens"], self._admit_request(
-                    payload["messages"], [], lead=False).output)
-            resp = await self._post_with_retry(payload)
-            data = resp.json()
-            usage = data.get("usage") or {}
-            if self.runtime_meter is not None:
-                self.runtime_meter.usage(usage, phase="recovery")
-            for key in self._delegated_usage:
-                self._delegated_usage[key] += int(usage.get(key) or 0)
-            msg = data["choices"][0]["message"]
-            return (msg.get("content") or "").strip()
+                    payload["messages"], payload.get("tools", []), lead=False).output)
+            while True:
+                resp = await self._post_with_retry(payload)
+                data = resp.json()
+                usage = data.get("usage") or {}
+                if self.runtime_meter is not None:
+                    self.runtime_meter.usage({**usage, "head_hash": self._head_hash(payload)}, phase="recovery")
+                for key in self._delegated_usage:
+                    self._delegated_usage[key] += int(usage.get(key) or 0)
+                msg = data["choices"][0]["message"]
+                text = (msg.get("content") or "").strip()
+                if text or not msg.get("tool_calls") or "tools" not in payload:
+                    return text
+                del payload["tools"], payload["tool_choice"]
         except Exception:
             return ""
 
@@ -2437,6 +3260,9 @@ class OpenAICompatBackend(Backend):
             return _ExecutedToolResult(f"Error: {type(e).__name__}: {e}"), True
         text = _ExecutedToolResult(content_to_text(result.get("content")))
         failed = bool(result.get("is_error") or result.get("isError"))
+        if not failed:   # the session's changed files, for a Fresh start's handoff (DREAM-113)
+            context = _bound_context()
+            self._file_ledger.record(tool.name, args, context.workspace if context is not None else None)
         blocks = result.get("content") or []
         images = []
         if self.provider.multimodal and isinstance(blocks, list):
@@ -2619,8 +3445,9 @@ class OpenAICompatBackend(Backend):
         except Exception:
             pass
 
-    async def _run_subagent(self, subagent_type: str, prompt: str) -> tuple[str, bool]:
-        """Run scoped, non-streaming work without borrowing the lead event stream."""
+    async def _run_subagent(self, subagent_type: str, prompt: str, *, continuation: bool = False) -> tuple[str, bool]:
+        """Run scoped, non-streaming work without borrowing the lead event stream. `continuation`
+        runs it inside the lead conversation instead of its own (_subagent_loop, fix #71)."""
         token = _AGENT_ACTIVITY.set({'run_id': uuid.uuid4().hex, 'agent': subagent_type,
                                      'phase': 'subagent', 'round': 0})
         self._agent_activity('status', status='running', text='Subagent started.')
@@ -2634,7 +3461,8 @@ class OpenAICompatBackend(Backend):
                 # Deadline cancellation must honor the same transport cleanup
                 # shields as Stop. Cleanup can outlast the work deadline.
                 with fail_after(self.profile.subagent_timeout_s if self.profile else 1200):
-                    result, failed = await self._subagent_loop(spec, subagent_type, prompt)
+                    result, failed = await self._subagent_loop(spec, subagent_type, prompt,
+                                                               continuation=continuation)
                     await _work_checkpoint()
                 status = 'failed' if failed else 'unknown' if result == '(subagent returned no output)' else 'completed'
                 self._agent_activity('status', status=status, text={
@@ -2666,7 +3494,7 @@ class OpenAICompatBackend(Backend):
         return [n for n in spec.tool_names if n in self.tools_by_name]
 
     async def _subagent_loop(
-        self, spec: Any, subagent_type: str, prompt: str
+        self, spec: Any, subagent_type: str, prompt: str, *, continuation: bool = False
     ) -> tuple[str, bool]:
         # Scope to tools that actually exist on this backend — a renamed/missing
         # tool in the spec is silently skipped, never a crash.
@@ -2688,11 +3516,22 @@ class OpenAICompatBackend(Backend):
                         + ", ".join(sorted(missing))
                         + ". No verifier request was sent. Check adapter tool/image support; "
                         "tool registration alone does not qualify endpoint image acceptance."), True
-        schemas = [_tool_schema(self.tools_by_name[n]) for n in names]
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": spec.prompt},
-            {"role": "user", "content": prompt},
-        ]
+        if continuation:
+            # Fix #71: on an engine that caches one conversation the check runs inside the lead's own:
+            # the same system text and tools, the lead history, then the instruction, so the engine only
+            # extends its cached prefix. Its rounds stay in the history, so the next turn extends it
+            # too; `allowed` still limits what runs to the subagent's tools.
+            schemas = self._request_tools()
+            messages = self.messages
+            messages.append({"role": "user", "name": "dream_verifier_instruction", "content": (
+                "[Dream check, not from the user. For this check only, take the role below; tools outside "
+                "its list will not run, and your reply ends the check.]\n\n" + spec.prompt + "\n\n" + prompt)})
+        else:
+            schemas = [_tool_schema(self.tools_by_name[n]) for n in names]
+            messages = [
+                {"role": "system", "content": spec.prompt},
+                {"role": "user", "content": prompt},
+            ]
         last_content = ""
         # Same per-run repetition guard the lead uses: without it a confused
         # subagent grinds identical calls for its whole round budget.
@@ -2701,6 +3540,15 @@ class OpenAICompatBackend(Backend):
         # stale, so the fill is whichever of it and the estimate is larger
         # (mirrors _ctx_fill, which tracks the lead history, not this one).
         sub_prompt_tokens = 0
+
+        def keep_reply(msg: dict[str, Any], **fields: Any) -> None:
+            # Continuation: the reply the engine generated stays in the lead history, reasoning and all,
+            # so the history matches the engine's cached state (as the lead's replies, _keep_reasoning).
+            messages.append({"role": "assistant",
+                             "content": msg.get("content") if fields else (msg.get("content") or ""), **fields})
+            reasoning = msg.get("reasoning_content")
+            self._keep_reasoning(messages[-1], [reasoning] if isinstance(reasoning, str) and reasoning else [])
+
         for round_index in range(1, _SUB_MAX_ROUNDS + 1):
             activity = _AGENT_ACTIVITY.get()
             if activity is not None:
@@ -2718,12 +3566,19 @@ class OpenAICompatBackend(Backend):
             # history is scratch space discarded at return — the summary is the
             # product — so unlike the lead's, compacting it needs no event.
             window = self._window()
-            fill = max(_est_tokens(messages), sub_prompt_tokens)
-            if fill > window * compact_at(window) and self._context_overflow == "compact":
-                if _compact_messages(messages, int(window * compact_at(window) / 2)):
-                    # The stale server count describes the old, larger history.
-                    sub_prompt_tokens = 0
+            if continuation:
+                # That is the lead history: compacting it for a check would re-read all of it.
+                fill = self._ctx_fill()
+                if fill + _CTX_MARGIN + 256 > window:
+                    return ("Verification could not run: this conversation is too full for a check "
+                            "inside it, and it is not compacted for one."), True
+            else:
                 fill = max(_est_tokens(messages), sub_prompt_tokens)
+                if fill > window * compact_at(window) and self._context_overflow == "compact":
+                    if _compact_messages(messages, int(window * compact_at(window) / 2)):
+                        # The stale server count describes the old, larger history.
+                        sub_prompt_tokens = 0
+                    fill = max(_est_tokens(messages), sub_prompt_tokens)
             payload = {
                 "model": self.model,
                 "messages": messages,
@@ -2735,11 +3590,18 @@ class OpenAICompatBackend(Backend):
                 **self._sampling,
                 **self._effort_params(),
             }
-            if self.profile or self._local_options or self.capability_status()['context_tokens']['known']:
+            if not continuation and (self.profile or self._local_options
+                                     or self.capability_status()['context_tokens']['known']):
                 try:
                     payload["max_tokens"] = self._admit_request(messages, schemas, lead=False).output
                 except ContextOverflow as exc:
                     return str(exc), True
+            if continuation:
+                self._mark_sent(messages, schemas)
+            if subagent_type == "verifier":
+                # Progress the owner can see while the check runs (fix #71): the verifier's card shows it.
+                self._agent_activity('status', status='running',
+                                     text=f'Checking the work ({round_index}/{_SUB_MAX_ROUNDS})')
             self._agent_activity('request', status='awaiting_response', request_index=round_index)
             try:
                 resp = await self._post_with_retry(payload)
@@ -2757,11 +3619,14 @@ class OpenAICompatBackend(Backend):
                 for key in self._delegated_usage:
                     self._delegated_usage[key] += int(usage.get(key) or 0)
                 if self.runtime_meter is not None:
-                    self.runtime_meter.usage(usage, phase=subagent_type)
+                    self.runtime_meter.usage({**usage, "head_hash": self._head_hash(payload)}, phase=subagent_type)
                 try:
                     sub_prompt_tokens = int(usage.get("prompt_tokens") or 0)
                 except (TypeError, ValueError):
                     pass
+                if continuation and sub_prompt_tokens:   # a count of the lead history, as the lead's own
+                    self._last_prompt_tokens = sub_prompt_tokens
+                    self._record_calibration(sub_prompt_tokens)
             from ..inference_coordination import primary_choice
             choice = primary_choice(data)
             if choice is None:
@@ -2782,6 +3647,8 @@ class OpenAICompatBackend(Backend):
                           else "output filtered" if reason == "content_filter"
                           else "stopped because it kept repeating itself" if reason == "repetition"
                           else "invalid or unsupported completion")
+                if continuation:
+                    keep_reply(msg)
                 return (f"(subagent '{subagent_type}' {detail} — treat as incomplete; "
                         f"no tools from this response ran)\n{last_content}"), True
             if not calls:
@@ -2793,6 +3660,8 @@ class OpenAICompatBackend(Backend):
                           "function": {"name": c["name"], "arguments": c["args"]}}
                          for c in recovered]
             if not calls:
+                if continuation:
+                    keep_reply(msg)
                 if (subagent_type == "verifier" and last_content.isascii()
                         and last_content.upper() == "PASS"):
                     missing = required_inspection - inspected
@@ -2818,11 +3687,14 @@ class OpenAICompatBackend(Backend):
                     "function": {"name": fn.get("name") or "",
                                  "arguments": fn.get("arguments") or "{}"},
                 })
-            messages.append({
-                "role": "assistant",
-                "content": msg.get("content"),
-                "tool_calls": norm,
-            })
+            if continuation:
+                keep_reply(msg, tool_calls=norm)
+            else:
+                messages.append({
+                    "role": "assistant",
+                    "content": msg.get("content"),
+                    "tool_calls": norm,
+                })
             round_images = []
             for tool_index, tc in enumerate(norm):
                 await _work_checkpoint()
@@ -2896,6 +3768,7 @@ class OpenAICompatBackend(Backend):
     async def ask(self, prompt: str) -> AsyncIterator[Event]:
         generation = self._interrupts.generation
         token = _REQUEST_INTERRUPTION.set((self._interrupts, generation))
+        self._turn_active = True
         try:
             async with aclosing(self._ask(prompt)) as events:
                 while True:
@@ -2913,6 +3786,7 @@ class OpenAICompatBackend(Backend):
             # iterator is closed after done() but before the final response.
             # It must not review the old artifact against an unrelated next task.
             self._verify_at_turn_end = None
+            self._turn_active = False
             _REQUEST_INTERRUPTION.reset(token)
 
     async def _ask(self, prompt: str) -> AsyncIterator[Event]:
@@ -2940,6 +3814,8 @@ class OpenAICompatBackend(Backend):
             self.messages.append({"role": "assistant", "name": "dream_verifier_report",
                                   "content": self._pending_findings})
             self._pending_findings = None
+        for ev in self._live_state_sync():
+            yield ev
         # Every user message carries an id the model can name to `snip`.
         self._msg_seq += 1
         self.messages.append({"role": "user",
@@ -2963,8 +3839,15 @@ class OpenAICompatBackend(Backend):
         loop_retries = 0
         prose_retries = 0
         since_change = 0          # tool calls since one that changed something
+        # Rounds spent of _MAX_TOOL_ROUNDS. Each request costs one; a tool round of only looks on
+        # a local engine is refunded half (fix #17, _round_cost). A round starts only while a whole
+        # one still fits, so the limit is never passed: a turn can end with half a round unused.
+        # `last`: no round after this one.
+        spent, prev_left = 0.0, float(_MAX_TOOL_ROUNDS)
 
-        for _ in range(_MAX_TOOL_ROUNDS):
+        while spent + 1 <= _MAX_TOOL_ROUNDS:
+            spent += 1
+            last = spent + 1 > _MAX_TOOL_ROUNDS
             if self.runtime_meter is not None:
                 try:
                     self.runtime_meter.check()
@@ -3002,11 +3885,7 @@ class OpenAICompatBackend(Backend):
             # 2026-09-21, 33,077 tokens in 143 s, and 42,231 in 155 s the day before.
             # Nothing said WHAT changed, so: fingerprint the head and say when it moves.
             if self.provider.key == "machx":
-                import hashlib as _hl
-                head = _hl.sha1(
-                    (str(self.messages[0].get("content", "")) + "\x00"
-                     + "\x00".join(t["function"]["name"] for t in payload["tools"])).encode()
-                ).hexdigest()[:10]
+                head = self._head_hash(payload)
                 was = getattr(self, "_head_print", None)
                 if was is not None and was != head:
                     n_sys = len(str(self.messages[0].get("content", "")))
@@ -3037,9 +3916,10 @@ class OpenAICompatBackend(Backend):
                 for ev in self._context_notices():
                     yield ev
                 yield Event("context_budget", self.context_report)
-            # What this request is estimated at, for the calibration its usage teaches.
-            raw = account(self.messages, payload["tools"], self._window(), 0)
-            self._sent_est = (raw.input_tokens, raw.tools, _est_tokens(self.messages))
+            # What this request is estimated at, for the calibration its usage teaches, and
+            # its head as sent (admission may just have compacted and refreshed it).
+            self._mark_sent(self.messages, payload["tools"])
+            head_hash = self._head_hash(payload)
             text_parts: list[str] = []
             reasoning_parts: list[str] = []
             tool_calls: dict[int, dict[str, str]] = {}
@@ -3150,8 +4030,9 @@ class OpenAICompatBackend(Backend):
                 if text_parts:
                     self.messages.append({'role': 'assistant', 'content': ''.join(text_parts)
                                           + '\n[Incomplete response; no collected tool calls executed.]'})
-                yield Event("error", _stream_failure(self.provider.label, e))
-                yield Event("result", {"is_error": True, "subtype": "stream_error", "failure": self._failure_info(e, "stream"),
+                shown = _stream_failure(self.provider.label, e)
+                yield Event("error", shown)
+                yield Event("result", {"is_error": True, "subtype": "stream_error", "failure": self._failure_info(e, "stream", shown=shown),
                                        "stats": self._turn_stats(agg, time.monotonic() - turn_t0)})
                 return
             finally:
@@ -3195,7 +4076,7 @@ class OpenAICompatBackend(Backend):
             if usage:
                 agg["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
                 if self.runtime_meter is not None:
-                    self.runtime_meter.usage(usage)
+                    self.runtime_meter.usage({**usage, "head_hash": head_hash})
                 agg["completion_tokens"] += int(usage.get("completion_tokens") or 0)
                 agg["ctx_used"] = (int(usage.get("prompt_tokens") or 0)
                                    + int(usage.get("completion_tokens") or 0))
@@ -3248,7 +4129,7 @@ class OpenAICompatBackend(Backend):
                 self._keep_reasoning(self.messages[-1], reasoning_parts)
                 if full:
                     yield Event("assistant_done", full)
-                if subtype == "length" and cut_call and cut_retries < 1 and _ < _MAX_TOOL_ROUNDS - 1:
+                if subtype == "length" and cut_call and cut_retries < 1 and not last:
                     # Retry once, in parts, instead of ending the turn: live, three
                     # 16K-token write_file replies were lost and the next "continue"
                     # attempted the same oversized call again (Dream fix #14).
@@ -3272,7 +4153,7 @@ class OpenAICompatBackend(Backend):
                     yield Event("system", "That reply used the whole output limit without making a single "
                                           "tool call, so it was cut off and nothing ran. Continue, and tell "
                                           "it to act rather than plan.")
-                if subtype == "repetition" and loop_retries < 1 and _ < _MAX_TOOL_ROUNDS - 1:
+                if subtype == "repetition" and loop_retries < 1 and not last:
                     # The engine stopped a reply that had started saying the same
                     # thing over and over (ie serve's repetition stop). Name it and
                     # ask once for a fresh answer, rather than ending the turn on
@@ -3286,7 +4167,7 @@ class OpenAICompatBackend(Backend):
                     continue
                 if subtype == 'success':
                     inbox = getattr(self, 'steering_inbox', None)
-                    if inbox is not None and _ == _MAX_TOOL_ROUNDS - 1:
+                    if inbox is not None and last:
                         # No next lead request is allowed. Do not inject a new
                         # correction into the auxiliary salvage/verifier work.
                         await inbox.close()
@@ -3299,9 +4180,10 @@ class OpenAICompatBackend(Backend):
                 # not trust a partial answer can tell. Preserve the partial text
                 # while marking the result incomplete for every consumer.
                 if subtype == 'success':
+                    turn_text = self._turn_text(prompt)   # before a check inside the conversation adds to it
                     for ev in await self._run_verifier_sweep():
                         yield ev
-                    for ev in await self._finish_filing(self._turn_text(prompt)):
+                    for ev in await self._finish_filing(turn_text):
                         yield ev
                 else:
                     detail = ('The reply kept repeating itself and was stopped'
@@ -3454,13 +4336,20 @@ class OpenAICompatBackend(Backend):
 
             # Say when the turn's round budget runs low (Dream fix #24): live, a
             # model spent ~60 rounds on measurements and hit the limit mid-sweep.
-            left = _MAX_TOOL_ROUNDS - 1 - _
-            if left in (25, 10, 3):
+            # A round of only looks may cost half (fix #17), so a mark is crossed, not hit.
+            half = self._round_cost(calls) < 1
+            spent -= 0.5 if half else 0
+            left = _MAX_TOOL_ROUNDS - spent
+            crossed = any(left <= mark < prev_left for mark in (25, 10, 3))
+            prev_left = left
+            if crossed:
                 last_tool = next((m for m in reversed(self.messages) if m.get("role") == "tool"), None)
                 if last_tool is not None and isinstance(last_tool.get("content"), str):
-                    last_tool["content"] += (f"\n\n[Dream: {left} tool rounds left in this turn. Batch checks "
-                                             "into fewer calls; finish the current step and report before "
-                                             "they run out.]")
+                    last_tool["content"] += (f"\n\n[Dream: {left:g} tool rounds left in this turn"
+                                             + (" (a round of only reads costs half)" if self._cache_sensitive()
+                                                else "")
+                                             + ". Batch checks into fewer calls; finish the current step and "
+                                             "report before they run out.]")
 
             if loop_break:
                 inbox = getattr(self, 'steering_inbox', None)
@@ -3480,9 +4369,10 @@ class OpenAICompatBackend(Backend):
                 else:
                     yield Event("system", "Nothing could be salvaged — the findings "
                                           "above are all there is.")
+                turn_text = self._turn_text(prompt)
                 for ev in await self._run_verifier_sweep():
                     yield ev
-                for ev in await self._finish_filing(self._turn_text(prompt)):
+                for ev in await self._finish_filing(turn_text):
                     yield ev
                 yield Event("result", {
                     "is_error": True,
@@ -3501,16 +4391,19 @@ class OpenAICompatBackend(Backend):
             await inbox.close()
         yield Event("system", f"Reached the tool-round limit ({_MAX_TOOL_ROUNDS}) for this turn. "
                               "One round may contain multiple tool calls; this is not a context or time limit. "
-                              "Preserving partial findings…")
+                              + ("On this local engine a round of only reads counted half. "
+                                 if self._cache_sensitive() else "")
+                              + "Preserving partial findings…")
         rescued = await self._salvage(
             f"you reached the limit of {_MAX_TOOL_ROUNDS} tool rounds for one turn "
             "(a round may contain multiple tool calls)")
         if rescued:
             self.messages.append({"role": "assistant", "content": rescued})
             yield Event("assistant_done", rescued)
+        turn_text = self._turn_text(prompt)
         for ev in await self._run_verifier_sweep():
             yield ev
-        for ev in await self._finish_filing(self._turn_text(prompt)):
+        for ev in await self._finish_filing(turn_text):
             yield ev
         yield Event("result", {
             "is_error": True,

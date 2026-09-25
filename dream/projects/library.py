@@ -14,6 +14,7 @@ import time
 import uuid
 
 from .. import config
+from ..core import turn_origin
 from .workspace import ProjectError, StaleRevision, _directory
 
 MAX_BYTES = 2 * 1024 * 1024
@@ -304,10 +305,14 @@ class ProjectLibrary:
                     ('Initial user request', 'user', 'ASC', 600),
                     ('Latest user request', 'user', 'DESC', 800),
                     ('Assistant report, not independent verification', 'assistant', 'DESC', 1000)):
-                turn = db.execute(
-                    'SELECT id,role,ts,substr(content,1,?) AS content,length(content)>? AS truncated '
-                    f'FROM turns WHERE session_id=? AND role IN (?,?) ORDER BY id {order} LIMIT 1',
-                    (limit, limit, session_id, role, 'assistant_partial' if role == 'assistant' else role)).fetchone()
+                rows = db.execute(
+                    'SELECT id,role,ts,substr(content,1,?) AS content,length(content)>? AS truncated,tool_name '
+                    f'FROM turns WHERE session_id=? AND role IN (?,?) ORDER BY id {order}',
+                    (limit, limit, session_id, role, 'assistant_partial' if role == 'assistant' else role))
+                # A user-role turn Dream wrote itself (a progress-guard note, a loop, /review, /resume, /learn,
+                # Council work or guided-task prompt: core/turn_origin.py) is not the user's request.
+                turn = next((row for row in rows
+                             if role != 'user' or not turn_origin.is_generated(row['tool_name'], row['content'])), None)
                 if turn is not None and turn['id'] not in [item[1]['id'] for item in evidence]:
                     if turn['role'] == 'assistant_partial':
                         label = 'Partial assistant report, not independent verification'

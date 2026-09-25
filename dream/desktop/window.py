@@ -7,10 +7,11 @@ import os
 from pathlib import Path
 import re
 import signal
+import sys
 import tempfile
 import threading
 import time
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
 import gi
@@ -22,7 +23,7 @@ from gi.repository import Gdk, Gio, GLib, Gtk, Pango, Vte, WebKit2
 
 from ..config import LOG_DIR
 from .browser import Browser, button, label, webview
-from .crash_log import ENV as CRASH_LOG_ENV
+from .crash_log import ENV as CRASH_LOG_ENV, arm_window as crash_log_arm_window
 from .protocol import session_address, session_status
 from .onboarding import Onboarding
 
@@ -30,12 +31,30 @@ HERE = Path(__file__).resolve().parent
 WEB_VIEWS = frozenset(('home', 'chat', 'studio', 'projects', 'optimizer', 'skills', 'memory', 'understand', 'settings'))
 # The fatal signals faulthandler records (DREAM-086); the window itself stops a session only with /quit, SIGINT or Ctrl+D.
 CRASH_SIGNALS = frozenset((signal.SIGSEGV, signal.SIGBUS, signal.SIGILL, signal.SIGFPE, signal.SIGABRT))
+# "Open in browser" (DREAM-111): the session's page server, a loopback origin with a token path.
+PAGE_BASE = re.compile(r'http://127\.0\.0\.1:([0-9]{1,5})/[A-Za-z0-9_-]{40,}/')
+
+
+def page_base(state) -> str | None:
+    """The page origin a session reports in /api/desktop, or None unless it is exactly a
+    loopback http base with a token path: only those URLs go to the default browser."""
+    base = state.get('page_base') if isinstance(state, dict) else None
+    match = PAGE_BASE.fullmatch(base) if isinstance(base, str) else None
+    return base if match and 0 < int(match.group(1)) < 65536 else None
 
 
 def color(value: str) -> Gdk.RGBA:
     result = Gdk.RGBA()
     result.parse(value)
     return result
+
+
+def _note(text: str) -> None:
+    """One dated line on stderr (the journal, from the desktop menu): the order of events around a crash."""
+    try:
+        print(f"[dream desktop {time.strftime('%Y-%m-%d %H:%M:%S')}] {text}", file=sys.stderr, flush=True)
+    except OSError:
+        pass   # the terminal that started a checkout launch has gone
 
 
 class DreamWindow(Gtk.Window):
@@ -49,6 +68,7 @@ class DreamWindow(Gtk.Window):
         self.polling = False
         self.stopped = False
         self.address_info = None
+        self.page_base = None
         self.connected = False
         self.session_id = ''
         self.native_view = 'chat'
@@ -390,6 +410,7 @@ class DreamWindow(Gtk.Window):
             return False
         self.discovery.unlink(missing_ok=True)
         self.address_info = None
+        self.page_base = None
         self.connected = False
         self.studio_failed = False
         self.show_sequence = 0
@@ -467,6 +488,7 @@ class DreamWindow(Gtk.Window):
             self.onboarding.message.set_text(text)
             self.welcome_description.set_text(text)
             self.status(text)
+        _note(f'session process exited, wait status {wait_status}')
         if self.closing:
             self.destroy()
 
@@ -514,6 +536,7 @@ class DreamWindow(Gtk.Window):
         if state is not None:
             changed = self.address_info != address
             self.address_info = address
+            self.page_base = page_base(state)
             self.connected = True
             self.retry_studio.set_sensitive(True)
             self.retry_studio.show()
@@ -564,6 +587,14 @@ class DreamWindow(Gtk.Window):
             # about:blank/srcdoc are used by the existing sandboxed artifact iframe.
             if parsed.scheme == 'about':
                 return False
+            # "Open in browser" (DREAM-111): a page of this session's page server goes to the
+            # owner's default browser on a click, and never loads in this view.
+            page = getattr(self, 'page_base', None)
+            if isinstance(page, str) and uri.startswith(page):
+                decision.ignore()
+                if action.is_user_gesture():
+                    self._open_in_default_browser(uri)
+                return True
             trusted = self.address_info and uri.startswith(self.address_info[0] + '/')
             if not trusted:
                 decision.ignore()
@@ -572,6 +603,16 @@ class DreamWindow(Gtk.Window):
                     self.browser.navigate(uri)
                 return True
         return False
+
+    def _open_in_default_browser(self, uri):
+        name = unquote(urlsplit(uri).path.rsplit('/', 1)[-1]) or 'the page'
+        try:
+            Gio.AppInfo.launch_default_for_uri(uri, None)
+            self.status(f'Opened {name} in your default browser.')
+        except GLib.Error as exc:
+            self.workspace.set_visible_child_name('browser')
+            self.browser.navigate(uri)
+            self.status(f'The default browser did not open ({exc.message}); {name} opened in the Browser tab instead.')
 
     def _studio_popup(self, _view, action):
         uri = action.get_request().get_uri()
@@ -737,8 +778,10 @@ def main():
     if not Gtk.init_check([])[0]:
         parser.exit(1, 'Dream Desktop cannot connect to the graphical display. Run it from your desktop terminal.\n')
     cli_args = args.cli_args[1:] if args.cli_args[:1] == ['--'] else args.cli_args
+    crash_log_arm_window()   # the window's own exit leaves its stacks on stderr (the journal, from the desktop menu)
     DreamWindow(args.python, args.cwd, cli_args)
     Gtk.main()
+    _note('window main loop ended')
 
 
 if __name__ == '__main__':

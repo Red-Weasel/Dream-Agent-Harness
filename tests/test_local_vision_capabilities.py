@@ -98,7 +98,8 @@ async def test_launch_declaration_connects_see_and_forwards_pixels_in_actual_htt
     from dream.local.settings import session_options
     from dream.core.backends import openai_compat
     payloads = []
-    pixels = b'fixture-image-bytes'
+    pixels = base64.b64decode(  # a real 1x1 PNG: `see` now decodes what it forwards (DREAM-114)
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF5kAAAAASUVORK5CYII=')
     (tmp_path / 'fixture.png').write_bytes(pixels)
     def transport(request):
         if request.method == 'GET':

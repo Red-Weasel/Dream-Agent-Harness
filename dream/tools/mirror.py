@@ -15,13 +15,41 @@ download route serves.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
+import time
+import zlib
 from pathlib import Path
 from typing import Any
 
 from ..core.backends.base import Event
-from .context import ctx, studio
+from .context import ctx, in_thread, studio
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+# DREAM-111: what a run_bash call renders -- the owner's live session had the model
+# capture PNGs with its own Playwright scripts and never call show_html.
+SHELL_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+# The walk after a run_bash call stays cheap on a big workspace: at most this many
+# entries and this long; the first time a walk stops early, the log says so.
+SCAN_MAX_ENTRIES = 20_000
+SCAN_MAX_S = 0.150
+# At most one run_bash-driven image show per this many seconds; a newer capture that
+# lands inside the window replaces the waiting one and shows when the window ends.
+SHELL_SHOW_MIN_S = 1.5
+# The start-of-call mark sits this far before the call: file timestamps come from the
+# kernel's coarse clock, which trails time.time_ns() by up to a scheduler tick (1-10 ms).
+_MARK_SLACK_NS = 20_000_000
+# Installed and vendored trees are not the model's renders. Names, plus the markers
+# DREAM-106's `understand` skill uses to recognise an installed tree
+# (skills/understand/glue.py, install_reason: pyvenv.cfg, conda-meta, a Playwright
+# INSTALLATION_COMPLETE); that script is not importable (it is copied into a project
+# and reads its working directory at import), so the short list lives here.
+_SKIP_DIRS = {".git", ".svn", ".hg", "node_modules", ".venv", "venv", "__pycache__",
+              "site-packages", "dist-packages", "ms-playwright"}
+_INSTALL_MARKERS = {"pyvenv.cfg", "conda-meta", "INSTALLATION_COMPLETE"}
+_CAP_LOGGED = False
+_log = logging.getLogger(__name__)
 
 
 def following() -> bool:
@@ -52,11 +80,20 @@ def shown() -> dict[str, Any] | None:
     return getattr(c, "studio_shown", None) if c is not None else None
 
 
-def record_shown(p: Path, given: str, kind: str) -> None:
-    """The pane now holds ``p`` (kind page | image), shown under ``given``."""
+def record_shown(p: Path, given: str, kind: str, digest: str | None = None) -> None:
+    """The pane now holds ``p`` (kind page | image), shown under ``given``; a page also
+    carries the digest of the content sent, which the pane's load report names."""
     c = _context()
     if c is not None:
-        c.studio_shown = {"path": p.resolve(), "given": given, "kind": kind, "signature": signature(p)}
+        c.studio_shown = {"path": p.resolve(), "given": given, "kind": kind, "signature": signature(p),
+                          "digest": digest}
+
+
+def digest(text: str) -> str:
+    """What the pane calls the page it ran (DREAM-111): CRC-32 of the content's UTF-16
+    code units, the same function as studioDigest in index.html, so a load report is
+    matched to the exact version sent and never to an older one."""
+    return f"{zlib.crc32(text.encode('utf-16-le', 'surrogatepass')):08x}"
 
 
 def _emit(event: Event) -> bool:
@@ -183,3 +220,126 @@ def file_removed(p: Path) -> bool:
         _emit(Event("studio", {"op": "removed", "path": state["given"], "title": held.name,
                                "source": "mirror"}))
     return True
+
+
+# --- the model's own renders (DREAM-111) ---------------------------------------------------
+
+
+def show_newest(paths: list[Path]) -> Path | None:
+    """`see`: of the workspace images the model viewed, show the newest (by mtime; a
+    tie goes to the later-listed). The one it shows, or None."""
+    if not following():
+        return None
+    best: tuple[int, Path] | None = None
+    for p in paths:
+        if p.suffix.lower() not in IMAGE_SUFFIXES or workspace_relative(p) is None:
+            continue
+        stamp = signature(p)
+        if stamp is not None and (best is None or stamp[0] >= best[0]):
+            best = (stamp[0], p)
+    return best[1] if best is not None and show_image(best[1]) else None
+
+
+def shell_mark() -> int | None:
+    """Taken just before a run_bash command runs: images modified from here on were
+    written by it. None while not following, and then nothing is scanned afterwards."""
+    return time.time_ns() - _MARK_SLACK_NS if following() else None
+
+
+async def after_shell(mark: int | None) -> None:
+    """After a run_bash command: the shown file reloads when the shell changed it
+    (DREAM-104's one stat); then, while following, the newest PNG/JPEG/WebP the call
+    wrote under the workspace shows -- one per call, throttled."""
+    refresh_shown()
+    if mark is None or not following():
+        return
+    c = _context()
+    if c is None:
+        return
+    # A file the previous call's scan already covered is not this call's work.
+    since, _SHELL["scanned"] = max(mark, _SHELL["scanned"]), time.time_ns()
+    newest = await in_thread(_newest_image_since, Path(c.workspace), since)
+    if newest is not None:
+        _shell_show(newest)
+
+
+def _newest_image_since(root: Path, mark_ns: int) -> Path | None:
+    """The newest image under ``root`` modified at or after ``mark_ns``. Never follows a
+    symlink (a linked file or folder may lead out of the workspace), skips hidden,
+    installed and vendored trees, and stops at SCAN_MAX_ENTRIES entries or SCAN_MAX_S
+    seconds with what it found so far."""
+    global _CAP_LOGGED
+    start, seen, capped = time.monotonic(), 0, False
+    best: tuple[int, str] | None = None
+    stack = [str(root.resolve())]
+    while stack and not capped:
+        folder = stack.pop()
+        images: list[tuple[int, str]] = []
+        subdirs: list[str] = []
+        installed = False
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    seen += 1
+                    if seen > SCAN_MAX_ENTRIES or time.monotonic() - start > SCAN_MAX_S:
+                        capped = True
+                        if not _CAP_LOGGED:
+                            _CAP_LOGGED = True
+                            _log.warning("the Studio's image scan after run_bash stopped at %d entries / %.0f ms "
+                                         "(limits %d / %.0f ms) in %s; later renders there may not show",
+                                         seen - 1, (time.monotonic() - start) * 1000, SCAN_MAX_ENTRIES,
+                                         SCAN_MAX_S * 1000, root)
+                        break
+                    name = entry.name
+                    if name in _INSTALL_MARKERS:
+                        installed = True
+                    if name.startswith(".") or entry.is_symlink():
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        if name not in _SKIP_DIRS:
+                            subdirs.append(entry.path)
+                    elif (os.path.splitext(name)[1].lower() in SHELL_IMAGE_SUFFIXES
+                            and entry.is_file(follow_symlinks=False)):
+                        mtime = entry.stat(follow_symlinks=False).st_mtime_ns
+                        if mtime >= mark_ns:
+                            images.append((mtime, entry.path))
+        except OSError:
+            continue
+        if installed:
+            continue
+        stack.extend(subdirs)
+        for candidate in images:
+            if best is None or candidate > best:
+                best = candidate
+    return Path(best[1]) if best is not None else None
+
+
+_SHELL: dict[str, Any] = {"last": float("-inf"), "pending": None, "timer": None, "scanned": 0}
+
+
+def _shell_show(p: Path) -> None:
+    """Newest wins, at most one show per SHELL_SHOW_MIN_S: inside the window the image
+    waits (a newer one replaces it) and shows when the window ends."""
+    wait = SHELL_SHOW_MIN_S - (time.monotonic() - _SHELL["last"])
+    if wait <= 0 and _SHELL["timer"] is None:
+        _SHELL["last"] = time.monotonic()
+        show_image(p)
+        return
+    _SHELL["pending"] = p
+    if _SHELL["timer"] is None:
+        _SHELL["timer"] = asyncio.get_running_loop().call_later(max(wait, 0.0), _flush_shell)
+
+
+def _flush_shell() -> None:
+    p, _SHELL["pending"], _SHELL["timer"] = _SHELL["pending"], None, None
+    _SHELL["last"] = time.monotonic()
+    if p is not None and following():
+        show_image(p)
+
+
+def _reset_shell_throttle() -> None:
+    """Forget the throttle and the last scan (tests start from a clean state)."""
+    timer = _SHELL["timer"]
+    if timer is not None:
+        timer.cancel()
+    _SHELL.update(last=float("-inf"), pending=None, timer=None, scanned=0)

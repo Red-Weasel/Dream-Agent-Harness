@@ -346,7 +346,7 @@ async def serve_and_run(
     if model_key(path) != selected_identity:
         r.error("Model files changed while selecting settings; select the model again.")
         return
-    proc = machx.serve(path, gpus=gpus, ctx=ctx, options=options)
+    proc = machx.serve(path, gpus=gpus, ctx=ctx, options=options, keep_hot=keep_hot)
     if not await asyncio.to_thread(machx.wait_ready, proc):
         r.error(f"MachX didn't come up — check {machx._log_file()}.")
         # A half-loaded server would squat on VRAM forever — take it down.

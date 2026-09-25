@@ -15,7 +15,20 @@ class ContextOverflow(ValueError):
     pass
 
 
+# The flat per-image reservation estimate() makes. A backend that has learned the server's
+# real per-image count prices images itself from estimate_parts (Dream fix #65).
+IMAGE_TOKENS = 4096
+
+
 def estimate(value: Any) -> int:
+    # Visual tokenization is provider-dependent. Reserve a conservative 4096
+    # per bounded image rather than counting base64 as textual model input.
+    text, images = estimate_parts(value)
+    return text + images * IMAGE_TOKENS
+
+
+def estimate_parts(value: Any) -> tuple[int, int]:
+    """(estimated text tokens, image count) of a value: estimate() without pricing the images."""
     images = 0
     def visible(item):
         nonlocal images
@@ -30,9 +43,7 @@ def estimate(value: Any) -> int:
     text = value if isinstance(value, str) else json.dumps(visible(value), ensure_ascii=False)
     # UTF-8 bytes are more conservative than characters for CJK and source code.
     # This remains an estimate; provider tokenization can still differ.
-    # Visual tokenization is provider-dependent. Reserve a conservative 4096
-    # per bounded image rather than counting base64 as textual model input.
-    return math.ceil(len(text.encode("utf-8")) / 3.5) + images * 4096
+    return math.ceil(len(text.encode("utf-8")) / 3.5), images
 
 
 @dataclass(frozen=True)

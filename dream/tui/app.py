@@ -137,6 +137,7 @@ Commands:
   /council <q>          ask configured advisors (choose them in Council)
   /rewind [id]          list file checkpoints · roll one back (asks first)
   /review [--staged]    code-review the diff (or /review <base ref>)
+  /fresh                compact this conversation into a handoff now (between turns)
   /new                  consolidate this session and start fresh
   ctrl+t                toggle the tasks panel · shift+tab cycles mode
   /clear                clear the screen
@@ -903,7 +904,12 @@ class App(CouncilControls):
                         if workflow is None:
                             await self._ask(line)
                         else:
-                            await self._ask(line, workflow=workflow)
+                            from ..core import turn_origin
+
+                            # A guided task's prompt is Dream's text around the owner's goal (workflows/service.py):
+                            # marked, and the Fresh start handoff lists the goal (turn_origin.owner_words).
+                            with turn_origin.generated(turn_origin.GUIDED):
+                                await self._ask(line, workflow=workflow)
                         if end_requested():
                             # end_conversation, confirmed by its second call: the
                             # turn finished; the session ends the way /quit does.
@@ -1127,10 +1133,13 @@ class App(CouncilControls):
         context = "\n".join(lines)
         c.print(f"[green]↺ resumed {sess['id']}[/green] [dim]({len(turns)} turns loaded)[/dim]")
         # Fed to the model as context on the next turn — one coherent priming message.
-        await self._ask(
-            "[context restored from a previous session — continue from here, "
-            f"don't re-answer]\n{context}\n\nReady to continue."
-        )
+        from ..core import turn_origin
+
+        with turn_origin.generated(turn_origin.RESUME):   # Dream's priming prompt, not the owner's words
+            await self._ask(
+                "[context restored from a previous session — continue from here, "
+                f"don't re-answer]\n{context}\n\nReady to continue."
+            )
 
     async def _rewind(self, arg: str) -> None:
         """`/rewind` — the undo for Dream's own edits. Bare lists the checkpoints
@@ -1206,10 +1215,13 @@ class App(CouncilControls):
         async def ask(prompt: str) -> str:
             # The same "prompt in, text out" reduction the autonomous loop drives
             # its evaluator with — it's the one shape both backends share.
+            from ..core import turn_origin
+
             parts: list[str] = []
-            async for ev in self.engine.ask(prompt):
-                if ev.kind == "assistant_done":
-                    parts.append(ev.data)
+            with turn_origin.generated(turn_origin.REVIEW):   # Dream's review prompt, not the owner's words
+                async for ev in self.engine.ask(prompt):
+                    if ev.kind == "assistant_done":
+                        parts.append(ev.data)
             return "\n".join(parts)
 
         what = "the index" if staged else base or "the working tree"
@@ -1628,6 +1640,13 @@ class App(CouncilControls):
             return await self._queue_council_control(queued)
         if action in {'council_configure', 'council_ask', 'council_work'}:
             return await self._queue_council_control(payload)
+        if action == "fresh_start":
+            # DREAM-113: never while a turn, a command, queued input or a Council action runs (the chat
+            # pane disables its control then too).
+            if self._council_busy():
+                raise ValueError("Fresh start waits until Dream is idle: let the current turn and any queued "
+                                 "messages finish, then try again.")
+            return self._fresh_start()
         if action == "interrupt":
             target = getattr(self, "_turn_interrupt_target", None)
             if target is None or target.done():
@@ -1712,6 +1731,14 @@ class App(CouncilControls):
             self.engine._command_approvals.clear()
             return self.engine.runtime_status()["execution"]
         raise ValueError("Unknown runtime action")
+
+    def _fresh_start(self) -> dict:
+        """Fresh start (DREAM-113): the conversation becomes one handoff now. What it says reaches the
+        terminal and Studio through the one event funnel."""
+        events = self.engine.fresh_start()
+        for ev in events:
+            self._render_event(ev)
+        return {"notices": [str(ev.data) for ev in events]}
 
     async def _project_prompt(self, prompt: str) -> str:
         """Associate this session and restore saved text only on explicit input.
@@ -2333,6 +2360,11 @@ class App(CouncilControls):
                 for i, (source, text) in enumerate(shown, 1):
                     c.print(f"[red]{i}. {source}[/red]")
                     c.print(f"[dim]{text}[/dim]")
+        elif cmd == "fresh":
+            try:
+                self._fresh_start()
+            except ValueError as exc:
+                self._render_event(Event("system", str(exc)))
         elif cmd == "new":
             # The owner decides whether a session goes to long-term memory (ask
             # each time); "/new save" and "/new nosave" answer it up front.

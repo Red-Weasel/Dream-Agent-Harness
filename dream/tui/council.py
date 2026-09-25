@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, replace
 
 from rich.text import Text
 
+from ..core import turn_origin
 from ..core.backends.base import Event
 
 
@@ -175,7 +176,10 @@ class CouncilControls:
                           'Report actual changes, checks and any unfinished work for the main agent.\n\n'
                           f'User task:\n{question.strip()}')
                 self._publish_council_activity(task_id, member, 'running')
-                success = await self._ask(prompt)
+                # Dream's wrapper around the owner's task: marked, and the Fresh start handoff lists the task
+                # in the owner's own words (turn_origin.owner_words).
+                with turn_origin.generated(turn_origin.COUNCIL):
+                    success = await self._ask(prompt)
                 if self.interrupted:
                     raise ValueError('Council work interrupted. Remaining members were not started; inspect partial work before retrying.')
                 if success is not True:

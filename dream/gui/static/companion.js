@@ -113,7 +113,7 @@ if(COMPANION){
     };
     $('studio-skills').onclick = () => window.DreamLibrary?.show('skills');
 
-    document.querySelector('footer .hint').innerHTML = '<button id="read-twice" type="button" aria-pressed="false" title="Read ×2: the model reads each message you type twice (only your words, never the history)">Read ×2</button><span>Enter to send · Shift+Enter for a new line</span><span id="perf" title="Last request: prompt reading speed, generation speed, and how full the context window is"></span><span id="counts"></span>';
+    document.querySelector('footer .hint').innerHTML = '<button id="read-twice" type="button" aria-pressed="false" title="Read ×2: the model reads each message you type twice (only your words, never the history)">Read ×2</button><button id="fresh-start" type="button" title="Fresh start: compact this conversation into a short handoff now: your requests, Dream&#39;s last reply, the files written this session and open tasks. Earlier detail stays in the session transcript. Between turns only; typing /fresh does the same.">Fresh start</button><span class="keys" title="Enter to send · Shift+Enter for a new line">Enter to send · Shift+Enter for a new line</span><span id="perf" title="Last request: prompt reading speed, generation speed, and how full the context window is"></span><span id="counts"></span>';
     document.querySelector('footer .hint').insertAdjacentHTML('afterbegin', '<button id="chat-mode" type="button" title="Shift+Tab cycles permission mode" aria-label="Cycle permission mode" aria-live="polite">Mode unavailable</button>');
     let modePending = false;
     async function permissionMode(cycle = false){
@@ -240,7 +240,8 @@ if(COMPANION){
       panel.setAttribute('aria-busy', String(artView !== 'code'));
       for(const [id, active] of [['artprev', artView === 'preview'], ['artcode', artView === 'code']]) $(id).setAttribute('aria-pressed', String(active));
       $('artpoint').disabled = artView === 'code'; $('arttweaks').disabled = artView === 'code';
-      $('studio-foot-note').textContent = `${a.kind.toUpperCase()} preview · v${artVerIdx + 1}`;
+      $('studio-foot-note').textContent = a.kind === 'image' ? `Still image · ${a.path}`   // DREAM-111: never "a preview"
+        : `${a.kind.toUpperCase()} preview · v${artVerIdx + 1}`;
       if(artView !== 'code') frameTimer = setTimeout(() => {
         $('studio-loading').textContent = 'Preview is taking longer than expected. Use Preview to reload it.';
       }, 8000);

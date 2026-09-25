@@ -94,6 +94,7 @@ main{flex:1;min-width:380px;overflow-y:auto;padding:22px 20px 8px;scroll-behavio
 .sys{font:11.5px/1.5 var(--mono);color:var(--faint);padding:5px 0;border-top:1px dashed var(--line);
   border-bottom:1px dashed var(--line);margin:0 0 10px}
 .sys.error{color:var(--err);border-color:#3b1d21}
+.sys.dream-note{color:var(--violet)}   /* a note Dream wrote itself (steeringNotice), never shown as the owner's */
 
 /* composer */
 footer{flex:0 0 auto;background:var(--bg2);border-top:1px solid var(--line);padding:12px 20px 14px}
@@ -117,6 +118,11 @@ button:disabled{opacity:.35;cursor:default}
 #plan-panel .in_progress > .dot, #plan-panel .in_progress > div > .dot{background:#f59e0b;border-color:#f59e0b}
 #read-twice{background:none;border:1px solid var(--line);color:var(--faint);font:inherit;border-radius:6px;padding:1px 7px;cursor:pointer}
 #read-twice.on{border-color:var(--violet);color:var(--fg);background:color-mix(in srgb, var(--violet) 22%, transparent)}
+#fresh-start{background:none;border:1px solid var(--line);color:var(--faint);font:inherit;border-radius:6px;padding:1px 7px;cursor:pointer}
+#fresh-start:hover:not(:disabled){color:var(--fg);border-color:var(--dim)}
+#fresh-start:disabled{opacity:.45;cursor:not-allowed}
+/* The desktop pane (480 px): the keyboard hint yields its width to the pills rather than wrap the row, which would take a line from the preview. */
+.companion footer .hint .keys{flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 main::-webkit-scrollbar,.tool pre::-webkit-scrollbar{width:9px;height:9px}
 main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252b3d;border-radius:6px}
 
@@ -199,6 +205,17 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
   word-break:break-word}
 #artbody.image, .companion #artbody.image{display:flex;align-items:center;justify-content:center;background:#111}
 #artbody.image img{max-width:100%;max-height:100%;object-fit:contain}
+/* DREAM-111: a still is labelled as one, in a strip above the picture (never over it), with
+   the way back to the live page */
+#artbody.image{flex-direction:column;justify-content:flex-start}
+#artbody.image img{flex:0 1 auto;min-height:0;margin:auto}
+.stillbar{flex:0 0 auto;align-self:stretch;display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;
+  border-bottom:1px solid rgba(255,255,255,.14)}
+.stilltag{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:5px 10px;border-radius:6px;
+  border:1px solid rgba(255,255,255,.28);background:rgba(8,10,16,.84);color:#fff;font:600 12px/1.3 system-ui,sans-serif}
+.stillbar button{padding:5px 11px;border-radius:6px;border:1px solid #8673ba;background:#383151;
+  color:#fff;font:600 12px/1.3 system-ui,sans-serif;cursor:pointer}
+.stillbar button:hover{background:#4a4070}
 .artfollow{display:flex;align-items:center;gap:5px;font:10px var(--mono);color:var(--dim);cursor:pointer;
   white-space:nowrap;padding:0 4px}
 .artfollow input{margin:0;accent-color:var(--accent,#7c6cf0)}
@@ -317,6 +334,7 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
       </div>
       <button id="arttweaks" class="artmode" style="display:none" title="show the page's Tweaks panel">Tweaks</button>
       <button id="artpoint" class="artmode" title="point at an element; your next message names it">point</button>
+      <a id="artext" class="artmode" target="_blank" rel="noopener noreferrer" style="display:none" title="Open this file in your default browser. It is served read-only from this workspace on its own local address, where ES modules load; that page holds no Dream credentials and cannot reach Dream.">Open in browser ↗</a>
       <label class="artfollow" id="artfollow" title="Follow the model's view: what it loads in its hidden frame, each edit to that file and each screenshot it saves appear here live, so you can steer as it works. Off: only what it shows you explicitly. Starting state: studio.follow_model_view in the runtime settings."><input type="checkbox" id="artfollowbox" checked> follow</label>
       <button class="artclose" id="artclose" title="close">&times;</button>
     </div>
@@ -335,6 +353,7 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
   <div class="hint">
     <span>⏎ send · ⇧⏎ newline</span><span>one session, two views</span>
     <button id="read-twice" type="button" aria-pressed="false" title="Read ×2: the model reads each message you type twice (only your words, never the history)">Read ×2</button>
+    <button id="fresh-start" type="button" title="Fresh start: compact this conversation into a short handoff now: your requests, Dream&#39;s last reply, the files written this session and open tasks. Earlier detail stays in the session transcript. Between turns only; typing /fresh does the same.">Fresh start</button>
     <span id="perf" title="Last request: prompt reading speed, generation speed, and how full the context window is"></span>
     <span id="counts"></span>
   </div>
@@ -581,7 +600,7 @@ function handle(m){
         const key = `file:${d.path}`, wasOpen = artOpen === key;
         artifacts.delete(key);
         if(wasOpen){
-          closeArtifactFrame(); artOpen = null;
+          closeArtifactFrame(); artOpen = null; $('artext').style.display = 'none';
           $('artname').textContent = `${d.title || d.path} — removed`;
           $('artnote').textContent = 'the model deleted this file';
           companion?.frameLoaded();
@@ -695,6 +714,19 @@ document.addEventListener('click', e => {
 });
 window.syncReadTwice = syncReadTwice;
 setTimeout(syncReadTwice, 0);
+// Fresh start (DREAM-113): this conversation becomes a short handoff now, between turns only. The button
+// and /fresh ask the same route; Dream refuses while a turn or queued input runs, and this line says why.
+async function freshStart(){
+  const b = $('fresh-start');
+  if(b) b.disabled = true;
+  try{
+    const r = await fetch('/api/control', {method:'POST', headers:{'Content-Type':'application/json','X-Dream-Token':TOKEN},
+                                          body: JSON.stringify({action:'fresh_start'})});
+    if(!r.ok){ const data = await r.json().catch(() => ({})); sysline(data.error || `Fresh start failed (HTTP ${r.status})`, 'error'); }
+  }catch(e){ sysline('Could not reach Dream. Reconnect, then try Fresh start again.', 'error'); }
+  finally{ if(b) b.disabled = working; }
+}
+document.addEventListener('click', e => { if(e.target.closest?.('#fresh-start')) freshStart(); });
 // The project's phased plan (update_plan), pinned above the chat.
 function renderPlan(plan){
   const el = $('plan-panel'), phases = (plan && plan.phases) || [];
@@ -746,7 +778,7 @@ function perf(s){
   }
   $('perf').textContent = parts.join(' · ');
 }
-function busy(on){ working = on; if($('send')) $('send').textContent = on ? 'Queue' : 'Send'; if($('steer')) $('steer').hidden = !on; if($('stop')) $('stop').hidden = !on; $('dot').className = 'dot ' + (on ? 'busy' : (socket && socket.readyState===1 ? 'on':'off'));
+function busy(on){ working = on; if($('fresh-start')) $('fresh-start').disabled = on; if($('send')) $('send').textContent = on ? 'Queue' : 'Send'; if($('steer')) $('steer').hidden = !on; if($('stop')) $('stop').hidden = !on; $('dot').className = 'dot ' + (on ? 'busy' : (socket && socket.readyState===1 ? 'on':'off'));
   $('stat').textContent = on ? 'working' : (socket && socket.readyState===1 ? 'live' : 'offline');
   companion?.status(on);
 }
@@ -773,6 +805,17 @@ const input = $('input'), send = $('send');
 let steeringDraft = null, steeringTarget = null, steeringSnapshot = [];
 function steeringNotice(receipt){
   if(!receipt || typeof receipt.status !== 'string') return;
+  // A note Dream wrote itself (the progress guard's) travels the owner's steering path; its receipt names its
+  // origin, and the pane shows it as Dream's, never as a correction the owner sent.
+  if(typeof receipt.origin === 'string' && receipt.origin.startsWith('dream:')){
+    const said = {pending:'saved; it goes with the next model request after current tools finish.',
+      included:'added to the next request context; it has not yet been sent.',
+      submitted:'sent with a model request.',
+      retained:'retained without a confirmed submission; there is nothing for you to resubmit.'}[receipt.status];
+    const who = receipt.origin === 'dream:progress_guard' ? "Dream's progress-guard note" : "Dream's own note";
+    if(said) sysline(`${who}, not from you: ${said}` + (receipt.warning ? ' ' + receipt.warning : ''), 'dream-note');
+    return;
+  }
   const messages = {pending:'Correction saved; waiting for the next model request after current tools finish.',
     included:'Correction added to the next request context; it has not yet been sent.',
     submitted:'Correction sent with a model request. This does not confirm that the model followed it.',
@@ -785,6 +828,9 @@ function grow(){ input.style.height='auto'; input.style.height=Math.min(input.sc
 async function submit(delivery = 'queue'){
   const typed = input.value.trim(), fileIds = draftAttachments.ids();
   if((!typed && !fileIds.length) || sending) return;
+  if(typed.toLowerCase() === '/fresh' && !fileIds.length && delivery === 'queue'){
+    input.value = ''; grow(); freshStart(); return;   // the control's route, never a message to the model
+  }
   if(!draftAttachments.ready()){ sysline('Finish uploading, retry, or remove failed attachments before sending.', 'error'); return; }
   sending = true; draftAttachments.render();
   const savedInput = input.value, savedMention = mention;
@@ -1106,6 +1152,30 @@ const ART_BRIDGE = `<script>(function(){
         error:m.error?m.error.code:null},'*');
     },true);
   });
+  // What the page does in the owner's Studio, told to Dream (DREAM-111): uncaught errors
+  // (a module that does not parse included), unhandled rejections, console.error, a file
+  // the frame could not load, a lost WebGL context -- or a clean load. Installed before the
+  // page's own scripts run; the first report goes 800 ms after load, later news after that.
+  var rep = {errors: [], lost: 0, loaded: false, sent: 0, timer: 0};
+  function repSend(phase){ rep.sent++; parent.postMessage({type:'__dream_load_report', phase: phase, errors: rep.errors.slice(0, 20), webgl_lost: rep.lost}, '*'); }
+  function repLater(){ if(!rep.loaded || rep.sent > 10) return; clearTimeout(rep.timer); rep.timer = setTimeout(function(){ repSend('update'); }, 800); }
+  function repNote(line){ line = String(line).slice(0, 500); if(rep.errors.length < 20 && rep.errors.indexOf(line) < 0) rep.errors.push(line); repLater(); }
+  function repText(v){ if(v && v.message) return String(v.message); if(typeof v === 'string') return v; try{ return JSON.stringify(v); }catch(e){ return String(v); } }
+  window.addEventListener('error', function(e){
+    var t = e.target;
+    if(t && t !== window && t.tagName){ repNote('failed to load <' + t.tagName.toLowerCase() + ' ' + (t.getAttribute('src') || t.getAttribute('href') || '') + '> (the Studio frame loads nothing by URL)'); return; }
+    repNote('error: ' + (e.message || 'Error') + (e.filename ? ' (' + e.filename + ':' + e.lineno + ':' + e.colno + ')' : ''));
+  }, true);
+  window.addEventListener('unhandledrejection', function(e){ repNote('unhandled rejection: ' + repText(e.reason)); });
+  var repConsole = console.error;
+  console.error = function(){ try{ repNote('console.error: ' + Array.prototype.map.call(arguments, repText).join(' ')); }catch(_){} return repConsole.apply(console, arguments); };
+  var repContext = HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = function(kind){
+    var c = repContext.apply(this, arguments);
+    if(c && /webgl/i.test(String(kind)) && !this.__dreamWatch){ this.__dreamWatch = true; this.addEventListener('webglcontextlost', function(){ rep.lost++; repLater(); }); }
+    return c;
+  };
+  window.addEventListener('load', function(){ setTimeout(function(){ rep.loaded = true; repSend('load'); }, 800); });
   var pointing = false, ccN = 0;
   function reactChain(el){
     var key = Object.keys(el).find(function(k){ return k.indexOf('__reactFiber') === 0; });
@@ -1150,7 +1220,36 @@ const ART_BRIDGE = `<script>(function(){
 const artifacts = new Map();       // key -> {key,title,kind,versions:[str]}
 let artOpen = null, artVerIdx = 0, artView = 'preview';
 let mirroring = false;             // a mirrored show (the model's own view) is being applied (DREAM-104)
+let lastLive = null;               // the last live page shown, for "Back to live page" under a still (DREAM-111)
 const panel = $('artpanel'), artbody = $('artbody');
+
+/* ---------- the owner's view, reported to Dream (DREAM-111) ----------------- */
+// The bridge in each artifact frame posts what the page did; this page adds which file and
+// which exact content it is (a CRC-32 of the content's UTF-16 code units, the same function
+// as dream.tools.mirror.digest) and passes it on. The Studio tools read it back to tell the
+// model what the owner actually sees. The frame itself holds no token and cannot fetch.
+function studioDigest(s){
+  const t = studioDigest.table || (studioDigest.table = Array.from({length: 256}, (_, n) => {
+    let c = n; for(let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; return c; }));
+  let c = -1;
+  for(let i = 0; i < s.length; i++){
+    const u = s.charCodeAt(i);
+    c = t[(c ^ u) & 255] ^ (c >>> 8);
+    c = t[(c ^ (u >>> 8)) & 255] ^ (c >>> 8);
+  }
+  return ((c ^ -1) >>> 0).toString(16).padStart(8, '0');
+}
+function studioReport(r){
+  fetch('/api/studio_report', {method:'POST', headers:{'Content-Type':'application/json','X-Dream-Token':TOKEN},
+    body: JSON.stringify(r)}).catch(() => {});
+}
+window.addEventListener('message', e => {
+  const f = artbody.querySelector('iframe'), d = e.data;
+  if(!f || e.source !== f.contentWindow || !d || d.type !== '__dream_load_report' || !f._report) return;
+  const errors = Array.isArray(d.errors) ? d.errors.slice(0, 20).map(x => String(x).slice(0, 500)) : [];
+  const lost = Number.isInteger(d.webgl_lost) ? Math.min(Math.max(d.webgl_lost, 0), 10000) : 0;
+  studioReport({...f._report, status: 'loaded', phase: d.phase === 'update' ? 'update' : 'load', errors, webgl_lost: lost});
+});
 
 const RENDERABLE = {html:'HTML', svg:'SVG', xml:'SVG'};
 
@@ -1243,6 +1342,22 @@ function openImage(d, replay){
   openArtifact(key, {mirror: d.source === 'mirror'});
 }
 
+/* ---------- open in browser (DREAM-111) ------------------------------------- */
+// The open file, read-only, in the owner's own browser: served from a separate local origin
+// that holds no Dream token (the desktop hands the click to the default browser), where ES
+// modules load -- a file:// page cannot import them.
+async function updatePageLink(){
+  const link = $('artext'), path = artifactFilePath(), key = artOpen;
+  link.style.display = 'none'; link.removeAttribute('href');
+  if(!path) return;
+  try{
+    const r = await fetch('/api/page_link?path=' + encodeURIComponent(path), {headers:{'X-Dream-Token':TOKEN}, cache:'no-store'});
+    const j = await r.json();
+    if(!r.ok || !j.url || artOpen !== key) return;
+    link.href = j.url; link.style.display = '';
+  }catch(e){}
+}
+
 function paintArtifact(opts){
   const a = artifacts.get(artOpen); if(!a) return;
   $('artname').textContent = a.title;
@@ -1255,6 +1370,7 @@ function paintArtifact(opts){
   $('artprev').classList.toggle('on', artView === 'preview');
   $('artcode').classList.toggle('on', artView === 'code');
   companion?.paintArtifact(a);
+  updatePageLink();
   // The workspace navigation listens: a mirrored show is the model's own view and must
   // not pull the owner away from the page they chose (DREAM-104, gate 1).
   const mirror = mirroring || !!(opts && opts.mirror);
@@ -1275,15 +1391,33 @@ function paintArtifact(opts){
     img.addEventListener('load', () => companion?.frameLoaded(), {once: true});
     img.addEventListener('error', () => { $('artnote').textContent = 'the image could not be loaded from the workspace'; companion?.frameLoaded(); }, {once: true});
     img.src = imageHref(a.path, a.versions[artVerIdx]);
-    artbody.replaceChildren(img);
-    $('artnote').textContent = 'image · ' + a.path + ' · from the workspace, as the model saved it';
+    // A still says it is one (DREAM-111): live, a saved screenshot in this pane read as an
+    // animation that froze. When a live page was showing, one click brings it back.
+    const bar = document.createElement('div');
+    bar.className = 'stillbar'; bar.setAttribute('role', 'note');
+    const tag = document.createElement('span');
+    tag.className = 'stilltag'; tag.textContent = 'Still image: ' + a.path; tag.title = tag.textContent;
+    bar.append(tag);
+    const live = lastLive && lastLive !== artOpen && artifacts.get(lastLive);
+    if(live){
+      const back = document.createElement('button');
+      back.type = 'button'; back.id = 'artlive'; back.textContent = 'Back to live page · ' + live.title;
+      back.onclick = () => { artView = 'preview'; openArtifact(lastLive); };
+      bar.append(back);
+    }
+    artbody.replaceChildren(bar, img);
+    $('artnote').textContent = 'still image · ' + a.path + ' · a saved picture, not the running page';
     return;
   }
+  lastLive = artOpen;
   const body = a.versions[artVerIdx] || '';
+  const file = artifactFilePath();
   if(artView === 'code'){
     artbody.className = 'code';
     artbody.innerHTML = `<pre>${esc(body)}</pre>`;
     $('artnote').textContent = `${body.length.toLocaleString()} chars`;
+    // The page is not running here; the model hears that instead of silence (DREAM-111).
+    if(file) studioReport({path: file, digest: studioDigest(body), status: 'code', phase: 'load', errors: [], webgl_lost: 0});
     return;
   }
   artbody.className = '';
@@ -1307,6 +1441,8 @@ function paintArtifact(opts){
   f.setAttribute('sandbox', 'allow-scripts');
   f.setAttribute('referrerpolicy', 'no-referrer');
   f.title = a.title + ' preview';
+  // Which file and which exact content this frame runs, for its load report (DREAM-111).
+  f._report = file ? {path: file, digest: studioDigest(body)} : null;
   f.srcdoc = doc;
   artbody.innerHTML = ''; artbody.appendChild(f);
   $('artnote').textContent = (a.widget ? 'widget · ' : '') + 'sandboxed · no network, no access to this page';

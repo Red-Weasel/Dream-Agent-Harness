@@ -27,7 +27,7 @@ from ..core.backends.base import Event
 from ..core import script_execution
 from ..core.execution import ExecutionRefused, ExecutionUnavailable, current_execution
 from ..gui.bundle import prepare_studio_media
-from ..gui.preview import MAX_CAPTURE_STEPS, get_preview
+from ..gui.preview import MAX_CAPTURE_STEPS, PARK_IDLE_S, get_preview
 from ..workflows.validation import verify_page
 from . import mirror
 from .context import ctx, err, ok, studio
@@ -103,45 +103,138 @@ def _show_in_studio(p: Path, given: str, *, source: str | None = None) -> bool:
     if callable(retain):
         retain(event)
     emit(event)
-    mirror.record_shown(p, given, "page")   # a later edit to this file reloads it
+    # A later edit to this file reloads it; the digest names this exact content, so the
+    # pane's load report is matched to it and not to an older version (DREAM-111).
+    mirror.record_shown(p, given, "page", mirror.digest(body))
     return True
 
 
-def _mirror_page(p: Path, given: str) -> str:
+def _mirror_page(p: Path, given: str) -> tuple[str, bool]:
     """Mirror a hidden-frame load into the user's pane (DREAM-104); one line that tells
-    the model what the user can see, so it never claims the page is private."""
+    the model what the user can see, so it never claims the page is private, and whether
+    a show was queued."""
     panel = studio()
     if panel is None:
-        return "Studio is not open, so the user sees nothing yet; the hidden frame is yours alone."
+        return "Studio is not open, so the user sees nothing yet; the hidden frame is yours alone.", False
     if not mirror.following():
         return ("The user turned off following your view, so their pane did not change; call "
                 "show_to_user when you want them to see this (load its schema once with "
-                "tool_schema if it is deferred).")
+                "tool_schema if it is deferred)."), False
     if mirror.workspace_relative(p) is None:
         return ("Loaded in your hidden frame only; not mirrored: outside the workspace (the "
-                "user's pane renders workspace files only).")
+                "user's pane renders workspace files only)."), False
     try:
         queued = _show_in_studio(p, given, source="mirror")
     except ValueError as e:
-        return f"Studio could not mirror it into the user's pane: {e}"
+        return f"Studio could not mirror it into the user's pane: {e}", False
     if not queued:
-        return "Studio is not ready, so the user's pane did not change."
-    connected = getattr(panel, "client_count", 0)
+        return "Studio is not ready, so the user's pane did not change.", False
     return ("The user's Studio pane shows it too (they follow your view): each edit to this "
             "file reloads there and each screenshot you save appears there, so they may steer "
-            "you mid-task; use done for the final handoff."
-            + ("" if connected else " No Studio browser is connected yet."))
+            "you mid-task; use done for the final handoff."), True
 
 
-def _delivery_notice(p: Path, queued: bool) -> str:
+def _delivery_notice(p: Path, queued: bool, confirmed: bool = False) -> str:
     if not queued:
         return f"Opened {p.name} in the hidden frame (Studio is not open or delivery is unavailable)."
     clients = getattr(studio(), "client_count", 0)
     prepared = f"Prepared {p.name} for Studio and the hidden frame. "
     if clients > 0:
-        return prepared + (f"Preview queued for {clients} connected Studio browser(s); "
-                           "rendering is not confirmed.")
-    return prepared + "Preview queued; no Studio browser is connected yet."
+        return prepared + (f"Preview queued for {clients} connected Studio browser(s)"
+                           + ("." if confirmed else "; rendering is not confirmed."))
+    return prepared + "Preview queued."
+
+
+# --- what the owner's Studio shows (DREAM-111) ------------------------------------------
+# The pane reports what each page it shows did (StudioServer.add_report). A show tool takes
+# the report mark before its show, waits a short time for the pane's answer about that
+# exact content, and says what came back -- or that nobody is connected or answered.
+# Reports that came in between two checks (a WebGL context lost after the load, an answer
+# that came late) are said once, at the next check -- unless they say what the model was last
+# told about that page (gate 1: in code view the pane reports each show twice, and a second
+# pane repeats the first).
+
+STUDIO_REPORT_WAIT_S = 4.0
+_SEEN: dict[str, Any] = {"server": None, "upto": 0, "quoted": set(), "told": {}}
+
+
+def _forget_reports() -> None:
+    _SEEN.update(server=None, upto=0, quoted=set(), told={})
+
+
+def _says(report: dict[str, Any]) -> tuple:
+    """What a report tells the model about its page."""
+    return (report.get("digest"), report.get("status"), tuple(report.get("errors") or ()),
+            report.get("webgl_lost") or 0)
+
+
+def _describe_report(report: dict[str, Any], *, late: bool = False, replaced: bool = False) -> str:
+    """What a report says, for the check it answers. A `late` one came in since the last check and is
+    told as past (DREAM-113); `replaced`: the pane has been sent another page or version since."""
+    if report.get("status") == "code":
+        return ("the owner had the code view open; the page was not running there." if late
+                else "the owner has the code view open; the page is not running there.")
+    errors, lost = report.get("errors") or [], report.get("webgl_lost") or 0
+    if not errors and not lost:
+        return "loaded clean (no errors)."
+    parts = ["WebGL context lost (the canvas stops drawing)"] if lost else []
+    if errors:
+        more = f" (+{len(errors) - 3} more)" if len(errors) > 3 else ""
+        parts.append(f"{len(errors)} error{'' if len(errors) == 1 else 's'}: " + " | ".join(errors[:3]) + more)
+    if replaced:
+        return "; ".join(parts) + " -- the owner saw this failing before the page changed."
+    return "; ".join(parts) + (" -- the owner saw this failing, whatever your hidden frame says." if late
+                               else " -- the owner sees this failing, whatever your hidden frame says.")
+
+
+def _view_start() -> tuple[int | None, str]:
+    """Before a show: the pane's report mark, and a line for each report that came in
+    since the last check, was not quoted yet and says something new about its page (at
+    most three)."""
+    panel = studio()
+    mark_of = getattr(panel, "report_mark", None)
+    if mark_of is None:
+        return None, ""
+    if _SEEN["server"] is not panel:
+        _forget_reports()
+        _SEEN["server"] = panel
+    mark = mark_of()
+    fresh = []
+    for r in panel.reports_since(_SEEN["upto"]):
+        if r["seq"] > mark or r["seq"] in _SEEN["quoted"] or _SEEN["told"].get(r["path"]) == _says(r):
+            continue
+        _SEEN["told"][r["path"]] = _says(r)
+        fresh.append(r)
+    _SEEN["upto"], _SEEN["quoted"] = mark, set()
+    state = mirror.shown() or {}     # what the pane was sent last: a report on anything else is about a replaced page
+    return mark, "\n".join(
+        f"Studio (owner's view), since your last check: {r['path']}: "
+        + _describe_report(r, late=True, replaced=(r["path"], r["digest"]) != (state.get("given"), state.get("digest")))
+        for r in fresh[-3:])
+
+
+async def _view_line(given: str, mark: int | None) -> tuple[str, bool]:
+    """After a queued show: one line on what the owner's Studio shows, and whether the
+    pane confirmed it."""
+    panel = studio()
+    if not getattr(panel, "client_count", 0):
+        return "Studio (owner's view): no Studio browser is connected, so the owner sees nothing yet.", False
+    state = mirror.shown()
+    digest = state.get("digest") if isinstance(state, dict) else None
+    wait = getattr(panel, "wait_report", None)
+    if wait is None or mark is None or digest is None:
+        return "Studio (owner's view): this Studio does not report back; what it shows is unconfirmed.", False
+    report = await wait(given, digest, after=mark, timeout=STUDIO_REPORT_WAIT_S)
+    if report is None:
+        return (f"Studio (owner's view): no report from the owner's Studio within {STUDIO_REPORT_WAIT_S:g} s; "
+                "what it shows is unconfirmed."), False
+    _SEEN["quoted"].add(report["seq"])
+    _SEEN["told"][report["path"]] = _says(report)
+    return "Studio (owner's view): " + _describe_report(report), True
+
+
+def _with_view(text: str, *lines: str) -> str:
+    return "\n".join([text, *(line for line in lines if line)])
 
 
 # --- see the artifact ------------------------------------------------------------------
@@ -165,9 +258,11 @@ async def show_html(args: dict[str, Any]) -> dict[str, Any]:
     except RuntimeError as e:
         return err(str(e))
     note = get_preview().renderer_note()
-    return ok(f"Loaded {p} in the hidden frame ({(time.monotonic() - t0) * 1000:.0f} ms): "
-              + _summarize(logs) + (f"\n{note}" if note else "")
-              + "\n" + _mirror_page(p, str(args["path"])))
+    mark, news = _view_start()
+    mirrored, queued = _mirror_page(p, str(args["path"]))
+    view = (await _view_line(str(args["path"]), mark))[0] if queued else ""
+    return ok(_with_view(f"Loaded {p} in the hidden frame ({(time.monotonic() - t0) * 1000:.0f} ms): "
+                         + _summarize(logs) + (f"\n{note}" if note else "") + "\n" + mirrored, news, view))
 
 
 @tool(
@@ -178,12 +273,14 @@ async def show_html(args: dict[str, Any]) -> dict[str, Any]:
 )
 async def get_webview_logs(args: dict[str, Any]) -> dict[str, Any]:
     pv = get_preview()
-    if pv.loaded is None:
+    page = pv.loaded or pv.parked   # a parked frame keeps its last load's console (DREAM-111)
+    if page is None:
         return err("Nothing is loaded in the hidden frame yet — call show_html first.")
+    name = page.name + ("" if pv.loaded else " (parked; its last load)")
     logs = pv.logs
     if not logs:
-        return ok(f"{pv.loaded.name}: no console output, no errors.")
-    return ok(f"{pv.loaded.name}: {len(logs)} line(s)\n" + "\n".join(logs[:200]))
+        return ok(f"{name}: no console output, no errors.")
+    return ok(f"{name}: {len(logs)} line(s)\n" + "\n".join(logs[:200]))
 
 
 @tool(
@@ -202,11 +299,13 @@ async def show_to_user(args: dict[str, Any]) -> dict[str, Any]:
         await _load(p)
     except RuntimeError as e:
         return err(str(e))
+    mark, news = _view_start()
     try:
         queued = _show_in_studio(p, str(args["path"]))
     except ValueError as e:
         return err(str(e))
-    return ok(_delivery_notice(p, queued))
+    view, confirmed = await _view_line(str(args["path"]), mark) if queued else ("", False)
+    return ok(_with_view(_delivery_notice(p, queued, confirmed), news, view))
 
 
 @tool(
@@ -220,6 +319,17 @@ async def show_to_user(args: dict[str, Any]) -> dict[str, Any]:
      "required": ["path"]},
 )
 async def done(args: dict[str, Any]) -> dict[str, Any]:
+    result = await _done(args)
+    # The handoff is made: the hidden frame stops rendering (DREAM-111). Live, a three.js
+    # scene kept running here after done, on the GPU the owner's Studio draws with.
+    park = getattr(get_preview(), "park", None)
+    if park is not None and await park():
+        result["content"][0]["text"] += ("\nHidden frame parked: nothing of the page runs there now; "
+                                         "your next eval_js, screenshot or show_html reopens it.")
+    return result
+
+
+async def _done(args: dict[str, Any]) -> dict[str, Any]:
     raw = args.get("path")
     other = _resolve(str(raw)) if raw else None
     if other is not None and other.is_file() and other.suffix.lower() not in _RENDERABLE:
@@ -239,17 +349,19 @@ async def done(args: dict[str, Any]) -> dict[str, Any]:
         logs = await _load(p)
     except RuntimeError as e:
         return err(str(e))
+    mark, news = _view_start()
     try:
         queued = _show_in_studio(p, str(args["path"]))
     except ValueError as e:
         return err(str(e))
+    view, confirmed = await _view_line(str(args["path"]), mark) if queued else ("", False)
     errors = [l for l in logs if l.startswith(("error:", "console.error:"))]
-    delivery = _delivery_notice(p, queued)
+    delivery = _delivery_notice(p, queued, confirmed)
     if errors:
-        return err(f"{delivery} Hidden frame is NOT clean — fix these and call done "
-                   f"again:\n" + "\n".join(errors[:40]) + "\n\nFull console:\n"
-                   + "\n".join(logs[:80]))
-    return ok(delivery + " Hidden frame: " + _summarize(logs) + "\n" + checks)
+        return err(_with_view(f"{delivery} Hidden frame is NOT clean — fix these and call done "
+                              f"again:\n" + "\n".join(errors[:40]) + "\n\nFull console:\n"
+                              + "\n".join(logs[:80]), news, view))
+    return ok(_with_view(delivery + " Hidden frame: " + _summarize(logs) + "\n" + checks, news, view))
 
 
 # --- screenshots and probes -----------------------------------------------------------
@@ -422,8 +534,11 @@ async def eval_js(args: dict[str, Any]) -> dict[str, Any]:
     if not code:
         return err("eval_js needs a 'code' argument.")
     pv = get_preview()
-    if pv.loaded is None:
+    if pv.loaded is None and pv.parked is None:
         return err("Nothing is loaded in the hidden frame yet — call show_html first.")
+    # Parked after done or idle (DREAM-111): the frame reloads it for this call. Counted by the
+    # frame itself, under its lock, so a park that lands while this call waits is told too.
+    reopens = getattr(pv, "reopens", 0)
     try:
         value = await pv.eval(str(code))
     except Exception as e:
@@ -434,6 +549,9 @@ async def eval_js(args: dict[str, Any]) -> dict[str, Any]:
         text = repr(value)
     if len(text) > 50_000:
         text = text[:50_000] + "\n[...truncated]"
+    if getattr(pv, "reopens", 0) != reopens and pv.loaded is not None:
+        text = (f"(The hidden frame had parked {pv.loaded.name} -- after done or {PARK_IDLE_S} s unused -- "
+                "and reloaded it for this call; state set by earlier eval_js calls is gone.)\n" + text)
     return ok(text)
 
 

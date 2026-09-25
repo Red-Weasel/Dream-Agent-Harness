@@ -35,6 +35,7 @@ from ..telemetry.runtime import RunLimit
 from .backends.base import Event
 from .evaluator import ReviewSettings, ScopedReader, collect_review, review_backend
 from .run_state import RunState, atomic_write, digest, validate_state_fields
+from . import turn_origin
 
 if TYPE_CHECKING:
     from .engine import Engine
@@ -247,6 +248,9 @@ class AutonomousLoop:
 
         async def produce() -> None:
             nonlocal advancing
+            # The loop wrote this prompt, not the owner (DREAM-113). Set in this task's own context, so the
+            # Engine logs it as Dream's and nothing outside the task sees the mark.
+            turn_origin.current.set(turn_origin.LOOP)
             events = self.engine.ask(prompt)
             try:
                 while not stopping:

@@ -160,9 +160,12 @@ def capabilities(model_path: Path) -> dict:
 
 
 def serve(model_path: Path, gpus: int | None = None, ctx: int | None = None,
-          options: dict | None = None) -> subprocess.Popen:
+          options: dict | None = None, *, keep_hot: bool = False) -> subprocess.Popen:
+    """Launch `ie serve`. The engine is tied to this process (fix #51): when it dies by any means the
+    engine gets SIGTERM, then SIGKILL after a grace period -- unless `keep_hot` asks it to outlive us."""
     from .settings import server_args
     from .load_lock import load_lock
+    from . import engine_guard
 
     args = ["./build/src/ie", "serve", str(model_path), "--host", HOST, "--port", str(PORT)]
     if gpus is not None:
@@ -181,8 +184,8 @@ def serve(model_path: Path, gpus: int | None = None, ctx: int | None = None,
     env = dict(os.environ)
     env.setdefault("IE_DS41_PROFILE_OUT", str(Path.home() / ".cache" / "machx-ie" / "ds41-dream-profile.txt"))
     with load_lock(PORT) as launch_fd, _log_file().open("a", encoding="utf-8") as log:
-        proc = subprocess.Popen(
-            _command(args), cwd=MACHX_DIR, env=env,
+        proc = engine_guard.spawn(
+            _command(args), keep_hot=keep_hot, log_path=_log_file(), cwd=MACHX_DIR, env=env,
             stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
             pass_fds=(launch_fd,),
         )

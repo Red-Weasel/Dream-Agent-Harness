@@ -33,11 +33,11 @@ from dream.tools.native import NATIVE_TOOLS
 # same-named fake would prove nothing about the tools that actually ship.
 _CORE_TOOLS = [*NATIVE_TOOLS, memory_tools.remember, memory_tools.recall, notes.note]
 # The loop's hands: never deferred. NATIVE_TOOLS also carries five file tools
-# (grep, copy_files, delete_file, image_metadata, sleep), measure_image (DREAM-094) and
-# visual_check (DREAM-097) -- each in its own module -- that MAY defer.
+# (grep, copy_files, delete_file, image_metadata, sleep), measure_image (DREAM-094),
+# visual_check (DREAM-097) and project_outline (DREAM-113) -- each in its own module -- that MAY defer.
 _PINS = tuple(t.name for t in _CORE_TOOLS
               if t.name not in {"grep", "copy_files", "delete_file", "image_metadata", "sleep",
-                                "measure_image", "visual_check"})
+                                "measure_image", "visual_check", "project_outline"})
 
 
 def _tool(name, nprops=1, calls=None):

@@ -8,6 +8,11 @@ the rule the Studio panel enforces with its CSP — so a page the model wrote ca
 render local files but cannot phone home: only file:, data:, blob:, and about:
 requests are allowed through. Closes itself after idling, like the Camoufox
 browser does.
+
+The page itself parks (DREAM-111) -- it goes to about:blank, so nothing of it runs or
+renders -- right after `done` and after PARK_IDLE_S unused; `parked` remembers the
+file, and the next eval, screenshot or load reopens it. Live, a heavy three.js scene
+kept rendering here after `done`, on the same GPU as the owner's Studio.
 """
 
 from __future__ import annotations
@@ -21,9 +26,12 @@ from typing import Any
 from .. import config
 
 VIEWPORT = {"width": 1280, "height": 800}
-# With GPU rendering a loaded page costs ~0.3 of a core, so it stays loaded across
-# a slow local model's steps (minutes each) instead of reloading for every check.
+# With GPU rendering the BROWSER stays up across a slow local model's steps (minutes
+# each) instead of relaunching for every check; its page parks sooner (PARK_IDLE_S).
 GPU_IDLE_S = 1800
+# A page nobody used for this long parks (about:blank): a render loop left running
+# costs the GPU the owner's Studio draws with. Reopening costs one reload.
+PARK_IDLE_S = 60
 _RENDERER_JS = """() => { const gl = document.createElement('canvas').getContext('webgl');
   if (!gl) return 'none'; const e = gl.getExtension('WEBGL_debug_renderer_info');
   return e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER); }"""
@@ -86,6 +94,10 @@ class Preview:
         self._expecting_page = False
         self.last_used = 0.0
         self.loaded: Path | None = None
+        # The file the page held when it parked (DREAM-111); None while loaded or fresh.
+        self.parked: Path | None = None
+        # How many times a call found its page parked and loaded it again (the tools say so).
+        self.reopens = 0
         # What WebGL renders with in this frame, told to the model with every load.
         self.renderer = ""
         self.gpu = False
@@ -235,18 +247,42 @@ class Preview:
 
     async def _reap_loop(self) -> None:
         idle = config.BROWSER_IDLE_SHUTDOWN_S
-        if idle <= 0:
-            return
-        if self.gpu:
+        if idle > 0 and self.gpu:
             idle = max(idle, GPU_IDLE_S)
+        tick = min(t for t in (30, PARK_IDLE_S, idle) if t > 0)
         try:
             while self._page is not None:
-                await asyncio.sleep(min(idle, 30))
-                if self._page is not None and (time.monotonic() - self.last_used) >= idle:
+                await asyncio.sleep(tick)
+                quiet = time.monotonic() - self.last_used
+                if self._page is None:
+                    return
+                if idle > 0 and quiet >= idle:
                     await self._reset()
                     return
+                if self.loaded is not None and quiet >= PARK_IDLE_S:
+                    await self.park(unused_since=self.last_used)
         except asyncio.CancelledError:
             pass
+
+    async def park(self, *, unused_since: float | None = None) -> bool:
+        """Stop the loaded page: it goes to about:blank, so no script or render loop of it
+        runs; `parked` keeps the file for the next eval, screenshot or load to reopen.
+        False when nothing is loaded, or (``unused_since``) the page was used since."""
+        if self._page is None:
+            return False
+        async with self._op:
+            if self.loaded is None or (unused_since is not None and self.last_used != unused_since):
+                return False
+            parked = self.loaded
+            try:
+                await asyncio.wait_for(self._page.goto("about:blank"), 10)
+            except Exception:
+                try:
+                    await self._recycle_page()   # a page that will not leave is replaced
+                except Exception:
+                    pass                         # the browser is gone: nothing of the page runs either
+            self.loaded, self.parked = None, parked
+            return True
 
     async def aclose(self) -> None:
         reaper, self._reaper = self._reaper, None
@@ -264,24 +300,35 @@ class Preview:
         """Navigate to a local file; return the console since this load."""
         await self._ensure()
         async with self._op:
-            self.last_used = time.monotonic()
-            self.logs.clear()
-            self.blocked.clear()
-            self._dropped = 0
-            try:
-                await asyncio.wait_for(
-                    self._page.goto(path.resolve().as_uri(), wait_until="load",
-                                    timeout=LOAD_TIMEOUT_MS),
-                    LOAD_TIMEOUT_MS / 1000 + 5,
-                )
-                await asyncio.wait_for(self._page.wait_for_timeout(SETTLE_MS), 5)
-            except Exception:
-                await self._recycle_page()
-                raise
-            self.loaded = path.resolve()
-            self.last_used = time.monotonic()
-            await self._check_page()
-            return list(self.logs)
+            return await self._load_locked(path)
+
+    async def _load_locked(self, path: Path) -> list[str]:
+        self.last_used = time.monotonic()
+        self.logs.clear()
+        self.blocked.clear()
+        self._dropped = 0
+        try:
+            await asyncio.wait_for(
+                self._page.goto(path.resolve().as_uri(), wait_until="load",
+                                timeout=LOAD_TIMEOUT_MS),
+                LOAD_TIMEOUT_MS / 1000 + 5,
+            )
+            await asyncio.wait_for(self._page.wait_for_timeout(SETTLE_MS), 5)
+        except Exception:
+            await self._recycle_page()
+            raise
+        self.loaded, self.parked = path.resolve(), None
+        self.last_used = time.monotonic()
+        await self._check_page()
+        return list(self.logs)
+
+    async def _unpark_locked(self) -> None:
+        """With the operation lock held: a page parked while this call waited for the lock is
+        loaded again before the call runs (DREAM-111, gate 1). Checked before the lock, a park
+        that finished in between left eval, screenshot and pdf working on about:blank."""
+        if self.loaded is None and self.parked is not None:
+            self.reopens += 1
+            await self._load_locked(self.parked)
 
     async def _check_page(self) -> None:
         """Two things Chromium does not report on the console: an XML parse error
@@ -306,9 +353,11 @@ class Preview:
 
     async def eval(self, code: str) -> Any:
         """Evaluate JS on the loaded page. An expression returns its value; a block
-        of statements returns what it `return`s (or null)."""
+        of statements returns what it `return`s (or null). A parked page is reopened
+        first (a fresh load: state set by earlier evals is gone)."""
         await self._ensure()
         async with self._op:
+            await self._unpark_locked()
             return await self._eval(code)
 
     async def _eval(self, code: str) -> Any:
@@ -351,6 +400,7 @@ class Preview:
             raise ValueError(f"steps must have 1..{MAX_CAPTURE_STEPS} entries")
         await self._ensure()
         async with self._op:
+            await self._unpark_locked()
             self.last_used = time.monotonic()
             page = self._page
             png = hq or key is not None or (save_to is not None and save_to.suffix.lower() == ".png")
@@ -389,6 +439,7 @@ class Preview:
         page; without, A4/Letter follows the page's own @page rule."""
         await self._ensure()
         async with self._op:
+            await self._unpark_locked()
             if self.loaded is None:
                 raise RuntimeError("nothing is loaded; show_html first")
             await self._page.emulate_media(media="print")

@@ -140,20 +140,33 @@ async def test_findings_are_salvaged_instead_of_discarded():
 
 
 @pytest.mark.asyncio
-async def test_the_salvage_call_has_no_tools():
-    """Safety property. A model that cannot emit a tool call cannot resume the
-    spiral that got us here, so salvage can never re-enter the loop."""
+async def test_the_salvage_call_can_never_run_a_tool():
+    """Safety property: salvage can never re-enter the loop. It is one
+    non-streaming call whose text alone is used, so a tool call in its reply
+    never runs; a reply that is nothing but a tool call is asked for again with
+    no tools at all. On a local engine (this backend is MachX) the first ask
+    keeps the lead's own tools with tool_choice "none": the prompt's head is the
+    lead's, so the engine extends its cached conversation instead of re-reading
+    all of it (Dream fix #38; live 2026-09-21 00:58: 33,077 tokens, 0 cached)."""
+    ran = []
+
     async def h(args):
+        ran.append(args["command"])
         return {"content": [{"type": "text", "text": "(exit 0)\n"}]}
 
+    only_a_call = {"choices": [{"message": {"content": "", "tool_calls": [
+        {"id": "s1", "type": "function",
+         "function": {"name": "run_bash", "arguments": '{"command": "rm -rf ~/work"}'}}]}}]}
     b = _backend([_tool("run_bash", h)])
-    fake = _FakeClient(_stuck_scripts(), [SALVAGE])
+    fake = _FakeClient(_stuck_scripts(), [only_a_call, SALVAGE])
     b._client = fake
-    await _drain(b)
-    assert fake.posted, "salvage never made its call"
-    payload = fake.posted[-1]
-    assert "tools" not in payload
-    assert payload.get("stream") is False
+    events = await _drain(b)
+    first, second = fake.posted
+    assert first["tools"] == b._request_tools() and first["tool_choice"] == "none"
+    assert "tools" not in second and "tool_choice" not in second
+    assert first.get("stream") is False and second.get("stream") is False
+    assert "rm -rf ~/work" not in ran
+    assert "3 listening ports" in _texts(events, "assistant_done")[-1]
 
 
 @pytest.mark.asyncio

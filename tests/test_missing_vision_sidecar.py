@@ -22,7 +22,8 @@ MISSING = ('error: this deepseek4 load has no vision sidecar '
 @pytest.fixture
 def session(monkeypatch, tmp_path):
     """Only HTTP is fake; tool execution and request construction stay real."""
-    pixels = b'synthetic-image-pixels'
+    pixels = base64.b64decode(  # a real 1x1 PNG: `see` now decodes what it forwards (DREAM-114)
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF5kAAAAASUVORK5CYII=')
     (tmp_path / 'fixture.png').write_bytes(pixels)
     payloads = []
     error = {'message': MISSING}

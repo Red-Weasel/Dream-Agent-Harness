@@ -17,7 +17,9 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
+import time
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable
@@ -33,6 +35,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from ..core.backends.base import Event
 from .bus import EventBus
 from .desktop_bridge import DesktopDiscovery
+from .page_server import PageServer
 
 STATIC_DIR = Path(__file__).parent / "static"
 # "Read ×2": the user's own words are sent twice, joined by this line. A causal model
@@ -40,6 +43,12 @@ STATIC_DIR = Path(__file__).parent / "static"
 # (re-reading prompts, Xu et al. 2023). Only the typed text is doubled; the chat
 # shows it once, and the page strips the repeat when it replays history.
 READ_AGAIN = "\n\n[Read the request above again:]\n"
+# The pane's load reports (DREAM-111): how many are kept, and their bounds.
+REPORTS_KEPT = 64
+REPORT_MAX_BYTES = 65_536
+REPORT_MAX_ERRORS = 20
+REPORT_ERROR_CHARS = 500
+_DIGEST = re.compile(r"[0-9a-f]{8}")
 
 
 def _jsonable(value: Any) -> Any:
@@ -121,6 +130,11 @@ class StudioServer:
         self._last_show: dict[str, Any] | None = None
         self._last_show_event: Any = None
         self._show_sequence = 0
+        # What the pages did in the owner's panes (DREAM-111), newest last, numbered.
+        self._reports: list[dict[str, Any]] = []
+        self._report_seq = 0
+        # "Open in browser" (DREAM-111): this workspace, read-only, on its own origin.
+        self.pages = PageServer(self._workspace)
         self._discovery = DesktopDiscovery()
         self._ready = False
         self._error: str | None = None
@@ -170,6 +184,8 @@ class StudioServer:
             Route("/api/learning/{identifier}/draft", self._learning_draft),
             Route("/api/control", self._control, methods=["POST"]),
             Route("/api/follow", self._follow, methods=["POST"]),
+            Route("/api/studio_report", self._studio_report, methods=["POST"]),
+            Route("/api/page_link", self._page_link),
             Route("/api/assets", self._assets),
             Route("/api/frame_reply", self._frame_reply, methods=["POST"]),
             Route("/api/answer", self._answer, methods=["POST"]),
@@ -271,6 +287,75 @@ class StudioServer:
         self.bus.publish(Event("studio", {"op": "follow", "on": payload["on"]}))
         return JSONResponse({"ok": True, "on": payload["on"]})
 
+    # --- the owner's view, reported back (DREAM-111) ----------------------------
+    #
+    # The pane tells Dream what the page it shows did: its console errors, uncaught
+    # exceptions and unhandled rejections, a lost WebGL context, or a clean load (or that
+    # the owner has the code view open). The Studio tools read these to say what the
+    # owner sees; before, they could only say "queued; rendering is not confirmed".
+
+    async def _studio_report(self, request):
+        if not self._authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        origin = request.headers.get("origin")
+        if origin and origin.rstrip("/") != str(request.base_url).rstrip("/"):
+            return JSONResponse({"error": "origin does not match this Studio session"}, status_code=403)
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > REPORT_MAX_BYTES:
+                return JSONResponse({"error": "report too large"}, status_code=413)
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            return JSONResponse({"error": "Expected a JSON object"}, status_code=400)
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "Expected a JSON object"}, status_code=400)
+        path, digest, errors = payload.get("path"), payload.get("digest"), payload.get("errors", [])
+        lost = payload.get("webgl_lost", 0)
+        if (not isinstance(path, str) or not 0 < len(path) <= 4096
+                or not isinstance(digest, str) or not _DIGEST.fullmatch(digest)
+                or payload.get("status") not in ("loaded", "code")
+                or payload.get("phase", "load") not in ("load", "update")
+                or not isinstance(errors, list) or len(errors) > 50
+                or not all(isinstance(e, str) for e in errors)
+                or isinstance(lost, bool) or not isinstance(lost, int) or not 0 <= lost <= 10_000):
+            return JSONResponse({"error": "Expected {path, digest, status, phase, errors, webgl_lost}"},
+                                status_code=400)
+        self.add_report({"path": path, "digest": digest, "status": payload["status"],
+                         "phase": payload.get("phase", "load"), "webgl_lost": lost,
+                         "errors": [e[:REPORT_ERROR_CHARS] for e in errors[:REPORT_MAX_ERRORS]]})
+        return JSONResponse({"ok": True})
+
+    def add_report(self, report: dict[str, Any]) -> dict[str, Any]:
+        """Keep one pane report (already validated), numbered in arrival order."""
+        self._report_seq += 1
+        record = {**report, "seq": self._report_seq, "at": time.time()}
+        self._reports = [*self._reports[-(REPORTS_KEPT - 1):], record]
+        return record
+
+    def report_mark(self) -> int:
+        """The newest report's number: a tool takes it before a show, so only an answer
+        that arrives after the show can count for it."""
+        return self._report_seq
+
+    def reports_since(self, seq: int) -> list[dict[str, Any]]:
+        return [r for r in self._reports if r["seq"] > seq]
+
+    async def wait_report(self, path: str, digest: str, *, after: int, timeout: float) -> dict[str, Any] | None:
+        """The first report after ``after`` about this path AND this exact content, or
+        None when none came within ``timeout`` seconds. Polled, so it holds whichever
+        loop the route and the tool each run on."""
+        deadline = time.monotonic() + timeout
+        while True:
+            for report in self._reports:
+                if report["seq"] > after and report["path"] == path and report["digest"] == digest:
+                    return report
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            await asyncio.sleep(min(0.05, remaining))
+
     async def _learning_draft(self, request):
         if not self._authorized(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -304,7 +389,28 @@ class StudioServer:
             "clients": self.client_count,
             "show_sequence": self._show_sequence,
             "error": self._error,
+            # Where "Open in browser" pages live: the desktop hands exactly these to the
+            # owner's default browser (DREAM-111). None while that server is not running.
+            "page_base": self.pages.base_url,
         }), headers={"Cache-Control": "no-store"})
+
+    async def _page_link(self, request):
+        """The "Open in browser" address of a workspace file (DREAM-111): on the page
+        server's own origin, which holds no Dream credential."""
+        if not self._authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        if not self.pages.ready:
+            return JSONResponse({"error": "Open in browser is unavailable: its local page server is not running."},
+                                status_code=503)
+        target = self._inside(request.query_params.get("path") or "")
+        try:
+            url = self.pages.url_for(target) if target is not None and target.is_file() else None
+        except OSError:   # a name the filesystem cannot take (ENAMETOOLONG): not a workspace file
+            url = None
+        if url is None:
+            return JSONResponse({"error": "path must name a file inside the workspace, not a hidden one"},
+                                status_code=400)
+        return JSONResponse({"url": url}, headers={"Cache-Control": "no-store"})
 
     def reset_project_view(self) -> None:
         """Called after an idle project switch; discard old preview handles only."""
@@ -496,7 +602,7 @@ class StudioServer:
         try:
             p = Path(raw).expanduser()
             p = (p if p.is_absolute() else ws / p).resolve()
-        except (OSError, ValueError):
+        except (OSError, ValueError, RuntimeError):   # RuntimeError: "~nosuchuser/..." (DREAM-111, gate 1)
             return None
         return p if p.is_relative_to(ws) else None
 
@@ -579,7 +685,11 @@ class StudioServer:
             return JSONResponse({"error": "no workspace"}, status_code=400)
         raw = request.query_params.get("path") or ""
         target = ws if not raw else self._inside(raw)
-        if target is None or not target.exists():
+        try:
+            found = target is not None and target.exists()
+        except OSError:   # a name the filesystem cannot take (ENAMETOOLONG, fix #75): not a workspace file
+            found = False
+        if not found:
             return JSONResponse({"error": "path must name a file or folder inside the workspace"},
                                 status_code=400)
         if target.is_file():
@@ -879,6 +989,7 @@ class StudioServer:
                         self.port = socks[0].getsockname()[1]
                         self._ready = True
                         self._discovery.publish(self.url)
+                        await self._start_pages()
                         return self.url
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
@@ -890,6 +1001,14 @@ class StudioServer:
             self._task.cancel()
             await self.stop()
             raise
+
+    async def _start_pages(self) -> None:
+        """The page server behind "Open in browser" (DREAM-111). Studio works without it:
+        the route and the pane then say it is unavailable."""
+        try:
+            await self.pages.start()
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Open in browser is unavailable: %s: %s", type(exc).__name__, exc)
 
     def _server_finished(self, task: asyncio.Task) -> None:
         self._ready = False
@@ -909,6 +1028,7 @@ class StudioServer:
             if not future.done():
                 future.set_result("n")
         self._discovery.clear()
+        await self.pages.stop()
         if self._server is not None:
             self._server.should_exit = True
         task = self._task

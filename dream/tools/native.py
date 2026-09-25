@@ -236,6 +236,7 @@ async def run_bash(args: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(command, str) or not command.strip():
         return err("run_bash needs a 'command' argument.")
     from ..core.execution import ExecutionUnavailable
+    mark = mirror.shell_mark()   # images modified from here on were written by this call (DREAM-111)
     try:
         from ..core.execution import current_execution, execute_bash
         result, contained = await execute_bash(
@@ -246,9 +247,9 @@ async def run_bash(args: dict[str, Any]) -> dict[str, Any]:
                    "this failure; report the prerequisite issue and await an environment change.")
     except Exception as e:
         return err(f"{type(e).__name__}: {e}")
-    # A script that rewrote the page the owner is watching: one stat, then a reload
-    # (DREAM-104). Files it created are not searched for.
-    mirror.refresh_shown()
+    # A script that rewrote the page the owner is watching reloads it (DREAM-104, one
+    # stat); the newest image the call wrote shows in the owner's pane (DREAM-111).
+    await mirror.after_shell(mark)
     text = result.output.decode("utf-8", "replace")
     if result.truncated:
         text += "\n[...truncated]"
@@ -264,5 +265,7 @@ async def run_bash(args: dict[str, Any]) -> dict[str, Any]:
 from .files import FILE_TOOLS  # noqa: E402 — after the four above are defined
 from .measure_image import measure_image  # noqa: E402 — its own module, so the local backend may defer it
 from .visual_check import visual_check  # noqa: E402 — likewise (DREAM-097)
+from .project_outline import project_outline  # noqa: E402 — likewise (DREAM-113)
 
-NATIVE_TOOLS = [read_file, write_file, list_dir, run_bash, *FILE_TOOLS, measure_image, visual_check]
+NATIVE_TOOLS = [read_file, write_file, list_dir, run_bash, *FILE_TOOLS, measure_image, visual_check,
+                project_outline]

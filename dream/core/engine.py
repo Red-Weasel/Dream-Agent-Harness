@@ -27,6 +27,7 @@ from ..memory.working import WorkingMemory
 from .budget import ToolBudget, default_tool_budget
 from ..tools import registry
 from ..tools.context import ToolContext, in_thread, set_context, bind_context, err
+from . import turn_origin
 from ..tools.native import NATIVE_TOOLS
 from ..web.browser import get_browser
 from . import system_prompt
@@ -831,6 +832,18 @@ class Engine:
             except Exception:
                 pass
 
+    def fresh_start(self) -> list[Event]:
+        """The owner's Fresh start (DREAM-113): the conversation becomes one handoff now. Only a backend that
+        holds the conversation itself can do it; it runs bound to this session's tool context, so the head
+        refresh and the transcript read are this session's. Between turns only (the backend refuses mid-turn)."""
+        fresh = getattr(self.backend, "fresh_start", None)
+        if not callable(fresh):
+            raise ValueError("Fresh start works where Dream holds the conversation itself (local and "
+                             "OpenAI-compatible engines); this engine keeps its own context. Use /new to start "
+                             "a new session.")
+        with bind_context(self._tool_context):
+            return fresh()
+
     async def set_model(self, model: str | None) -> None:
         from dataclasses import fields
         from .council_config import validate_model
@@ -1249,7 +1262,8 @@ class Engine:
                         if transfer is not None:
                             # Capture pending input before background handoff can fail.
                             # Log and retain together on the ordinary storage thread.
-                            capture = asyncio.create_task(in_thread(self._log_user_turn, prompt, transfer))
+                            capture = asyncio.create_task(in_thread(self._log_user_turn, prompt, transfer,
+                                                                    turn_origin.current.get()))
                             try:
                                 await asyncio.shield(capture)
                             except asyncio.CancelledError as exc:
@@ -1398,9 +1412,12 @@ class Engine:
             self._pending_handoff = None
             self._pending_council = ()
 
-    def _log_user_turn(self, prompt: str, transfer) -> None:
+    def _log_user_turn(self, prompt: str, transfer, origin: str | None = None) -> None:
+        """`origin`: a prompt Dream wrote (the loop's, /review's) is logged with that marker in `tool_name`
+        (core/turn_origin.py, DREAM-113); the owner's is logged exactly as before."""
+        marked = {"tool_name": origin} if origin else {}
         if not (transfer.required or transfer.history or transfer.consultations):
-            self.working.log_turn("user", prompt)
+            self.working.log_turn("user", prompt, **marked)
             return
         from dataclasses import replace
         from .council_context import Record, unique
@@ -1417,7 +1434,7 @@ class Engine:
             self._pending_handoff = pending
             received = True
 
-        self.working.log_turn("user", prompt, on_commit=retain_committed_turn)
+        self.working.log_turn("user", prompt, **marked, on_commit=retain_committed_turn)
         if not received:
             raise RuntimeError("Pending user capture did not receive a commit receipt")
 
@@ -1439,7 +1456,7 @@ class Engine:
             await in_thread(self.store.set_session_title, self.session_id, title)
         if transfer is None:
             transfer = self._council_transfer()
-            await in_thread(self._log_user_turn, prompt, transfer)
+            await in_thread(self._log_user_turn, prompt, transfer, turn_origin.current.get())
 
         # Supply a short real workflow before inference. The original request is
         # already logged above; process guidance is not attributed to the user.
@@ -1511,7 +1528,7 @@ class Engine:
                         if note:
                             import uuid
                             try:
-                                await inbox.submit(note, uuid.uuid4().hex)
+                                await inbox.submit(note, uuid.uuid4().hex, origin=turn_origin.PROGRESS_GUARD)
                             except ValueError:
                                 pass
                             self.runtime_meter.record("progress_guard", turn=self._turn_index, reads=guard.reads, fired=guard.fired)
@@ -1531,6 +1548,10 @@ class Engine:
                         self.working.log_turn, "tool_result", (ev.data.get("content") or "")[:2000],
                         tool_name=ev.data.get("name"),
                     )
+                elif ev.kind == "error":
+                    # Fix #64: the failure text the owner saw joins the transcript, so it survives a
+                    # restart and read_session shows it (the runtime log keeps its code and message).
+                    await in_thread(self.working.log_turn, "error", str(ev.data)[:2000])
                 elif ev.kind == "result":
                     self._absorb_result(ev.data)
                     if not isinstance(self.backend, OpenAICompatBackend):

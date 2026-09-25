@@ -148,9 +148,9 @@ async def test_snips_run_before_the_blind_stubbing_and_a_bare_backend_saves_noth
         order.append("snips")
         return real_snips()
 
-    def compact(messages, target, on_elide=None):
+    def compact(messages, target, on_elide=None, **measure):
         order.append("compact")
-        return real_compact(messages, target, on_elide)
+        return real_compact(messages, target, on_elide, **measure)
 
     monkeypatch.setattr(b, "_execute_snips", snips)
     monkeypatch.setattr(openai_compat, "_compact_messages", compact)

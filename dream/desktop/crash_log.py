@@ -5,9 +5,24 @@ and removes it again on a clean exit, so a file that stays behind is the record 
 """
 import faulthandler
 import os
+import signal
 import sys
 
 ENV = 'DREAM_CRASH_LOG'
+
+
+def arm_window():
+    """The desktop window's own evidence. 2026-09-24 20:13:34 the window process exited mid-turn without a word on its
+    stderr (the desktop menu connects it to the journal). Now a fatal signal leaves every thread's stack there under
+    "Fatal Python error", and SIGTERM or SIGHUP leaves every thread's stack there (no "Fatal" line) before its default
+    action runs. Both handlers are faulthandler's, in C: they fire at once even while the main thread is stuck in a C
+    call, where a Python-level handler would wait and a hung window would not die. A stop that leaves nothing at all
+    was a SIGKILL or a hard exit."""
+    if sys.stderr is None:   # started with fd 2 closed: nothing to write to, and the window must still start
+        return
+    faulthandler.enable(all_threads=True)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        faulthandler.register(sig, all_threads=True, chain=True)   # chain: then the previous (default) action
 
 
 def enable():

@@ -1,10 +1,11 @@
 # Live Blender
 
 When `blender__*` tools are listed, Dream runs a real Blender, confined to the workspace:
-its Python reads and writes only the workspace, with no network. It draws into its own
-window on the owner's screen (a nested display it fills). The first Blender call opens
-it and says so; it closes when the session ends. The viewport renders on the CPU, so
-keep scenes light while working live.
+its Python reads and writes only the workspace, and the Blender process itself is
+offline. Only Blender is offline: `web_search`, `browse` and `run_bash` reach the
+internet as usual. It draws into its own window on the owner's screen (a nested display
+it fills). The first Blender call opens it and says so; it closes when the session ends.
+The viewport renders on the CPU, so keep scenes light while working live.
 
 - Look first: `blender__get_scene_info` and `blender__get_object_info`.
 - Change with `blender__execute_blender_code`, one small step at a time. Look names up
@@ -19,7 +20,11 @@ keep scenes light while working live.
 - Save the `.blend` in the workspace after each accepted step: unsaved work is lost when
   the session ends, and files written outside the workspace vanish. Renders default to
   `renders/`.
-- Asset libraries (Poly Haven, Sketchfab and the like) are unavailable: there is no
-  network. Build from primitives, procedural materials and files in the workspace.
+- References and assets: when the owner gives none, find them. Look up reference photos
+  and dimensions with `web_search` and `browse`; download textures, HDRIs or models
+  (Poly Haven, Sketchfab and the like) with `run_bash` into the workspace, then import
+  them with `blender__execute_blender_code`. Blender's own add-ons cannot download
+  (the process is offline), so fetch first, import second. Build from primitives and
+  procedural materials when nothing suitable is found.
 - Without these tools (no display, no Blender, or switched off), use headless Blender
   scripts through `run_bash`.

@@ -6,6 +6,7 @@ import shlex
 from pathlib import Path
 
 from .. import demonstrations as demos
+from ..core import turn_origin
 
 USAGE = """/learn start <name> <x> <y> <width> <height> [seconds]
 /learn stop | list
@@ -46,11 +47,12 @@ async def command(app, argument: str):
                 raise ValueError("Extract frames first")
             if not app.engine.provider.multimodal and app.engine.provider.kind != "cli":
                 raise ValueError("This provider has vision disabled. Choose a vision-capable provider before analyzing screen evidence.")
-            await app._ask(
-                f"Analyze my demonstration {rest[0]} ({info['name']}). Use demonstration_read to select representative "
-                "frames, then see to inspect them. Work in small batches, inspect transitions and uncertainty. "
-                "Create a reusable skill draft with demonstration_draft, concrete outcome checks and frame evidence. "
-                "Label inferred actions; screenshots do not record keystrokes. Do not install, enable, or replay the skill.")
+            with turn_origin.generated(turn_origin.LEARN):   # Dream wrote this prompt; the transcript marks it
+                await app._ask(
+                    f"Analyze my demonstration {rest[0]} ({info['name']}). Use demonstration_read to select representative "
+                    "frames, then see to inspect them. Work in small batches, inspect transitions and uncertainty. "
+                    "Create a reusable skill draft with demonstration_draft, concrete outcome checks and frame evidence. "
+                    "Label inferred actions; screenshots do not record keystrokes. Do not install, enable, or replay the skill.")
         elif action == "draft" and len(rest) == 1:
             app.renderer.info((demos.directory(rest[0]) / "draft" / "SKILL.md").read_text())
         elif action == "install" and len(rest) == 1:

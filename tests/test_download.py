@@ -43,6 +43,26 @@ def test_the_route_serves_files_and_zips_folders_inside_the_workspace(tmp_path):
             assert c.get(f"/api/download?path={bad}&token={srv.token}").status_code == 400, bad
 
 
+def test_a_name_too_long_for_the_filesystem_is_a_400_like_any_bad_path(tmp_path):
+    """Fix list #75: a 300-byte file name made target.exists() raise ENAMETOOLONG, and the route answered
+    500. A 300-byte name and a 5,000-byte path are refused like any path that names no workspace file:
+    400, with the same body and headers; a normal download still works."""
+    (tmp_path / "report.pdf").write_bytes(b"%PDF-fake")
+    srv = StudioServer(EventBus(), session={"workspace": str(tmp_path)})
+    long_name, long_path = "a" * 296 + ".pdf", "/".join(["d" * 249] * 20) + "x"
+    assert len(long_name.encode()) == 300 and len(long_path.encode()) == 5000
+    with TestClient(srv.app, raise_server_exceptions=False) as c:
+        usual = c.get("/api/download", params={"path": "missing.txt", "token": srv.token})
+        assert usual.status_code == 400
+        for bad in (long_name, long_path):
+            r = c.get("/api/download", params={"path": bad, "token": srv.token})
+            assert r.status_code == 400, (len(bad), r.status_code, r.text[:200])
+            assert r.json() == usual.json()
+            assert dict(r.headers) == dict(usual.headers)
+        r = c.get("/api/download", params={"path": "report.pdf", "token": srv.token})
+        assert r.status_code == 200 and r.content == b"%PDF-fake"
+
+
 @pytest.fixture
 def ws(tmp_path):
     emitted: list = []

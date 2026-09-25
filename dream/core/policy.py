@@ -74,6 +74,8 @@ _READ_ONLY = {
     "measure_image",
     # DREAM-097: shows workspace images with a question in Studio (questions_v2's form); asks, changes nothing
     "visual_check",
+    # DREAM-113: the workspace's outline (its Understand map, or a scan) -- reads only
+    "project_outline",
     # Studio: the hidden frame has no network, and these change nothing on disk
     # (multi_screenshot writes only under Dream's screenshot folder, like browse).
     "show_html", "get_webview_logs", "show_to_user", "done", "eval_js", "multi_screenshot",
@@ -411,11 +413,21 @@ def _bundled_skill_copy(tool_input: dict[str, Any], workspace: Path) -> bool:
     return True
 
 
-def _shell_parts(command: str) -> list[list[str]]:
-    """Command-position tokens, not a claim to understand arbitrary shell code."""
+def _shell_lexer(command: str) -> shlex.shlex:
+    """Shell-like tokens: quotes honoured, operators apart. shlex takes `#` for a comment even inside a
+    word, where bash does not: `echo a#b; rm -rf build` lost its rm to every check (DREAM-112 gate).
+    Comments are therefore off: a real comment's words are read as commands, which only ever makes a
+    check stricter."""
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>\n")
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
+    lexer.commenters = ""
+    return lexer
+
+
+def _shell_parts(command: str) -> list[list[str]]:
+    """Command-position tokens, not a claim to understand arbitrary shell code."""
+    lexer = _shell_lexer(command)
     parts: list[list[str]] = [[]]
     for token in lexer:
         if token and all(c in ";&|()\n" for c in token):
@@ -518,49 +530,255 @@ _READ_VERBS = frozenset({
     "sort", "uniq", "cut", "tr", "diff", "cmp", "md5sum", "sha256sum", "basename", "dirname",
     "realpath", "readlink", "date", "nl", "column", "jq", "tree", "test", "[",
 })
-_READ_GIT = frozenset({"status", "diff", "log", "show", "ls-files", "rev-parse", "describe", "blame", "branch", "remote"})
+
+
+def _options(args: list[str], short: str = "", short_value: str = "", long: frozenset = frozenset(),
+             long_value: frozenset = frozenset(), optional: str = "", long_optional: frozenset = frozenset(),
+             ) -> list[str] | None:
+    """The operands of `args`, or None when an option is not one of the listed read options.
+    `short`/`long` take no value; `short_value`/`long_value` take one (attached, `=`, or the next word);
+    `optional`/`long_optional` take one only when attached (GNU optional arguments), never the next word."""
+    operands: list[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        i += 1
+        if arg == "--":
+            return operands + args[i:]
+        if arg.startswith("--"):
+            name, eq, _ = arg.partition("=")
+            if name in long_value:
+                i += 0 if eq else 1
+            elif name not in long_optional and (name not in long or eq):
+                return None
+        elif arg.startswith("-") and arg != "-":
+            for k, flag in enumerate(arg[1:]):
+                if flag in short_value:
+                    i += 0 if arg[k + 2:] else 1     # the rest of the cluster is its value, else the next word
+                    break
+                if flag in optional:
+                    break                            # the rest of the cluster, if any, is its value
+                if flag not in short:
+                    return None
+        else:
+            operands.append(arg)
+    return operands
+
+
+def _long(*names: str) -> frozenset:
+    return frozenset("--" + n for n in names)
+
+
+_SORT_LONG = _long("numeric-sort", "reverse", "unique", "ignore-case", "human-numeric-sort", "version-sort",
+                   "general-numeric-sort", "month-sort", "random-sort", "stable", "merge",
+                   "zero-terminated", "dictionary-order", "ignore-leading-blanks", "ignore-nonprinting")
+_SORT_VALUE = _long("key", "field-separator", "buffer-size", "parallel", "sort")
+_UNIQ_LONG = _long("count", "repeated", "unique", "ignore-case", "zero-terminated")
+_UNIQ_VALUE = _long("skip-fields", "skip-chars", "check-chars")
+_TREE_LONG = _long("du", "si", "dirsfirst", "filesfirst", "noreport", "gitignore", "prune", "matchdirs",
+                   "ignore-case", "info", "help", "version", "fromfile", "metafirst", "nolinks", "inodes", "device")
+_TREE_VALUE = _long("charset", "filelimit", "sort", "timefmt")
+_FILE_LONG = _long("brief", "mime", "mime-type", "mime-encoding", "dereference", "no-dereference", "keep-going",
+                   "uncompress", "special-files", "no-pad", "print0", "raw", "extension", "apple")
+_FILE_VALUE = _long("exclude", "magic-file", "files-from", "separator", "parameter")
+_DATE_VALUE = _long("date", "reference", "file", "rfc-3339")
+_DATE_LONG = _long("utc", "universal", "rfc-email", "rfc-2822", "debug")
+# find: predicates that read, and those of them that take a value. -delete, -exec, -execdir, -ok, -okdir,
+# -fprint, -fprint0, -fprintf, -fls and anything unknown are not reads.
+_FIND_VALUE = frozenset({"-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex",
+                         "-regextype", "-type", "-xtype", "-size", "-mtime", "-mmin", "-atime", "-amin", "-ctime",
+                         "-cmin", "-newer", "-anewer", "-cnewer", "-perm", "-user", "-group", "-uid", "-gid",
+                         "-links", "-inum", "-samefile", "-maxdepth", "-mindepth", "-fstype", "-lname", "-ilname",
+                         "-used", "-printf", "-D", "-context"})
+_FIND_FLAG = frozenset({"-print", "-print0", "-ls", "-prune", "-quit", "-not", "!", "-a", "-and", "-o", "-or",
+                        "-true", "-false", "-empty", "-readable", "-writable", "-executable", "-nouser", "-nogroup",
+                        "-depth", "-mount", "-xdev", "-follow", "-daystart", "-noleaf", "-ignore_readdir_race",
+                        "-noignore_readdir_race", "-L", "-H", "-P", "-O0", "-O1", "-O2", "-O3"})
+# sed: only scripts made of printing, deleting, quitting and s/// without the w or e flags. Anything else
+# (w, W, e, r, y, other delimiters, several lines) is not known to be a read.
+_SED_ADDRESS = r"(?:\d+|\$|/(?:[^/\\\n]|\\.)*/I?)"
+_SED_COMMAND = (rf"(?:{_SED_ADDRESS}(?:\s*,\s*{_SED_ADDRESS})?\s*!?\s*)?"
+                r"(?:[pdq=]|s/(?:[^/\\\n]|\\.)*/(?:[^/\\\n]|\\.)*/[gpiI0-9]*)")
+_SED_SCRIPT = re.compile(rf"\s*{_SED_COMMAND}\s*(?:;\s*{_SED_COMMAND}\s*)*;?\s*")
+_GIT_BRANCH_LIST = frozenset({"-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--show-current", "-i",
+                              "--ignore-case", "--no-color", "--no-column", "--omit-empty"})
+_GIT_BRANCH_VALUE = frozenset({"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort",
+                               "--format"})
+
+
+def _sed_read(args: list[str]) -> bool:
+    scripts: list[str] = []
+    files: list[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        i += 1
+        if arg in ("-e", "--expression"):
+            scripts.append(args[i] if i < len(args) else "")
+            i += 1
+        elif arg.startswith("--expression="):
+            scripts.append(arg.split("=", 1)[1])
+        elif arg in _long("quiet", "silent", "regexp-extended", "separate", "null-data", "posix", "debug"):
+            continue
+        elif arg.startswith("-") and arg != "-":
+            for k, flag in enumerate(arg[1:]):
+                if flag == "e":                      # -ne SCRIPT: the rest of the cluster, else the next word
+                    scripts.append(arg[k + 2:] or (args[i] if i < len(args) else ""))
+                    i += 0 if arg[k + 2:] else 1
+                    break
+                if flag not in "nErsz":              # -i, -f, -l, -u ... are not reads here
+                    return False
+        else:
+            files.append(arg)
+    if not scripts:
+        if not files:
+            return False
+        scripts.append(files.pop(0))
+    return all(_SED_SCRIPT.fullmatch(script) for script in scripts)
+
+
+def _awk_read(args: list[str]) -> bool:
+    """-F and -v only; the program may not write (a `>` after its first print, which also rejects some
+    comparisons), pipe (`|`), run (system) or load code. Any `@` counts as writing: gawk's @load and
+    @include, and its indirect call `@f()`, which reaches a built-in named by a string built at run time
+    (`f = "sys" "tem"; @f("touch x")`), so no word list can see it (DREAM-112 gate round 2)."""
+    i = 0
+    while i < len(args) and args[i] != "--":
+        if args[i] in ("-F", "-v"):
+            i += 2
+        elif args[i].startswith(("-F", "-v")):
+            i += 1
+        elif args[i].startswith("-"):
+            return False
+        else:
+            break
+    i += i < len(args) and args[i] == "--"
+    if i >= len(args):
+        return False
+    program = args[i]
+    printing = re.search(r"\bprintf?\b", program)
+    return not (re.search(r"(?<!\|)\|(?!\|)", program) or any(w in program for w in ("system", "@"))
+                or (printing and ">" in program[printing.start():]))
+
+
+def _find_read(args: list[str]) -> bool:
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in _FIND_VALUE or re.fullmatch(r"-newer[aBcm][aBcmt]", arg):
+            i += 2
+        elif arg in _FIND_FLAG or not arg.startswith("-"):
+            i += 1
+        else:
+            return False
+    return True
+
+
+def _date_read(args: list[str]) -> bool:
+    """Formats (+...) and reading options only: -s/--set, or a bare date operand, would set the clock."""
+    operands = _options(args, short="uR", short_value="drf", long=_DATE_LONG, long_value=_DATE_VALUE,
+                        optional="I", long_optional=_long("iso-8601"))
+    return operands is not None and all(o.startswith("+") for o in operands)
+
+
+def _uniq_read(args: list[str]) -> bool:
+    """At most one operand: uniq's second operand is the file it writes."""
+    operands = _options(args, short="cdDuiz", short_value="fsw", long=_UNIQ_LONG, long_value=_UNIQ_VALUE,
+                        long_optional=_long("all-repeated", "group"))
+    return operands is not None and len(operands) <= 1
+
+
+def _git_read(args: list[str]) -> bool:
+    """git subcommands that only look. Global options (-C, -c, --no-pager ...) are not accepted: -c can
+    point a hook or pager at any program."""
+    if not args:
+        return False
+    sub, rest = args[0], args[1:]
+    if sub in {"status", "ls-files", "rev-parse", "describe", "blame"}:
+        return True
+    if sub in {"diff", "log", "show"}:
+        return not any(a == "--output" or a.startswith("--output=") or a == "--ext-diff" for a in rest)
+    if sub == "branch":
+        listing, named, i = False, False, 0
+        while i < len(rest):
+            arg = rest[i]
+            name = arg.partition("=")[0]
+            if arg in ("--list", "-l"):
+                listing = True
+            elif name in _GIT_BRANCH_VALUE:
+                i += 0 if "=" in arg else 1
+            elif arg in _GIT_BRANCH_LIST or arg.startswith(("--color", "--column", "--abbrev")):
+                pass
+            elif arg.startswith("-"):
+                return False                         # -d, -D, -m, -M, -c, -C, -f, -u, --set-upstream-to ...
+            else:
+                named = True                         # a name creates a branch unless listing
+            i += 1
+        return listing or not named
+    if sub == "remote":
+        while rest and rest[0] in ("-v", "--verbose"):
+            rest = rest[1:]
+        if not rest:
+            return True
+        if rest[0] == "show":
+            return all(a == "-n" or not a.startswith("-") for a in rest[1:])
+        if rest[0] == "get-url":
+            return all(a in ("--push", "--all") or not a.startswith("-") for a in rest[1:])
+        return False                                 # add, remove, rename, set-url, prune, update ...
+    return False
+
+
+# Read verbs that can also write, run or change something, and what makes one of their calls a read.
+_READ_CHECKS = {
+    "sed": _sed_read,
+    "awk": _awk_read,
+    "find": _find_read,
+    "git": _git_read,
+    "date": _date_read,
+    "sort": lambda a: _options(a, short="bdfghiMnrRsuVzcCm", short_value="ktS", long=_SORT_LONG,
+                               long_value=_SORT_VALUE, long_optional=_long("check")) is not None,
+    "uniq": _uniq_read,
+    "tree": lambda a: _options(a, short="adfilxpsuhgDFqNQrtcUvCnASJX", short_value="LPIH", long=_TREE_LONG,
+                               long_value=_TREE_VALUE) is not None,
+    "file": lambda a: _options(a, short="bhiLkzZsNE0", short_value="mfeFP", long=_FILE_LONG,
+                               long_value=_FILE_VALUE) is not None,
+    "rg": lambda a: not any(x.startswith("--pre") for x in a),
+    "less": lambda a: not any(x.startswith(("-", "+")) for x in a),
+    "more": lambda a: not any(x.startswith(("-", "+")) for x in a),
+}
 
 
 def shell_read_only(command: str) -> bool:
-    """Every segment of `command` is a read: an allow-listed verb (cd/ls/cat/grep/sed -n/
-    awk without output/git status...), no redirection into a file, no in-place edit flag.
-    A verb not on the list is NOT a read. Used by the progress guard (fix #46); a
-    conservative classifier, never evidence of containment."""
+    """Every segment of `command` only reads. Conservative by construction, because a contained
+    read-only command runs without asking in every mode but plan (fix #41): a verb must be on the read
+    list; a read verb that can also write (find, sed, awk, sort, uniq, tree, date, file, git, rg, less)
+    must use only its reading forms, and an option it does not know counts as writing; any output
+    redirection (> >> >| >& &> <>, 2>/dev/null included), substitution ($( ` <( >() or sudo makes the
+    command not a read. Also used by the progress guard (fix #46) and the half-cost rounds (fix #17);
+    never evidence of containment."""
+    if any(s in command for s in _SUBSTITUTION):
+        return False                                 # a substitution runs a command of its own
     try:
+        tokens = list(_shell_lexer(command))
         parts = _shell_parts(command)
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>\n")
-        lexer.whitespace = " \t\r"
-        lexer.whitespace_split = True
-        redirected = any(token and set(token) <= set("<>&") and ">" in token for token in lexer)
     except ValueError:
         return False
-    if not parts or redirected:      # `>` as a shell token, not inside a quoted awk/grep program
-        return False
+    if not parts or any(token and set(token) <= set(";&|()<>\n") and ">" in token for token in tokens):
+        return False                                 # `>` as a shell operator, not inside a quoted program
     for words in parts:
         verb = words[0]
-        if verb in {"sudo", "env", "command", "nice", "time", "timeout"}:
+        if verb in {"env", "command", "nice", "time", "timeout"}:
             words = words[1:]
             while words and (words[0].startswith("-") or "=" in words[0]) and verb in {"env", "timeout", "nice"}:
                 words = words[1:]
             if not words:
                 return False
             verb = words[0]
-        args = words[1:]
-        if verb == "sed":
-            if any(a == "-i" or (a.startswith("-") and not a.startswith("--") and "i" in a[1:]) or a.startswith("--in-place") for a in args):
+        check = _READ_CHECKS.get(verb)
+        if check is not None:
+            if not check(words[1:]):
                 return False
-            continue
-        if verb == "awk":
-            if any(a in {">", ">>"} for a in args):
-                return False
-            continue
-        if verb == "git":
-            if not args or args[0] not in _READ_GIT:
-                return False
-            continue
-        if verb in {"perl", "python", "python3", "node", "ruby", "bash", "sh", "zsh", "xargs", "tee"}:
-            return False
-        if verb not in _READ_VERBS:
+        elif verb not in _READ_VERBS:
             return False
     return True
 

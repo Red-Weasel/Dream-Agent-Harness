@@ -63,14 +63,16 @@ class SteeringInbox:
             self.emit(public)
         return public
 
-    async def submit(self, text: str, identifier: str):
+    async def submit(self, text: str, identifier: str, *, origin: str | None = None):
+        """`origin`: a note Dream wrote itself (core/turn_origin.py), logged with that marker; None for the
+        owner's correction."""
         if not isinstance(identifier, str) or not re.fullmatch(r'[a-f0-9]{32}', identifier):
             raise ValueError('Steering receipt ID is invalid.')
         if not isinstance(text, str) or not text.strip() or len(text) > 64000:
             raise ValueError('Steering requires 1–64000 characters.')
-        return await finish_owned(self._submit(text, identifier))
+        return await finish_owned(self._submit(text, identifier, origin))
 
-    async def _submit(self, text, identifier):
+    async def _submit(self, text, identifier, origin=None):
         async with self._lock:
             previous = self.receipts.get(identifier)
             if previous:
@@ -81,14 +83,17 @@ class SteeringInbox:
                 raise ValueError('Steering is closed for this turn. Your draft was not queued; send it when ready.')
             if len(self.receipts) >= 32:
                 raise ValueError('This turn already has 32 steering receipts.')
-            receipt = {'id': identifier, 'text': text, 'status': 'pending', 'user_turn_id': None}
+            receipt = {'id': identifier, 'text': text, 'status': 'pending', 'user_turn_id': None,
+                       # Dream's own note says so in every notice, so the chat pane never shows it as the owner's.
+                       **({'origin': origin} if origin else {})}
             staged = {**self.receipts, identifier: receipt}
             # The receipt itself preserves the text even if session logging fails.
             await asyncio.to_thread(self._save, staged)
             self.receipts = staged
             def capture():
                 try:
-                    self.log_turn('user', text, on_commit=lambda turn_id: receipt.update(user_turn_id=turn_id))
+                    self.log_turn('user', text, **({'tool_name': origin} if origin else {}),
+                                  on_commit=lambda turn_id: receipt.update(user_turn_id=turn_id))
                 except Exception as exc:
                     receipt['warning'] = f'Session logging failed ({type(exc).__name__}); correction is saved in its receipt.'
                     if receipt['user_turn_id'] is None:

@@ -103,6 +103,9 @@ class RunMeter:
             self.record("tool_started", tool=name)
 
     def usage(self, usage: dict, phase: str = "lead") -> None:
+        """A backend may add ``head_hash`` to the usage it reports (Dream fix #38): 12 hex of that
+        request's head (system text + tools JSON). A prefix-cached engine reuses nothing past a byte
+        that differs there, so a head_hash that changes beside ``cached_tokens`` 0 names the cause."""
         incoming = int(usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0)
         outgoing = int(usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0)
         cache = int(usage.get("cache_read_input_tokens") or (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
@@ -116,7 +119,9 @@ class RunMeter:
             p["requests"] += 1
             p["prompt_tokens"] += incoming
             p["output_tokens"] += outgoing
-            self.record("usage", phase=phase, input_tokens=incoming, output_tokens=outgoing, cached_tokens=cache)
+            head = {"head_hash": usage["head_hash"]} if isinstance(usage.get("head_hash"), str) else {}
+            self.record("usage", phase=phase, input_tokens=incoming, output_tokens=outgoing, cached_tokens=cache,
+                        **head)
 
     def record(self, kind: str, **metadata) -> None:
         if self.path is None:
