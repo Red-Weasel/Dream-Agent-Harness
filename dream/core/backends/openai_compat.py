@@ -385,6 +385,76 @@ def _lease_holder(record: dict | None) -> str:
     return record["request_id"][:8] + (f" ({', '.join(about)})" if about else "")
 
 
+# Vital signs (DREAM-135): MachX, asked with "ie_vitals": true, adds `ie_vitals` to a chunk about every 16
+# tokens and `ie_vitals_summary` beside the usage (vitals_window_json / vitals_summary_json in the engine's
+# openai_proto.cpp). Display and logging only. A field that is missing, of the wrong type, negative, not finite or
+# too large for a float is left out, never read as 0; the parser is total (it returns, it does not raise).
+_VITALS_WINDOW = {"n": int, "H_mean": float, "H_max": float, "margin_min": float, "n_hi": int}
+_VITALS_SUMMARY = {"tokens": int, "H_mean": float, "n_hi": int, "draft_offered": int, "draft_accepted": int,
+                   "cached_tokens": int, "prefill_ms": float, "restore_ms": float, "decode_tps": float}
+
+
+def _vital_number(value: Any, kind: type) -> int | float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:                                  # an int past float range (a valid JSON 1e400 integer) overflows here
+        number = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    if kind is int:
+        return int(value) if number == int(number) else None
+    return number
+
+
+def _cache_source(value: Any) -> str | None:
+    """The engine names it "none", "live", "prompt end", "slot <id>" (others: "host slot", "checkpoint"):
+    any short printable text is kept as it came."""
+    return value if isinstance(value, str) and 0 < len(value) <= 32 and value.isprintable() else None
+
+
+def _vitals(raw: Any, fields: dict[str, type]) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    out = {k: v for k, kind in fields.items() if (v := _vital_number(raw.get(k), kind)) is not None}
+    draft = raw.get("draft")
+    if isinstance(draft, dict):
+        for k in ("offered", "accepted"):
+            if (v := _vital_number(draft.get(k), int)) is not None:
+                out[f"draft_{k}"] = v
+    if fields is _VITALS_SUMMARY and (source := _cache_source(raw.get("cache_source"))):
+        out["cache_source"] = source
+    return out or None
+
+
+def _vitals_or_none(raw: Any, fields: dict[str, type]) -> dict[str, Any] | None:
+    """A reading that cannot be parsed is dropped, never the turn (gate round 1 of DREAM-135)."""
+    try:
+        return _vitals(raw, fields)
+    except Exception:
+        _LOG.debug("vitals reading dropped", exc_info=True)
+        return None
+
+
+def _fold_vitals(windows: list[dict[str, Any]]) -> dict[str, Any]:
+    """One request's windows as one runtime-log record: token-weighted mean H, the extremes, the sums."""
+    folded: dict[str, Any] = {"windows": len(windows), "tokens": sum(w.get("n", 0) for w in windows)}
+    weighted = [(w["H_mean"], w.get("n", 0)) for w in windows if "H_mean" in w]
+    if sum(n for _, n in weighted):
+        mean = sum(h * n for h, n in weighted) / sum(n for _, n in weighted)
+        if math.isfinite(mean):          # finite inputs can still overflow to inf in the product
+            folded["H_mean"] = mean
+    for key, pick in (("H_max", max), ("margin_min", min)):
+        seen = [w[key] for w in windows if key in w]
+        if seen:
+            folded[key] = pick(seen)
+    for key in ("n_hi", "draft_offered", "draft_accepted"):
+        if any(key in w for w in windows):
+            folded[key] = sum(w.get(key, 0) for w in windows)
+    return folded
+
+
 def _raise_server_error(data: Any) -> None:
     if isinstance(data, dict) and data.get("error") is not None:
         raise _ServerGenerationError(data["error"])
@@ -4089,6 +4159,8 @@ class OpenAICompatBackend(Backend):
                 # the call itself still arrives structured at the end, and a server that
                 # doesn't know the field ignores it.
                 payload["stream_tool_preview"] = True
+                # Vital signs (DREAM-135): MachX only -- another server could reject a field it does not know.
+                payload["ie_vitals"] = True
             if self.profile or self._local_options or self.capability_status()['context_tokens']['known']:
                 try:
                     payload["max_tokens"] = self._admit_request(self.messages, payload["tools"]).output
@@ -4113,6 +4185,8 @@ class OpenAICompatBackend(Backend):
             usage = None
             response_id = None      # the engine's id for this reply (chatcmpl-N), for the runtime log
             timings = None
+            vital_windows: list[dict[str, Any]] = []
+            vital_summary: dict[str, Any] | None = None
             finish_reason: str | None = None
             t_req = time.monotonic()
             t_first: float | None = None
@@ -4129,6 +4203,14 @@ class OpenAICompatBackend(Backend):
                         first_text=t_text - t_req if t_text is not None else None,
                         usage=usage, server_timings=timings,
                         schema_fingerprint=self._schema_fingerprint(payload["tools"]), configuration=measurement)
+
+            def record_vitals():
+                # One runtime-log line per request that carried readings (DREAM-135).
+                nonlocal vital_windows, vital_summary
+                if self.runtime_meter is not None and (vital_windows or vital_summary):
+                    self.runtime_meter.record("vitals", response_id=response_id, **_fold_vitals(vital_windows),
+                                              **({"summary": vital_summary} if vital_summary else {}))
+                vital_windows, vital_summary = [], None
             try:
                 async with self._stream_with_retry(payload) as resp:
                     inbox = getattr(self, 'steering_inbox', None)
@@ -4150,6 +4232,13 @@ class OpenAICompatBackend(Backend):
                             usage = chunk["usage"]
                         if chunk.get("timings"):
                             timings = chunk["timings"]
+                        if "ie_vitals" in chunk and (window := _vitals_or_none(chunk["ie_vitals"], _VITALS_WINDOW)):
+                            vital_windows.append(window)
+                            yield Event("vitals", {"window": window})
+                        if "ie_vitals_summary" in chunk and (
+                                summary := _vitals_or_none(chunk["ie_vitals_summary"], _VITALS_SUMMARY)):
+                            vital_summary = summary
+                            yield Event("vitals", {"summary": summary})
                         from ..inference_coordination import primary_choice
                         choice = primary_choice(chunk)
                         if choice is None:
@@ -4225,6 +4314,7 @@ class OpenAICompatBackend(Backend):
                 return
             finally:
                 record_request()
+                record_vitals()
 
             t_end = time.monotonic()
             round_stats: dict[str, Any] | None = None

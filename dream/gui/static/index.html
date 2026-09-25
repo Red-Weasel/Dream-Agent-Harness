@@ -163,6 +163,18 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
 #railtoggle:hover,.tabs button:hover{color:var(--fg);border-color:var(--violet)}
 .tabs{display:flex;gap:6px;margin:0 0 11px}
 .tabs button.on{color:var(--fg);border-color:var(--violet);background:#1b1630}
+/* vital signs (DREAM-135): a monitoring card in the rail, never in the chat; no alarm colour while uncalibrated */
+#vitals .rail-h small{font-weight:400;letter-spacing:0;text-transform:none}
+#vitals .vt-row{position:relative;cursor:help;outline:none;border-radius:4px}
+#vitals .vt-row[hidden]{display:none}
+#vitals .vt-row b{white-space:nowrap;padding-left:8px}
+#vitals .vt-row:focus-visible{box-shadow:0 0 0 1px var(--cyan)}
+#vitals .vt-tip{display:none;position:absolute;left:0;right:0;top:100%;z-index:5;margin-top:3px;padding:6px 8px;
+  background:var(--bg);border:1px solid var(--line);border-radius:6px;color:var(--dim);font-size:10px;line-height:1.45}
+#vitals .vt-row:hover .vt-tip,#vitals .vt-row:focus .vt-tip{display:block}
+#vitals .vt-spark{display:flex;align-items:flex-end;gap:2px;height:22px;margin-top:8px}
+#vitals .vt-spark i{flex:1;min-height:2px;background:var(--violet);opacity:.75;border-radius:1px}
+#vitals .vt-spark i.none{background:var(--line)}
 
 /* checkpoints */
 .cp{background:var(--panel);border:1px solid var(--line);border-radius:9px;
@@ -329,7 +341,20 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
       <button id="tab-undo">undo</button>
       <button id="tab-design">design</button>
     </div>
-    <div id="railbody"><div class="kv" style="color:var(--faint)">waiting for a sample…</div></div>
+    <div id="railbody">
+    <section id="vitals" aria-labelledby="vitals-h" hidden>
+      <div class="rail-h" id="vitals-h">vitals <small>(learning)</small></div>
+      <div class="card">
+      <div class="kv vt-row" data-vital="certainty" role="group" tabindex="0" aria-label="Certainty" aria-describedby="vt-tip-certainty" hidden><span>Certainty</span><b></b><span class="vt-tip" role="tooltip" id="vt-tip-certainty">How sure the model was of the words it picked this turn, from the engine&#39;s per-token spread: unsure spots are where mistakes tend to cluster, and the cut-offs are not calibrated yet (learning).</span></div>
+      <div class="kv vt-row" data-vital="drafts" role="group" tabindex="0" aria-label="Drafter hits" aria-describedby="vt-tip-drafts" hidden><span>Drafter hits</span><b></b><span class="vt-tip" role="tooltip" id="vt-tip-drafts">The share of the fast drafter&#39;s guessed tokens the model kept this turn: a low share means it is writing something the context does not predict, which is also slower.</span></div>
+      <div class="kv vt-row" data-vital="reuse" role="group" tabindex="0" aria-label="Context reused" aria-describedby="vt-tip-reuse" hidden><span>Context reused</span><b></b><span class="vt-tip" role="tooltip" id="vt-tip-reuse">How much of the last request&#39;s prompt the engine took from its cache instead of reading it again: a full re-read costs time and usually follows a compaction or a change early in the history.</span></div>
+      <div class="kv vt-row" data-vital="thinking" role="group" tabindex="0" aria-label="Thinking since last action" aria-describedby="vt-tip-thinking" hidden><span>Thinking since last action</span><b></b><span class="vt-tip" role="tooltip" id="vt-tip-thinking">Reasoning written since the model last called a tool, estimated at four characters a token: a long stretch without acting can mean it is going round in circles.</span></div>
+      <div class="kv vt-row" data-vital="speed" role="group" tabindex="0" aria-label="Speed" aria-describedby="vt-tip-speed" hidden><span>Speed</span><b></b><span class="vt-tip" role="tooltip" id="vt-tip-speed">How fast the last request generated tokens: a drop can mean a long context or a busy GPU.</span></div>
+      <div class="vt-spark" role="img" aria-label="Unsureness over the last turns" title="Unsureness per turn, the last 12 turns: a taller bar is a turn where the model was less sure."></div>
+      </div>
+    </section>
+    <div id="telemetry"><div class="kv" style="color:var(--faint)">waiting for a sample…</div></div>
+    </div>
     <div id="undobody" style="display:none"></div>
     <div id="designbody" style="display:none"></div>
   </aside>
@@ -492,6 +517,7 @@ function handle(m){
   syncFeedPosition();
   const replay = replayOnConnect;
   if(!['hello','history','permission'].includes(m.kind) && !replayingHistory) replayOnConnect = false;
+  try{ vitalsFeed(m.kind, m.data); }catch(e){ console.error(e); }   // a monitor never stops the chat
   if(COMPANION && ['text_delta', 'thinking_delta', 'tool_use', 'tool_preview'].includes(m.kind)) busy(true);
   switch(m.kind){
     case 'project_view_reset': {
@@ -909,7 +935,7 @@ input.addEventListener('keydown', e => {
 /* ---------- telemetry rail ---------------------------------------------- */
 // Polled, not pushed: a sensor read has nothing to do with whether the model
 // happens to be talking, and shouldn't stall when it isn't.
-const rail = $('rail'), railbody = $('railbody');
+const rail = $('rail'), railbody = $('railbody'), telemetrybody = $('telemetry');
 $('railtoggle').onclick = () => rail.classList.toggle('hide');
 
 const n1 = v => (v == null ? null : (+v).toFixed(1));
@@ -936,7 +962,7 @@ function gpuCard(d){
 
 function renderTelemetry(t){
   if(!t || t.available === false){
-    railbody.innerHTML = `<div class="rail-h">telemetry</div>
+    telemetrybody.innerHTML = `<div class="rail-h">telemetry</div>
       <div class="kv" style="color:var(--faint)">${esc(t && t.error ? t.error : 'unavailable')}</div>`;
     return;
   }
@@ -967,7 +993,73 @@ function renderTelemetry(t){
     html += `<div class="rail-h" style="margin-top:14px">gpu</div>
       <div class="kv" style="color:var(--faint)">${esc(g.reason || 'no devices')}</div>`;
   }
-  railbody.innerHTML = html;
+  telemetrybody.innerHTML = html;
+}
+
+/* ---------- vital signs (DREAM-135) -------------------------------------- */
+// A monitoring card only: the readings the local engine streams (`vitals` events) beside what Dream already
+// sees (stats, thinking, tool calls). It never writes to the chat and never steers; hidden until a reading
+// arrives, so other providers never show it. The cut-offs are uncalibrated: "(learning)", no alarm colour.
+const vitals = {seen: false, session: undefined, turn: null, history: [], think: 0, stats: null, summary: null};
+const kTok = n => n >= 1000 ? `${Math.round(n / 1000)}k` : String(Math.round(n));
+// A number fit to show, else null: the backend already drops junk, the page guards again (no "NaN tok/s").
+const vnum = v => typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
+function vitalsFeed(kind, d){
+  if(kind === 'hello'){
+    if(d?.session_id !== vitals.session)
+      Object.assign(vitals, {seen: false, session: d?.session_id, turn: null, history: [], think: 0, stats: null, summary: null});
+  } else if(replayingHistory) return;
+  else if(kind === 'user'){
+    if(vitals.turn) vitals.history = [...vitals.history, vitals.turn].slice(-12);
+    Object.assign(vitals, {turn: null, think: 0, stats: null, summary: null});
+  }
+  else if(kind === 'thinking_delta') vitals.think += String(d ?? '').length;
+  else if(kind === 'tool_use') vitals.think = 0;
+  else if(kind === 'stats') vitals.stats = d || null;
+  else if(kind === 'vitals'){
+    vitals.seen = true;
+    const w = d?.window;
+    if(w){
+      const t = vitals.turn ||= {tokens: 0, hSum: 0, hTok: 0, nHi: 0, offered: 0, accepted: 0}, n = vnum(w.n) || 0;
+      t.tokens += n;
+      if(vnum(w.H_mean) != null && n){ t.hSum += w.H_mean * n; t.hTok += n; }
+      t.nHi += vnum(w.n_hi) || 0; t.offered += vnum(w.draft_offered) || 0; t.accepted += vnum(w.draft_accepted) || 0;
+    }
+    if(d?.summary) vitals.summary = d.summary;
+  } else return;
+  renderVitals();
+}
+function renderVitals(){
+  const card = $('vitals');
+  card.hidden = !vitals.seen;
+  if(!vitals.seen) return;
+  const t = vitals.turn, s = vitals.summary || {}, st = vitals.stats || {};
+  const set = (name, text) => {
+    const row = card.querySelector(`[data-vital="${name}"]`);
+    row.hidden = text == null;
+    if(text == null) return;
+    row.querySelector('b').textContent = text;
+    row.setAttribute('aria-label', `${row.firstElementChild.textContent}: ${text}`);
+  };
+  const h = t && t.hTok ? t.hSum / t.hTok : null;
+  // No window with an entropy (greedy decoding): unknown, not "steady".
+  set('certainty', !t ? null : t.nHi > 0 ? `unsure spots: ${t.nHi}` : h == null || !Number.isFinite(h) ? 'n/a'
+    : h >= 1 ? 'mixed' : 'steady');
+  const offered = t?.offered || vnum(s.draft_offered) || 0;
+  const accepted = t?.offered ? t.accepted : (vnum(s.draft_accepted) || 0);
+  set('drafts', offered ? `${Math.round(accepted * 100 / offered)}% (${accepted}/${offered})` : null);
+  const prompt = vnum(st.prompt_tokens) ?? vnum(st.pp_n), cached = vnum(st.cached) ?? vnum(s.cached_tokens) ?? 0;
+  set('reuse', !prompt ? null : !cached && prompt >= 1000 ? `full re-read: ${kTok(prompt)} tokens` : `${kTok(cached)} of ${kTok(prompt)}`);
+  const think = Math.round(vitals.think / 4);
+  set('thinking', think ? `~${think >= 1000 ? (think / 1000).toFixed(1) + 'k' : think} tokens` : 'none');
+  const tps = vnum(s.decode_tps) ?? (vnum(st.gen_ms) > 0 && vnum(st.gen_n) ? vnum(st.gen_n * 1000 / st.gen_ms) : null);
+  set('speed', tps != null ? `${tps.toFixed(1)} tok/s` : null);
+  const turns = [...vitals.history, ...(t ? [t] : [])].slice(-12).map(x => x.hTok && Number.isFinite(x.hSum / x.hTok) ? x.hSum / x.hTok : null);
+  const top = Math.max(1, ...turns.filter(v => v != null)), spark = card.querySelector('.vt-spark');
+  spark.innerHTML = turns.map(v => v == null ? '<i class="none" style="height:10%"></i>'
+    : `<i style="height:${Math.max(10, Math.round(v / top * 100))}%"></i>`).join('');
+  spark.setAttribute('aria-label', `Unsureness over the last ${turns.length} turn${turns.length === 1 ? '' : 's'}: `
+    + turns.map(v => v == null ? 'no reading' : v.toFixed(2)).join(', '));
 }
 
 async function pollTelemetry(){
