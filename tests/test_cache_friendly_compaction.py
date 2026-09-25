@@ -98,7 +98,8 @@ async def test_it_fires_before_the_line_when_the_history_is_mostly_pictures():
 async def test_the_compaction_event_says_what_it_aimed_at_in_the_engines_tokens():
     engine, b = session(1.5)
     await turn(b)
-    fields = next(f for e, f in b.runtime_meter.records if e == "compaction")
+    # the fill trigger's record (DREAM-126: admission and phase compactions record `compaction` with other fields)
+    fields = next(f for e, f in b.runtime_meter.records if e == "compaction" and f["source"] == "window")
     assert fields["bound"] > LINE >= fields["projected"] and fields["target"] == TARGET
     assert fields["fill"] <= fields["bound"]                   # the plain estimate, and the one taken high
     assert fields["projected"] <= TARGET and fields["before"] > fields["after"]    # raw estimates kept too
@@ -311,7 +312,9 @@ async def test_a_small_window_compacts_at_its_line(window, every, count, price):
     engine, b = small_session(window, every, count, price, 120)
     await turn(b)
     lead = [r["prompt_tokens"] for r in engine.requests if r["kind"] == "lead"]
-    fired = [round(f["fill"] / line, 3) for e, f in b.runtime_meter.records if e == "compaction"]
+    # where the fill trigger fired (DREAM-126: admission/phase compactions are other triggers, without `fill`)
+    fired = [round(f["fill"] / line, 3) for e, f in b.runtime_meter.records
+             if e == "compaction" and f["source"] == "window"]
     assert fired and max(lead) <= line, (fired, max(lead))
     assert all(x >= 0.9 for x in fired), fired            # at its line, not 4,096 tokens an image early
 
@@ -464,7 +467,7 @@ async def test_the_first_cut_reserves_for_a_template_dearer_than_mimos(size):
                 system="Dream. " * 2000)
     b.runtime_meter = Meter()
     await turn(b)
-    first = next(f for e, f in b.runtime_meter.records if e == "compaction")
+    first = next(f for e, f in b.runtime_meter.records if e == "compaction" and f["source"] == "window")
     landed = [r["prompt_tokens"] for r in landings(engine)]
     assert landed and landed[0] <= BIG_TARGET, (landed, BIG_TARGET)
     assert first["projected"] <= BIG_TARGET * 0.99 and first["template_tokens"] == 4.0, first

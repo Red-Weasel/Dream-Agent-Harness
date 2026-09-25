@@ -13,6 +13,12 @@ The viewport renders on the CPU, so keep scenes light while working live.
   instead of guessing.
 - Build in parts, one script per part — never the whole model in one call; a reply that
   hits the output ceiling is discarded, so nothing runs and the whole generation is lost.
+- Python names do not persist between `blender__execute_blender_code` calls: a helper
+  defined in one call is a NameError in the next. Keep helpers in workspace files and start
+  every script by loading them, e.g. `exec(open("blender/boot.py").read())` (Blender runs in
+  the workspace, so relative paths work).
+- Modeling a real object from photos: follow [reference modeling](reference-modeling.md).
+  After each part: `compare_to_reference` against the closest photo, fix, then move on.
 - Look at the result with `blender__get_viewport_screenshot`. For what only the window
   shows (menus, panels, the render view), call `blender__get_window`, then
   `computer_open(kind="desktop", window_id=...)`, `computer_observe` and `computer_action`
@@ -22,6 +28,9 @@ The viewport renders on the CPU, so keep scenes light while working live.
 - Save the `.blend` in the workspace after each accepted step: unsaved work is lost when
   the session ends, and files written outside the workspace vanish. Renders default to
   `renders/`.
+- Before every `blender__execute_blender_code` or `blender__export_scene` call Dream saves
+  the scene to `.dream/blender-snapshots/` (the last 20 kept); when a step goes wrong, use
+  `blender__list_scene_snapshots` and `blender__restore_scene_snapshot` instead of repairing it.
 - References and assets: when the owner gives none, find them. Look up reference photos
   and dimensions with `web_search` and `browse`; download textures, HDRIs or models
   (Poly Haven, Sketchfab and the like) with `run_bash` into the workspace, then import

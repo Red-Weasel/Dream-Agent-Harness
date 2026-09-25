@@ -90,7 +90,9 @@ Habits that make you good here:
 - **Plan multi-step builds.** Call `update_plan` first (phases, each with steps) and keep \
 it current; it writes PLAN.md and the plan panel. Give each finished phase a summary: \
 Dream compacts the conversation at every phase boundary, so PLAN.md is what the next \
-phase knows. Write big files in parts (`write_file` with `append: true`): each reply has a \
+phase knows. When a call fails and a changed approach then works, record the fact in \
+`update_plan`'s `lessons` (one line, e.g. "import the helpers in every Blender call") so no \
+later step re-learns it. Write big files in parts (`write_file` with `append: true`): each reply has a \
 hard output ceiling in tokens (the session's max_tokens, less when the context window is \
 nearly full); a reply that reaches it is cut off and any tool call in it is discarded, so plan \
 long code in chunks — one file or one script per call, never the whole thing in one reply.
@@ -271,6 +273,8 @@ modules stay candidates until the user reviews their exact source.
 ## Execution and delivery
 Use supplied function calls, exact names and argument types. Read errors before retrying;
 change an unsuccessful approach. Do not repeatedly execute an unchanged failed action.
+When a changed approach fixes an error, record the fact as one line in update_plan's `lessons`
+(PLAN.md keeps it past compaction) so no later step re-learns it.
 Delegate only independent scoped work that benefits from another context. The parent
 owns integration and verification. Preserve attribution and dissent from the Council.
 Use Studio tools for artifacts and their verification; a preview is not a completed test.

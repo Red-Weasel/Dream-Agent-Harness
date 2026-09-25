@@ -109,10 +109,19 @@ button{background:var(--grad);border:0;border-radius:8px;color:#0b0d12;font:600 
   padding:8px 15px;cursor:pointer;flex:0 0 auto}
 button:disabled{opacity:.35;cursor:default}
 .hint{max-width:860px;margin:7px auto 0;color:var(--faint);font:10.5px var(--mono);display:flex;gap:16px}
-#plan-panel{position:sticky;top:0;z-index:5;max-width:860px;margin:8px auto 4px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px 12px;font:12.5px/1.5 var(--sans, sans-serif);color:var(--fg)}
-#plan-panel summary{cursor:pointer;color:var(--dim)}
-#plan-panel ol{margin:6px 0 2px;padding-left:4px;list-style:none}
+/* The project's plan (update_plan): a one-line strip left of the prompt box (#88); its phases open in a popover above it; stale after 30 minutes without an update (#89). */
+#plan-panel{position:relative;flex:0 1 auto;min-width:0;max-width:45%;padding-bottom:5px;font:12.5px/1.5 var(--sans, sans-serif);color:var(--fg)}
+#plan-panel summary{cursor:pointer;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#plan-panel summary:hover,#plan-panel[open] summary{color:var(--fg)}
+#plan-panel.stale summary{color:#f59e0b}
+#plan-panel ol{position:absolute;left:0;bottom:calc(100% + 12px);z-index:6;min-width:260px;max-width:min(440px,86vw);max-height:50vh;overflow:auto;margin:0;padding:8px 12px;list-style:none;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
 #plan-panel ul{margin:2px 0 4px 18px;padding:0;list-style:none;color:var(--dim)}
+/* The desktop pane (480 px) has no room left of the prompt box: there the strip takes its own line directly above it, inside the composer; from 1000 px (the companion's side-by-side mode) it sits left of the box as in the browser. */
+.companion .composer{flex-wrap:wrap}
+.companion #plan-panel{order:-1;flex-basis:100%;max-width:none;padding-bottom:0}
+@media (min-width:1000px){.companion #plan-panel{order:0;flex-basis:auto;max-width:45%;padding-bottom:5px}}
+/* A narrow browser window (below 760 px) has no room either: the same own-line placement. At 45 % the busy row (Queue + Steer) leaves the textarea 150 px only from ~745 px. */
+@media (max-width:759px){.composer{flex-wrap:wrap} #plan-panel{order:-1;flex-basis:100%;max-width:none;padding-bottom:0}}
 #plan-panel .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;border:1.5px solid #6b7280}
 #plan-panel .done > .dot, #plan-panel .done > div > .dot{background:#22c55e;border-color:#22c55e}
 #plan-panel .in_progress > .dot, #plan-panel .in_progress > div > .dot{background:#f59e0b;border-color:#f59e0b}
@@ -313,7 +322,7 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
 </header>
 
 <div class="split">
-  <main id="main"><details id="plan-panel" hidden></details><div class="wrap" id="stream"></div></main>
+  <main id="main"><div class="wrap" id="stream"></div></main>
   <aside id="rail">
     <div class="tabs">
       <button id="tab-metrics" class="on">metrics</button>
@@ -346,6 +355,7 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
 <footer>
   <div id="mention" class="mention" style="display:none"><span id="mentiontext"></span><button id="mentionclear" title="clear">&times;</button></div>
   <div class="composer">
+    <details id="plan-panel" hidden></details>
     <textarea id="input" rows="1" placeholder="Ask Dream…  (this drives the same session as the terminal)"></textarea>
     <button id="send">Send</button>
     <button id="steer" hidden title="Ordinary HTTP chat: send a correction at the next model request after current tools finish. Native agents and autonomous runs use the after-turn queue.">Steer</button>
@@ -732,17 +742,33 @@ async function freshStart(){
   finally{ if(b) b.disabled = working; }
 }
 document.addEventListener('click', e => { if(e.target.closest?.('#fresh-start')) freshStart(); });
-// The project's phased plan (update_plan), pinned above the chat.
+// The project's phased plan (update_plan): a one-line strip left of the prompt box, collapsed by default, the
+// phases in a popover on click (#88), with the age of the last update, stale after 30 minutes (#89). The age
+// comes from the plan event's updated_at (the write's time); a reload replays the retained event.
+const PLAN_STALE_MS = 30 * 60 * 1000;
+let planUpdatedAt = 0;
+function planAge(){
+  const el = $('plan-panel'), age = el.querySelector('.age');
+  if(!age || !planUpdatedAt) return;
+  const ms = Date.now() - planUpdatedAt, min = Math.floor(ms / 60000);
+  age.textContent = min < 1 ? 'updated just now' : min < 60 ? `updated ${min} min ago`
+    : `updated ${Math.floor(min / 60)} h ${min % 60} min ago`;
+  el.classList.toggle('stale', ms >= PLAN_STALE_MS);
+}
+setInterval(planAge, 60000);
 function renderPlan(plan){
   const el = $('plan-panel'), phases = (plan && plan.phases) || [];
   if(!phases.length){ el.hidden = true; return; }
   const steps = phases.flatMap(p => p.steps || []), done = steps.filter(s => s.status === 'done').length;
   const current = phases.findIndex(p => p.status !== 'done');
-  const wasOpen = el.hidden ? true : el.open;
+  const wasOpen = el.hidden ? false : el.open;
   el.replaceChildren();
   const head = document.createElement('summary');
-  head.textContent = `Plan${plan.title ? ': ' + plan.title : ''} — ` + (current < 0 ? `all ${phases.length} phases done`
-    : `phase ${current + 1} of ${phases.length}: ${phases[current].name}`) + ` · ${done}/${steps.length} steps`;
+  head.textContent = 'Plan · ' + (current < 0 ? `all ${phases.length} phases done` : `phase ${current + 1} of ${phases.length}`)
+    + ` · ${done}/${steps.length} steps`;
+  head.title = `Plan${plan.title ? ': ' + plan.title : ''}` + (current < 0 ? '' : ` — ${phases[current].name}`);
+  planUpdatedAt = Number(plan.updated_at) > 0 ? Number(plan.updated_at) * 1000 : 0;
+  if(planUpdatedAt){ const age = document.createElement('span'); age.className = 'age'; head.append(' · ', age); }
   el.append(head);
   const list = document.createElement('ol');
   phases.forEach((p, i) => {
@@ -760,7 +786,7 @@ function renderPlan(plan){
     if(p.summary && p.status === 'done'){ li.title = p.summary; }
     list.append(li);
   });
-  el.append(list); el.open = wasOpen; el.hidden = false;
+  el.append(list); el.open = wasOpen; el.hidden = false; planAge();
 }
 const turnFiles = new Map();
 function noteFile(name, input){

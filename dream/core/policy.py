@@ -102,12 +102,15 @@ _READ_ONLY = {
     # DREAM-109: live Blender's scene reads, viewport picture, API lookups and window id
     "blender__get_scene_info", "blender__get_object_info", "blender__get_viewport_screenshot",
     "blender__describe_node_type", "blender__bpy_api_lookup", "blender__get_window",
+    # DREAM-129: listing the scene snapshots
+    "blender__list_scene_snapshots",
 }
 # DREAM-109: live Blender's code and export tools. They run only inside the live-Blender
 # sandbox (dream.media.blender_live: the workspace read-write, no network, no host
 # fallback), and the server name "blender" is reserved for it (dream.mcp_client), so these
 # names cannot come from any other server.
-_CONTAINED = {"blender__execute_blender_code", "blender__export_scene"}
+_CONTAINED = {"blender__execute_blender_code", "blender__export_scene",
+              "blender__restore_scene_snapshot"}  # DREAM-129: reopens a scene snapshot
 # Dream editing its own long-term memory — internal cognition, always allowed.
 _MEMORY = {"remember", "note", "forget", "skill_save", "skill_patch",
            # the plan and the project's name are the session's own mind, not the world

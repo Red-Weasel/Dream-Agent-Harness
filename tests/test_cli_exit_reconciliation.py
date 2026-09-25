@@ -19,6 +19,7 @@ import pytest
 from dream.core.backends import cli_agent
 from dream.core.backends.base import Event
 from dream.core.backends.cli_agent import CliAgentBackend, CodexAdapter, adapter_for
+from dream.core.profiles import PROFILES
 
 
 def record(obj):
@@ -583,7 +584,10 @@ async def test_consolidation_does_not_retire_notes_or_trust_failed_summary(cli, 
     )
     monkeypatch.setattr(engine_module.curation, 'curate', lambda _: {})
     monkeypatch.setattr(engine_module.longterm, 'write_markdown', lambda _: None)
-    shell = SimpleNamespace(backend=backend, store=store, session_id='fixture', _log_stderr=logs.append)
+    # What consolidate() reads off a real Engine: the profile its own tool budget is cut from (DREAM-118),
+    # the turn its runtime events are filed under, the run meter it puts back, and the event funnel.
+    shell = SimpleNamespace(backend=backend, store=store, session_id='fixture', _log_stderr=logs.append,
+                            profile=PROFILES['lean'], _turn_index=1, runtime_meter=None, emit=None)
     summary = await Engine.consolidate(shell)
     assert summary == ('Fixture consolidation complete.' if rc == 0 else None)
     assert summaries == [summary]

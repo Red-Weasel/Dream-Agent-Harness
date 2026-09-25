@@ -32,6 +32,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -45,7 +46,28 @@ from ..core.execution import (_SUPERVISOR_PYTHON, ExecutionRefused, ExecutionSco
                               nested_display_argv)
 
 SERVER_NAME = "blender"
-BLENDER = Path("/usr/bin/blender")
+SOURCE = "(DREAM_BLENDER or the blender.binary runtime setting)"
+
+
+def _configured_blender() -> Path:
+    """DREAM-124: the Blender binary Dream is told to use -- DREAM_BLENDER, else the runtime setting
+    ``blender.binary`` (data/runtime-settings.json), else the system package. An official blender.org build
+    unpacked by root (/opt/blender-4.5.14-linux-x64/blender) has OpenImageDenoise. The path is resolved and
+    checked once (``_checked_blender``) and the resolved path is what is mounted and run. The sandbox still has
+    no /dev/dri: Cycles and the denoiser run on the CPU."""
+    if os.environ.get("DREAM_BLENDER"):
+        return Path(os.environ["DREAM_BLENDER"])
+    from ..core.profiles import read_settings
+    try:
+        section = read_settings().get("blender")
+    except ValueError:  # an unreadable settings file is reported where the profile loads, as follow_default does
+        section = None
+    if isinstance(section, dict) and "binary" in section:
+        return Path(str(section["binary"]))  # a value that is no absolute path is refused, not dropped
+    return Path("/usr/bin/blender")
+
+
+BLENDER = _configured_blender()
 XEPHYR = Path("/usr/bin/Xephyr")
 XWININFO = Path("/usr/bin/xwininfo")
 RUNTIME = Path(__file__).resolve().parent / "blender_mcp"
@@ -120,6 +142,45 @@ def _site_packages() -> Path | None:
     return Path(spec.origin).resolve().parent.parent
 
 
+def _blender_folder(blender: Path) -> Path | None:
+    """The folder of a Blender build outside the system trees, which the sandbox must mount, or None."""
+    folder = blender.resolve().parent
+    return None if any(folder == s or folder.is_relative_to(s) for s in _SYSTEM) else folder
+
+
+def _untrusted_in(folder: Path) -> Path | None:
+    """The first entry of ``folder`` (itself included) not owned by root or writable by group/others."""
+    for path in (folder, *folder.rglob("*")):
+        info = path.lstat()
+        if info.st_uid != 0 or (not stat.S_ISLNK(info.st_mode) and info.st_mode & 0o022):
+            return path
+    return None
+
+
+def _checked_blender() -> tuple[Path | None, str | None]:
+    """BLENDER resolved ONCE, then checked: (the resolved path to mount and run, None) or (None, why not).
+
+    Every component of a path that passes is root-owned and not writable by others, so it cannot be swapped
+    after the check; the unresolved name (a symlink in the workspace, say) never travels further."""
+    if not BLENDER.is_absolute():
+        return None, f"the Blender path {BLENDER} is not absolute; {SOURCE[1:-1]} must name one"
+    try:
+        real = BLENDER.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None, f"no Blender at {BLENDER} (root-owned, as the system package installs it)"
+    if not _trusted_system_file(real):
+        return None, (f"the Blender at {BLENDER} is not root-owned or can be changed by a user; "
+                      f"live Blender runs only a binary installed by root {SOURCE}")
+    folder = _blender_folder(real)
+    if folder is not None and len(folder.parts) < 3:
+        return None, (f"the Blender at {BLENDER} must sit in its own folder, "
+                      f"such as /opt/blender-4.5.14-linux-x64/blender {SOURCE}")
+    if folder is not None and (bad := _untrusted_in(folder)) is not None:
+        return None, (f"the Blender folder {folder} holds {bad}, which is not root-owned "
+                      f"or can be changed by a user; install the build as root {SOURCE}")
+    return real, None
+
+
 def _scope(workspace: Path) -> ExecutionScope:
     site = _site_packages()
     if site is None:
@@ -127,6 +188,8 @@ def _scope(workspace: Path) -> ExecutionScope:
     # Read-only: the bridge and add-on copy, and the Python packages the bridge imports.
     # A folder under /usr is already mounted; system trees cannot be read roots.
     roots = tuple(r for r in (RUNTIME, site) if not any(r == s or r.is_relative_to(s) for s in _SYSTEM))
+    if (folder := _blender_folder(BLENDER)) is not None:
+        roots += (folder,)  # a build under /opt: its binary, libraries and scripts, read-only
     scope = ExecutionScope(workspace, read_roots=roots)
     scope.validate()
     return scope
@@ -136,8 +199,8 @@ def unavailable(workspace: str | Path, display: str | None = None) -> str | None
     """Why live Blender cannot run for this workspace, or None when it can."""
     if sys.platform != "linux":
         return "it needs Linux"
-    if not _trusted_system_file(BLENDER):
-        return f"no Blender at {BLENDER} (root-owned, as the system package installs it)"
+    if (problem := _checked_blender()[1]) is not None:
+        return problem
     if not _trusted_system_file(XEPHYR):
         return f"no Xephyr at {XEPHYR} (the xserver-xephyr package), which live Blender draws into"
     if _bubblewrap_executable() is None:
@@ -156,14 +219,16 @@ def unavailable(workspace: str | Path, display: str | None = None) -> str | None
 def managed_servers(workspace: str | Path) -> tuple[list[dict], list[str]]:
     """The session's live-Blender MCP server entry, or no entry and the reason."""
     reason = unavailable(workspace)
-    if reason:
-        return [], [f"live Blender is off: {reason}"]
+    blender, problem = _checked_blender()  # the resolved path the launcher receives, checked again
+    if reason or problem:
+        return [], [f"live Blender is off: {reason or problem}"]
     display, _ = x11_display()
     return [{
         "name": SERVER_NAME,
         "command": sys.executable,
         "args": ["-I", "-m", "dream.media.blender_live",
-                 "--workspace", str(Path(workspace).resolve()), "--display", display],
+                 "--workspace", str(Path(workspace).resolve()), "--display", display,
+                 "--blender", str(blender)],
         "_dream_source": "Dream live Blender (DREAM-109)",
     }], []
 
@@ -264,6 +329,8 @@ def run(workspace: Path, display: str, *, background: bool = False) -> int:
     reason = unavailable(workspace, display)
     if reason:
         raise ExecutionRefused(reason)
+    if _checked_blender()[0] != BLENDER:  # Dream passes the resolved path; the launcher runs no other
+        raise ExecutionRefused(f"the launcher runs only a resolved Blender path, not {BLENDER}")
     display, _ = x11_display(display)
     scope = _scope(workspace)
     bwrap = _bubblewrap_executable()
@@ -299,12 +366,15 @@ def run(workspace: Path, display: str, *, background: bool = False) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global BLENDER
     parser = argparse.ArgumentParser(prog="python -I -m dream.media.blender_live",
                                      description="Run Dream's live Blender MCP server in its sandbox.")
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--display", required=True, help="the owner's display, where the nested window appears")
     parser.add_argument("--background", action="store_true", help="Blender without a window (tests)")
+    parser.add_argument("--blender", default=str(BLENDER), help="the resolved Blender binary, checked again here")
     args = parser.parse_args(argv)
+    BLENDER = Path(args.blender)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))  # clean up the display and folder on stop
     try:
         return run(Path(args.workspace), args.display, background=args.background)

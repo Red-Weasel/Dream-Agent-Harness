@@ -97,12 +97,41 @@ PHASE_DONE = "Phase complete:"
 _STATUSES = ("pending", "in_progress", "done")
 _MARK = {"done": "●", "in_progress": "◐", "pending": "○"}
 _LAST_PLAN: dict[str, dict[str, str]] = {}   # workspace -> phase name -> status last written
+# DREAM-123: facts learned the hard way (an environment limit, a tool quirk, a convention) kept in PLAN.md's
+# "## Lessons" section, which a compaction, a Fresh start and /resume carry to the model verbatim.
+LESSONS_HEADING = "## Lessons"
+LESSONS_MAX = 12        # lessons kept; the newest (last) win
+LESSON_CHARS = 200      # one lesson, clipped
 
 
-def _plan_markdown(title: str, phases: list[dict[str, Any]]) -> str:
+def plan_lessons(path: Path) -> list[str]:
+    """The lessons in PLAN.md's "## Lessons" section (its "- " lines, up to the next heading), clipped and capped;
+    [] when the file or the section is missing."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    lessons: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        if line.startswith("#"):
+            inside = line.strip() == LESSONS_HEADING
+        elif inside and line.startswith("- ") and line[2:].strip():
+            lessons.append(_clip_lesson(line[2:]))
+    return lessons[-LESSONS_MAX:]
+
+
+def _clip_lesson(text: str) -> str:
+    one = " ".join(text.split())
+    return one if len(one) <= LESSON_CHARS else one[: LESSON_CHARS - 1].rstrip() + "…"
+
+
+def _plan_markdown(title: str, phases: list[dict[str, Any]], lessons: list[str] = ()) -> str:
     from datetime import datetime
     lines = [f"# Plan{': ' + title if title else ''}", "",
              f"Status: ● done · ◐ in progress · ○ not started — updated {datetime.now():%Y-%m-%d %H:%M} by Dream", ""]
+    if lessons:
+        lines += [LESSONS_HEADING, *(f"- {lesson}" for lesson in lessons), ""]
     for i, phase in enumerate(phases, 1):
         lines.append(f"## {_MARK[phase['status']]} {i}. {phase['name']}")
         lines.extend(f"- {_MARK[s['status']]} {s['name']}" for s in phase["steps"])
@@ -117,7 +146,11 @@ def _plan_markdown(title: str, phases: list[dict[str, Any]]) -> str:
     "Keep the project's phased plan in PLAN.md (workspace) and the plan panel. Call it first for any "
     "multi-step build, then whenever a step changes; each call sends the COMPLETE plan. Status: "
     "pending | in_progress | done. A phase marked done needs a `summary` (what exists, what the next "
-    "phase needs): Dream compacts the conversation at each phase boundary, so PLAN.md carries over.",
+    "phase needs): Dream compacts the conversation at each phase boundary, so PLAN.md carries over. "
+    "`steps` is optional: a phase described by its summary may omit it or send []. `lessons`: facts learned the "
+    "hard way that the next step must not re-learn (environment limits, tool quirks, conventions), one line "
+    f"each, at most {LESSONS_MAX} (the newest win); PLAN.md keeps them and every compaction hands them back. Omit "
+    "`lessons` to keep the current ones; send the complete list to change them, [] to clear them.",
     {
         "type": "object",
         "properties": {
@@ -128,7 +161,8 @@ def _plan_markdown(title: str, phases: list[dict[str, Any]]) -> str:
                 "steps": {"type": "array", "items": {"type": "object", "properties": {
                     "name": {"type": "string"}, "status": {"type": "string", "enum": list(_STATUSES)}},
                     "required": ["name", "status"]}}},
-                "required": ["name", "status", "steps"]}},
+                "required": ["name", "status"]}},
+            "lessons": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["phases"],
     },
@@ -136,7 +170,7 @@ def _plan_markdown(title: str, phases: list[dict[str, Any]]) -> str:
 async def update_plan(args: dict[str, Any]) -> dict[str, Any]:
     raw = args.get("phases")
     if not isinstance(raw, list) or not raw:
-        return err("update_plan needs a non-empty 'phases' list of {name, status, steps}.")
+        return err("update_plan needs a non-empty 'phases' list of {name, status, summary?, steps?} (steps optional).")
     phases: list[dict[str, Any]] = []
     for i, p in enumerate(raw):
         if not isinstance(p, dict) or not str(p.get("name") or "").strip() or p.get("status") not in _STATUSES:
@@ -158,18 +192,37 @@ async def update_plan(args: dict[str, Any]) -> dict[str, Any]:
                    "is what carries over. Call update_plan again with it.")
     title = str(args.get("title") or "").strip()
     path = ctx().workspace / "PLAN.md"
+    raw_lessons = args.get("lessons")
+    if raw_lessons is None:                  # kept: a plan update never drops them silently
+        given, lessons = [], await in_thread(plan_lessons, path)
+    elif isinstance(raw_lessons, list):
+        given = [str(x) for x in raw_lessons if str(x).strip()]
+        lessons = [_clip_lesson(x) for x in given][-LESSONS_MAX:]
+    else:
+        return err("update_plan's 'lessons' is a list of short strings (omit it to keep the current ones).")
     try:
-        await in_thread(path.write_text, _plan_markdown(title, phases), "utf-8")
+        await in_thread(path.write_text, _plan_markdown(title, phases, lessons), "utf-8")
     except OSError as e:
         return err(f"Could not write {path}: {type(e).__name__}: {e}")
     _LAST_PLAN[key] = {p["name"]: p["status"] for p in phases}
     emit = ctx().emit
     if emit is not None:
+        import time
         from ..core.backends.base import Event
-        emit(Event("plan", {"title": title, "phases": phases, "path": str(path)}))
+        # updated_at: the strip shows the plan's age and turns stale after 30 minutes (#89); the retained
+        # event carries it through a reload.
+        emit(Event("plan", {"title": title, "phases": phases, "path": str(path), "updated_at": time.time()}))
     steps = [s for p in phases for s in p["steps"]]
     note = (f"PLAN.md updated: {len(phases)} phase(s), {sum(s['status'] == 'done' for s in steps)}"
             f"/{len(steps)} steps done.")
+    if lessons:
+        dropped = len(given) - len(lessons)
+        clipped = sum(len(" ".join(x.split())) > LESSON_CHARS for x in given[-LESSONS_MAX:])
+        note += (f" {len(lessons)} lesson(s) kept"
+                 + (f"; {dropped} older dropped (at most {LESSONS_MAX})" if dropped > 0 else "")
+                 + (f"; {clipped} clipped to {LESSON_CHARS} characters" if clipped else "") + ".")
+    elif raw_lessons is not None:
+        note += " Lessons cleared (PLAN.md has none now)."
     if newly_done:
         note = (f"{PHASE_DONE} {', '.join(newly_done)}. Dream compacts the conversation before the next "
                 "request so the next phase starts lean; PLAN.md, the phase summary and your notes carry "

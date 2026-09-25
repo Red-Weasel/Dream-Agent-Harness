@@ -12,7 +12,9 @@
 #   - the server binds 127.0.0.1 (the sandbox has no /etc/hosts to resolve localhost);
 #   - start() no longer refuses background mode; Dream's tests pump the command queue
 #     themselves there (startup.py);
-#   - the command table and get_addon_info's capability list name only the kept handlers.
+#   - the command table and get_addon_info's capability list name only the kept handlers;
+#   - Dream (DREAM-129) adds save_snapshot and open_snapshot (the scene snapshots the
+#     bridge takes before each call that can change the scene; scene_snapshots.py).
 # The kept handler bodies are unchanged.
 
 import bpy
@@ -291,6 +293,8 @@ class BlenderMCPServer:
             "describe_node_type": self.describe_node_type,
             "bpy_api_lookup": self.bpy_api_lookup,
             "export_scene": self.export_scene,
+            "save_snapshot": self.save_snapshot,  # Dream (DREAM-129)
+            "open_snapshot": self.open_snapshot,  # Dream (DREAM-129)
         }
 
         handler = handlers.get(cmd_type)
@@ -910,3 +914,45 @@ class BlenderMCPServer:
             "selection_only": use_selection,
             "exported": exported,
         }
+
+    # Dream (DREAM-129): scene snapshots, taken by the bridge before each call that can change the scene.
+    def save_snapshot(self, filepath):
+        """Save a compressed copy of the scene to filepath; the open file's own path stays as it was."""
+        filepaths = bpy.context.preferences.filepaths
+        preview = getattr(filepaths, "file_preview_type", None)
+        if preview is not None:
+            filepaths.file_preview_type = 'NONE'  # no viewport thumbnail render per snapshot
+        started = time.perf_counter()
+        try:
+            bpy.ops.wm.save_as_mainfile(filepath=filepath, copy=True, compress=True)
+        finally:
+            if preview is not None:
+                filepaths.file_preview_type = preview
+        return {"filepath": filepath, "seconds": round(time.perf_counter() - started, 3),
+                "bytes": os.path.getsize(filepath)}
+
+    def open_snapshot(self, filepath, fallback, snapshots):
+        """Reopen a snapshot, then save it under the file the session had open, so later saves go there.
+
+        Never inside the snapshot folder: when the session's file is itself a snapshot, or saving under it
+        fails, the scene is saved as ``fallback`` instead. When that fails too, saved_as is None and the
+        scene stays open from the snapshot file; ``problems`` says why. Saved uncompressed (snapshots are
+        compressed; the owner's file keeps Blender's default)."""
+        folder = os.path.realpath(snapshots) + os.sep
+        original = bpy.data.filepath
+        problems, targets = [], [fallback]
+        if original and os.path.realpath(original).startswith(folder):
+            problems.append(f"the session's file {original} is a snapshot; it was not overwritten")
+        elif original:
+            targets.insert(0, original)
+        bpy.ops.wm.open_mainfile(filepath=filepath, load_ui=False)
+        saved_as = None
+        for target in targets:
+            try:
+                bpy.ops.wm.save_as_mainfile(filepath=target, compress=False)
+                saved_as = target
+                break
+            except Exception as e:
+                problems.append(f"not saved as {target}: {' '.join(str(e).split())}")
+        return {"opened": filepath, "saved_as": saved_as, "filepath": bpy.data.filepath,
+                "objects": len(bpy.data.objects), "problems": problems}

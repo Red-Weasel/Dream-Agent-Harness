@@ -6,6 +6,7 @@ import re
 from typing import Iterable
 
 from . import loader
+from .. import config
 
 MAX_GUIDANCE_CHARS = 4000     # the default budget: a short workflow, as for a small window
 # DREAM-101: a session with a large window gets the whole workflow of the skill it asked for instead of a 2,200-char
@@ -28,6 +29,7 @@ class TaskGuidance:
     names: tuple[str, ...] = ()
     tools: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    matched: tuple[tuple[str, str], ...] = ()   # DREAM-120: per selected skill, what selected it (matched words, or 'explicit')
 
 
 # Match concrete work, rather than broad words such as "help", "make" or "file".
@@ -224,6 +226,19 @@ _DISPLACES = {'grill-me': ('brainstorming',), 'understand': ('coding',)}
 # repo"). When coding's own action pattern matched too, both load -- coding first on a tie -- so a misfire costs a
 # second workflow, not the turn. The dashboard and domain skills displace nothing; the rule would hold for them too.
 _DISPLACES_ONLY_INCIDENTAL = frozenset({'understand', 'understand-dashboard', 'understand-domain'})
+# DREAM-120 (#92): a modelling plan uses the words frontend-design keys on ("distinctive", "aesthetic", "look and feel",
+# "color palette"): on 2026-09-24 it selected frontend-design for a Blender task. In BLENDER WORK -- this session has
+# already called a blender__* tool (`used`, Engine.tools_used), or the request itself names Blender, a .blend file or
+# bpy (the blender-animation rule's words) -- frontend-design selects implicitly only when the request also names a web
+# page: the page words of its own rule and the coding rule's web words. An explicit request ($frontend-design) still
+# wins. The rule is NOT keyed on the blender__* tools being OFFERED: the live-Blender server is registered at every
+# desktop session start (Engine.start, DREAM-109), so that would narrow every session (the gate's finding); a session
+# that merely offers the tools selects exactly as before.
+_BLENDER_TOOL_PREFIXES = ('blender__',)
+_BLENDER_WORDS = re.compile(_RULES['blender-animation'][0], re.I)
+_WEB_PAGE = re.compile(r'\b(?:landing page|hero section|ui design|design tokens|web ?pages?|websites?|web ?apps?|html|css)\b', re.I)
+_NEEDS_WEB_PAGE_IN_BLENDER_WORK = frozenset({'frontend-design'})
+_SIGNAL_CHARS = 80     # the matched words a task_guidance event reports per skill
 
 
 def _request_text(prompt: str) -> str:
@@ -306,12 +321,15 @@ def _read_workflow(skill: loader.FileSkill, limit: int) -> str:
 
 
 def select_for_task(prompt: str, skills: Iterable[loader.FileSkill] | None = None,
-                    *, max_chars: int = MAX_GUIDANCE_CHARS) -> TaskGuidance:
+                    *, max_chars: int = MAX_GUIDANCE_CHARS, used: Iterable[str] = ()) -> TaskGuidance:
     """Choose at most two relevant workflows; explicit names outrank task matches.
 
     Only shipped curated packages match implicitly. Opted-in external packages
     can be selected by exact $name or 'Use the NAME skill', including the desktop
     picker syntax. The caller supplies the raw current request, not tool output.
+    `used`: the tool names this session has already called (Engine.tools_used), raw or
+    as the SDK path's `mcp__dream__<name>`; in Blender work frontend-design needs a
+    web-page word (DREAM-120).
     """
     budget = max(0, int(max_chars))          # a caller with a large window may pass more than the default (guidance_budget)
     prompt = _request_text(prompt)
@@ -324,6 +342,10 @@ def select_for_task(prompt: str, skills: Iterable[loader.FileSkill] | None = Non
     # Bound work on pasted files while preserving instructions at either end.
     prompt = prompt if len(prompt) <= 32000 else prompt[:24000] + '\n' + prompt[-8000:]
     positive = _positive_actions(prompt)
+    # a name as the backend reports it: raw (`blender__x`, the MiMo path) or the SDK path's `mcp__dream__blender__x`
+    blender_work = (any(str(name).removeprefix(f"mcp__{config.MCP_SERVER_NAME}__").startswith(_BLENDER_TOOL_PREFIXES)
+                        for name in used)
+                    or bool(_BLENDER_WORDS.search(positive)))
     candidates = []
     for skill in skills:
         if not loader.enabled(skill):
@@ -332,12 +354,18 @@ def select_for_task(prompt: str, skills: Iterable[loader.FileSkill] | None = Non
         excluded = re.search(rf"\b(?:without|avoid|skip)\s+(?:the\s+)?\$?{re.escape(skill.name)}\s+skill\b", prompt, re.I)
         if explicit == -1 or (explicit is None and excluded):
             continue
-        matches = [bool(pattern.search(positive)) for pattern in _PATTERNS.get(skill.name, ())] if skill.curated else []
+        found = [pattern.search(positive) for pattern in _PATTERNS.get(skill.name, ())] if skill.curated else []
+        matches = [bool(match) for match in found]
         acted = bool(matches) and any(matches[index] for index in _ACTION_PATTERN_INDEX.get(skill.name, ()))
         score = sum(matches) + 4 * acted if matches else 0
+        if (skill.name in _NEEDS_WEB_PAGE_IN_BLENDER_WORK and explicit is None and blender_work
+                and not _WEB_PAGE.search(positive)):
+            continue
         if explicit is not None or score:
+            signal = ('explicit' if explicit is not None
+                      else ' '.join(next(match for match in found if match).group(0).split())[:_SIGNAL_CHARS])
             candidates.append((explicit is None, explicit if explicit is not None else -score,
-                               skill.name.casefold(), skill, acted))
+                               skill.name.casefold(), skill, acted, signal))
     present = {row[3].name for row in candidates}
     candidates = [row for row in candidates
                   if not (row[0] and any(row[3].name in _DISPLACES.get(name, ())
@@ -346,9 +374,9 @@ def select_for_task(prompt: str, skills: Iterable[loader.FileSkill] | None = Non
     if not candidates:
         return TaskGuidance()
     prefix = 'Task workflows: use the relevant steps below with the current request and available tools.\n'
-    parts, names, tools, warnings = [], [], [], []
+    parts, names, tools, warnings, matched = [], [], [], [], []
     remaining = budget - len(prefix)
-    for _, _, _, skill, _ in candidates:
+    for _, _, _, skill, _, signal in candidates:
         if len(names) == MAX_WORKFLOWS:
             break
         if skill.name in names:
@@ -369,6 +397,7 @@ def select_for_task(prompt: str, skills: Iterable[loader.FileSkill] | None = Non
         parts.append(title + body)
         remaining -= len(title) + len(body)
         names.append(skill.name)
+        matched.append((skill.name, signal))
         if '[Workflow shortened.' in body:
             warnings.append(f'Skill {skill.name} guidance shortened; open the full workflow before following it.')
             if 'skill_open' not in tools:
@@ -378,4 +407,5 @@ def select_for_task(prompt: str, skills: Iterable[loader.FileSkill] | None = Non
         if skill.curated:
             tools.extend(name for name in skill.capabilities
                          if re.fullmatch(r'[a-z][a-z0-9_]{0,79}', name) and name not in tools)
-    return TaskGuidance(prefix + ''.join(parts) if parts else '', tuple(names), tuple(tools[:8]), tuple(warnings))
+    return TaskGuidance(prefix + ''.join(parts) if parts else '', tuple(names), tuple(tools[:8]), tuple(warnings),
+                        tuple(matched))

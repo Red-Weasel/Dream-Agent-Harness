@@ -68,3 +68,38 @@ async def test_the_backend_compacts_once_at_a_phase_boundary(ws):
     assert len(notes) == 1
     assert len(b._client.payloads) == 2
     assert openai_compat._est_tokens(b._client.payloads[1]["messages"]) < before / 2
+
+
+# 2026-09-25 03:06 (fix list #93): the schema required `steps` on EVERY phase, so a finished phase described only by its
+# summary was refused twice ("phases.0: missing required field steps. Nothing ran.") before the model complied.
+from dream.core.tool_validation import validate_arguments
+
+
+def _summary_only_plan():
+    return {"title": "Falcon 9", "phases": [
+        {"name": "Reference", "status": "done", "summary": "seven photos reviewed"},
+        {"name": "Build", "status": "in_progress", "steps": [{"name": "rocket.js", "status": "in_progress"}]}]}
+
+
+def test_a_phase_with_a_summary_needs_no_steps_list():
+    assert validate_arguments(update_plan.input_schema, _summary_only_plan()) is None
+
+
+def test_a_phase_without_steps_or_summary_still_validates_as_an_empty_phase():
+    plan = {"phases": [{"name": "Later", "status": "pending"}]}
+    assert validate_arguments(update_plan.input_schema, plan) is None
+
+
+async def test_a_summary_only_done_phase_is_written_with_zero_steps(ws):
+    tmp, emitted = ws
+    out = await update_plan.handler(_summary_only_plan())
+    assert not out.get("is_error"), out
+    md = (tmp / "PLAN.md").read_text()
+    assert "## ● 1. Reference" in md and "> **Summary:** seven photos reviewed" in md
+    assert emitted[-1].data["phases"][0]["steps"] == []
+
+
+def test_the_usage_error_names_steps_as_optional():
+    import asyncio
+    out = asyncio.run(update_plan.handler({"phases": []}))
+    assert out.get("is_error") and "steps optional" in out["content"][0]["text"]

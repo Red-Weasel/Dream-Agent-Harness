@@ -30,8 +30,8 @@ from dream.mcp_client import McpClients, load_config
 from dream.media import blender_live
 
 READ_TOOLS = {"get_scene_info", "get_object_info", "get_viewport_screenshot", "describe_node_type",
-              "bpy_api_lookup", "get_window"}
-CODE_TOOLS = {"execute_blender_code", "export_scene"}
+              "bpy_api_lookup", "get_window", "list_scene_snapshots"}
+CODE_TOOLS = {"execute_blender_code", "export_scene", "restore_scene_snapshot"}
 FAKE_LAUNCHER = Path(__file__).with_name("live_blender_fake_launcher.py")
 
 
@@ -567,6 +567,33 @@ async def test_saves_and_renders_land_in_the_workspace(workspace):
     assert [p.name for p in (workspace / "renders").iterdir()] == ["render.png"]
 
 
+async def test_scene_snapshots_before_each_change_and_a_restore_in_the_sandbox(workspace):
+    """DREAM-129 end to end: the real bridge, add-on and (background) Blender in the real sandbox."""
+    _needs_live(workspace)
+    clients = McpClients()
+    try:
+        tools, _ = await clients.start([_live_config(workspace)])
+        by = {t.name: t for t in tools}
+        run = by["blender__execute_blender_code"]
+        good, error = await _text(run, {"code": "import bpy\nbpy.ops.mesh.primitive_monkey_add()\n"
+                                                "bpy.ops.wm.save_as_mainfile(filepath='car.blend')"})
+        assert not error and "[Scene snapshot 1 saved before this call;" in good, good
+        bad, error = await _text(run, {"code": "import bpy\nfor o in list(bpy.data.objects): bpy.data.objects.remove(o)\n"
+                                               "bpy.ops.wm.save_mainfile()"})
+        assert not error and "[Scene snapshot 2 saved before this call;" in bad, bad
+        listing, _ = await _text(by["blender__list_scene_snapshots"])
+        assert "before: import bpy" in listing and "   2  " in listing
+        text, error = await _text(by["blender__restore_scene_snapshot"], {"number": 2})
+        assert not error and "Restored scene snapshot 2" in text and str(workspace.resolve() / "car.blend") in text, text
+        seen, _ = await _text(run, {"code": "import bpy; print('OBJECTS', sorted(o.name for o in bpy.data.objects), "
+                                            "bpy.data.filepath)"})
+        assert f"OBJECTS ['Camera', 'Cube', 'Light', 'Suzanne'] {workspace.resolve() / 'car.blend'}" in seen, seen
+    finally:
+        await clients.stop()
+    snaps = sorted(p.name for p in (workspace / ".dream" / "blender-snapshots").glob("*.blend"))
+    assert [name[:5] for name in snaps] == ["0001-", "0002-", "0003-", "0004-"]
+
+
 async def test_a_session_starts_only_the_bridge_and_the_first_call_opens_blender_and_its_display(workspace):
     _needs_live(workspace)
     folders = _private_folders()
@@ -618,7 +645,7 @@ async def test_one_blender_per_session_reused_then_started_again_after_it_closes
         again, _ = await _text(run, {"code": pid})
         assert first.split("PID")[1] == again.split("PID")[1]   # the same Blender, reused
         text, _ = await _text(run, {"code": "import os; os._exit(0)"})  # Blender closes (the owner quits)
-        assert text.startswith("Error executing code")
+        assert "\nError executing code" in text  # after the line naming the scene snapshot (DREAM-129)
         for _ in range(50):  # ... and its nested display closes with it
             if not _nested_servers():
                 break

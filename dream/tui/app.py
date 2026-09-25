@@ -89,6 +89,61 @@ def _age(iso: str) -> str:
     return "just now"
 
 
+# DREAM-120 (#91): what /resume's priming prompt carries of the resumed session and its workspace, each capped.
+RESUME_TURNS = 10             # the session's LAST turns, shown oldest first
+RESUME_SCAN = 200             # rows read back for the owner's last request, when tool records fill the last turns
+RESUME_TURN_CHARS = 200       # one turn, clipped
+RESUME_FILES = 12             # the newest files the session's file tools wrote or edited
+RESUME_PLAN_LINES = 13        # PLAN.md: its status line and at most twelve phase headings
+RESUME_PLAN_LINE_CHARS = 120
+_PLAN_READ_CHARS = 32_000     # how much of PLAN.md is read for the excerpt
+
+
+def _session_workspace(sess: dict[str, Any], current: Path) -> Path | None:
+    """The folder a past session ran in: this one when the session's project is this workspace's (or the session
+    predates project keys, DREAM-108), else the folder Dream recorded for that project, else unknown."""
+    from ..memory import project as project_memory
+
+    key = project_memory.valid_owner(sess.get("project"))
+    if not key or key == project_memory.project_key(current):
+        return Path(current)
+    path = project_memory.known().get(key)
+    return Path(path) if path else None
+
+
+def _plan_excerpt(path: Path) -> list[str]:
+    """PLAN.md's status line and phase headings as update_plan writes them (`Status: ...`, `## ● 1. Name`), clipped;
+    a plan in another shape gives its first lines. [] when there is no readable PLAN.md."""
+    try:
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            text = fh.read(_PLAN_READ_CHARS)
+    except OSError:
+        return []
+    from ..tools.project import LESSONS_HEADING, plan_lessons
+
+    lessons = plan_lessons(path)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if lessons:                                  # the section is shown once, below; not as a plan's first lines too
+        inside, rest = False, []
+        for line in lines:
+            if line.startswith("#"):
+                inside = line == LESSONS_HEADING
+            if not inside:
+                rest.append(line)
+        lines = rest
+    picked = [line for line in lines if line.startswith("Status:")][:1] + [
+        line for line in lines if line.startswith("## ")]
+    picked, unit = (picked, "phases") if picked else (lines, "lines")
+    shown = [line[:RESUME_PLAN_LINE_CHARS] for line in picked[:RESUME_PLAN_LINES]]
+    if len(picked) > len(shown):
+        shown.append(f"(+{len(picked) - len(shown)} more {unit})")
+    # DREAM-123: the plan's lessons after the status line, each clipped like the other lines.
+    if lessons:
+        at = 1 if shown and shown[0].startswith("Status:") else 0
+        shown[at:at] = [LESSONS_HEADING, *(f"- {lesson}"[:RESUME_PLAN_LINE_CHARS] for lesson in lessons)]
+    return shown
+
+
 # The prompt line, dressed in the wordmark's violet end of the gradient.
 PROMPT = HTML('<style fg="#a78bfa"><b>you</b></style> <style fg="#8b5cf6">›</style> ')
 
@@ -1107,9 +1162,8 @@ class App(CouncilControls):
         c.print(f"[green]instructions saved[/green]  {applies}")
 
     async def _resume(self, arg: str) -> None:
-        """Reload a past session's summary + recent turns as context, then continue
-        where you left off. `/resume` = most recent prior session; `/resume <id>` for
-        a specific one."""
+        """Reload a past session's summary, its workspace's state and its LATEST turns as context, then continue
+        where you left off. `/resume` = most recent prior session; `/resume <id>` for a specific one."""
         store = self.engine.store
         c = self.renderer.console
         if arg:
@@ -1119,22 +1173,52 @@ class App(CouncilControls):
         if not sess:
             c.print("[dim]no prior session to resume[/dim]")
             return
-        turns = store.session_turns(sess["id"], limit=14)
+        # DREAM-120 (#91): the session's LAST turns -- its first 14 rows told the model where a 123-row session had
+        # begun, and it began there again -- with the owner's last request when tool records fill those rows, and the
+        # workspace's real state: PLAN.md's status and phases, the newest files the session's file tools wrote (the
+        # checkpoints store records no session id, so from the transcript). A session of another project is read in
+        # the folder Dream recorded for it, named here because this session's tools resolve against THIS workspace.
+        from ..core import handoff, turn_origin
+
+        recent = store.session_turns(sess["id"], limit=RESUME_SCAN, latest=True)
+        turns = recent[-RESUME_TURNS:]
+        asked = next((t for t in reversed(recent) if t["role"] == "user"
+                      and not turn_origin.is_generated(t.get("tool_name"), t.get("content"))), None)
+        prepended = asked is not None and asked not in turns
+        if prepended:
+            turns.insert(0, asked)
+        workspace = _session_workspace(sess, self.engine.workspace)
+        elsewhere = workspace is not None and workspace.resolve() != Path(self.engine.workspace).resolve()
+        if workspace is None:
+            where = " in a workspace Dream has no folder recorded for (paths as the session logged them)"
+        else:
+            where = f" in {workspace}" if elsewhere else " in the workspace"
         lines = [f"Resuming session {sess['id']} ({sess.get('turn_count', 0)} turns)."]
         if sess.get("summary"):
             lines.append(f"Summary: {sess['summary']}")
+        plan = _plan_excerpt(workspace / "PLAN.md") if workspace else []
+        if plan:
+            lines.append(f"PLAN.md{where} (its status line and phases; read it before the next step):")
+            lines += [f"  {line}" for line in plan]
+        written = handoff.ledger_from_transcript(store, sess["id"], workspace).lines(
+            RESUME_FILES, root=workspace if elsewhere else None)
+        if written:
+            lines.append(f"Files the session's file tools wrote or edited{where}, newest first (what happened to each, "
+                         "not what it holds now; read one before changing it):")
+            lines += written
         if turns:
-            lines.append("Recent exchange:")
-            for t in turns[-10:]:
+            head = f"the session's last {len(turns) - prepended} turns, oldest first"
+            if prepended:
+                head = "the owner's last request, then " + head
+            lines.append(f"Latest exchange ({head}):")
+            for t in turns:
                 who = t["role"]
-                body = " ".join((t.get("content") or "").split())[:200]
+                body = " ".join((t.get("content") or "").split())[:RESUME_TURN_CHARS]
                 if body:
                     lines.append(f"- {who}: {body}")
         context = "\n".join(lines)
         c.print(f"[green]↺ resumed {sess['id']}[/green] [dim]({len(turns)} turns loaded)[/dim]")
         # Fed to the model as context on the next turn — one coherent priming message.
-        from ..core import turn_origin
-
         with turn_origin.generated(turn_origin.RESUME):   # Dream's priming prompt, not the owner's words
             await self._ask(
                 "[context restored from a previous session — continue from here, "

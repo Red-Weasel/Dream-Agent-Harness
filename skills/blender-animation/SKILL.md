@@ -17,6 +17,8 @@ Skill loading alone does not establish improved task performance.
    reuse the authoritative script. Use the GUI when requested or needed for
    interactive state, only with actual desktop controls. `media_create` opening
    a `.blend` supplies neither GUI controls nor a render.
+   To model a real object from photos, follow
+   [reference modeling](references/reference-modeling.md).
 3. Read [runtime qualification](references/runtime.md) before choosing a renderer
    or launching Blender. Check resources, version, engine and accessible device;
    only an actual render qualifies that pipeline. Do not assume NVIDIA or force

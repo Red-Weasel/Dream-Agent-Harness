@@ -741,14 +741,18 @@ class MemoryStore:
             return dict(row) if row else None
 
     def session_turns(
-        self, session_id: str, limit: int = 200
+        self, session_id: str, limit: int = 200, *, latest: bool = False
     ) -> list[dict[str, Any]]:
+        """The session's turns, oldest first: its first `limit` rows, or with `latest` its LAST `limit` rows
+        (DREAM-120: /resume shows where a long session ended, not where it began; the default keeps the session's
+        opening for engine._transcript_digest)."""
+        sql = ("SELECT role, content, tool_name, ts FROM turns "
+               "WHERE session_id=? ORDER BY id LIMIT ?")
+        if latest:   # the last rows, then back in order
+            sql = ("SELECT role, content, tool_name, ts FROM (SELECT id, role, content, tool_name, ts FROM turns "
+                   "WHERE session_id=? ORDER BY id DESC LIMIT ?) ORDER BY id")
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT role, content, tool_name, ts FROM turns "
-                "WHERE session_id=? ORDER BY id LIMIT ?",
-                (session_id, limit),
-            ).fetchall()
+            rows = self._conn.execute(sql, (session_id, limit)).fetchall()
             return [dict(r) for r in rows]
 
     # --- long-term memory ----------------------------------------------------

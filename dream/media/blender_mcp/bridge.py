@@ -16,7 +16,10 @@
 #     Blender starts on first use and a Blender that was closed is started again; the
 #     call that opened it says so at the top of its result (_with_note);
 #   - the address is 127.0.0.1:9876 inside the sandbox's own network namespace;
-#   - FastMCP logs warnings and errors only.
+#   - FastMCP logs warnings and errors only;
+#   - DREAM-129: execute_blender_code and export_scene first save a numbered snapshot of the
+#     scene into the workspace (scene_snapshots.py) and say so on their result's first line;
+#     list_scene_snapshots and restore_scene_snapshot show and reopen them.
 
 import json
 import logging
@@ -28,6 +31,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict
 
 from mcp.server.fastmcp import FastMCP, Image
+
+import scene_snapshots  # Dream (DREAM-129), beside this file
 
 logger = logging.getLogger("BlenderMCPServer")
 
@@ -235,6 +240,77 @@ def get_blender_connection():
     return _blender_connection
 
 
+# Dream (DREAM-129): one snapshot at a time, numbered in order. The last number is also kept here, outside
+# Blender's reach, so numbers keep rising for the session even if a script deletes the folder.
+_snapshot_lock = threading.Lock()
+_last_number = 0
+
+
+def _snapshot(blender, call: str, protect: int | None = None) -> str:
+    """Save the scene as the next numbered snapshot before a call that can change it; the line saying so
+    (with its newline). A snapshot that fails does not stop the call, but the line says it cannot be undone."""
+    global _last_number
+    with _snapshot_lock:
+        where = scene_snapshots.folder()
+        try:
+            number, path = scene_snapshots.allocate(where, after=_last_number)
+            _last_number = number
+            blender.send_command("save_snapshot", {"filepath": str(path)})
+            scene_snapshots.record(where, number, path, call, protect=protect)
+            return (f"[Scene snapshot {number} saved before this call; "
+                    f"restore_scene_snapshot({number}) brings the scene back to it.]\n")
+        except Exception as e:
+            return (f"[WARNING: the scene snapshot before this call failed ({e}); "
+                    f"this step cannot be undone with restore_scene_snapshot.]\n")
+
+
+@mcp.tool()
+async def list_scene_snapshots() -> str:
+    """
+    List the scene snapshots Dream saved before each execute_blender_code or export_scene call:
+    number, time and the first line of the call each one preceded. Each is the scene as it was
+    BEFORE that call. restore_scene_snapshot(number) reopens one.
+    """
+    return scene_snapshots.listing(scene_snapshots.folder())
+
+
+@mcp.tool()
+async def restore_scene_snapshot(number: int) -> str:
+    """
+    Bring the live Blender scene back to a snapshot (list_scene_snapshots shows them), when a change
+    went wrong. The current scene is snapshotted first, so a restore can itself be undone. The restored
+    scene is saved under the .blend file the session had open (or restored-<number>.blend in the
+    workspace when it had none), so later saves go there, not into the snapshot folder.
+
+    Parameters:
+    - number: the snapshot's number
+    """
+    where = scene_snapshots.folder()
+    path = scene_snapshots.find(where, number)
+    if path is None:
+        return f"Error: there is no scene snapshot {number}.\n" + scene_snapshots.listing(where)
+    saved = ""
+    try:
+        blender = get_blender_connection()
+        saved = _snapshot(blender, f"restore_scene_snapshot({number})", protect=number)
+        result = blender.send_command("open_snapshot", {
+            "filepath": str(path), "fallback": str(where.parent.parent / f"restored-{number}.blend"),
+            "snapshots": str(where)})
+    except Exception as e:
+        logger.error(f"Error restoring snapshot {number}: {str(e)}")
+        return _with_note(f"{saved}Error restoring scene snapshot {number}: {str(e)}")
+    problems = "".join(f"\n- {p}" for p in result.get("problems") or [])
+    if not result.get("saved_as"):
+        return _with_note(
+            f"{saved}Restored scene snapshot {number} ({result.get('objects')} objects), but WARNING: the restored "
+            f"scene is open from the snapshot folder ({result.get('filepath')}) because it could not be saved "
+            f"elsewhere:{problems}\nSave it outside .dream/blender-snapshots with "
+            f"bpy.ops.wm.save_as_mainfile(filepath='scene.blend') before any save_mainfile(), which would "
+            f"overwrite that snapshot.")
+    return _with_note(f"{saved}Restored scene snapshot {number} ({result.get('objects')} objects); "
+                      f"the scene is now saved as {result.get('saved_as')}.{problems}")
+
+
 @mcp.tool()
 async def get_scene_info() -> str:
     """Get detailed information about the current Blender scene"""
@@ -318,11 +394,13 @@ async def execute_blender_code(code: str) -> str:
     Parameters:
     - code: The Python code to execute
     """
+    saved = ""  # Dream (DREAM-129): the snapshot line, on success and on failure
     try:
         # Get the global connection
         blender = get_blender_connection()
+        saved = _snapshot(blender, code)
         result = blender.send_command("execute_code", {"code": code})
-        return _with_note(f"Code executed successfully: {result.get('result', '')}")
+        return _with_note(f"{saved}Code executed successfully: {result.get('result', '')}")
     except Exception as e:
         logger.error(f"Error executing code: {str(e)}")
         # The addon reports failures as a JSON payload so the traceback survives
@@ -331,8 +409,8 @@ async def execute_blender_code(code: str) -> str:
             detail = json.loads(str(e))
             traceback_text = detail["traceback"]
         except (ValueError, KeyError, TypeError):
-            return _with_note(f"Error executing code: {str(e)}")
-        return _with_note(f"Error executing code: {detail.get('exception_type', 'Error')}: {detail.get('message', '')}\n\n{traceback_text}")
+            return _with_note(saved + f"Error executing code: {str(e)}")
+        return _with_note(saved + f"Error executing code: {detail.get('exception_type', 'Error')}: {detail.get('message', '')}\n\n{traceback_text}")
 
 
 @mcp.tool()
@@ -418,8 +496,10 @@ async def export_scene(
 
     Returns JSON with path, bytes, selection_only and the exported object names.
     """
+    saved = ""  # Dream (DREAM-129)
     try:
         blender = get_blender_connection()
+        saved = _snapshot(blender, f"export_scene {filepath}")
         result = blender.send_command("export_scene", {
             "filepath": filepath,
             "format": format,
@@ -427,7 +507,7 @@ async def export_scene(
             "selection_only": selection_only,
             "apply_modifiers": apply_modifiers,
         })
-        return _with_note(json.dumps(result) if isinstance(result, dict) else result)
+        return _with_note(saved + (json.dumps(result) if isinstance(result, dict) else result))
     except Exception as e:
         logger.error(f"Error exporting scene: {str(e)}")
-        return _with_note(f"Error exporting scene: {str(e)}")
+        return _with_note(saved + f"Error exporting scene: {str(e)}")

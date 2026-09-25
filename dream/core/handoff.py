@@ -11,10 +11,13 @@ compaction on the owner's word, between turns. The backend runs its existing com
   succeed; the verbs are the ones "Files this turn" shows in the chat, DREAM-082);
 - the open tasks;
 - where the rest is: PLAN.md, this session's transcript (read_session), the working notes the compaction saved.
+
+PLAN.md's lessons (DREAM-123) are quoted in the handoff, and in the note a compaction leaves (lessons_note).
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -89,10 +92,46 @@ class FileLedger:
         while len(self._paths) > self.limit:
             self._paths.popitem(last=False)
 
-    def lines(self, shown: int | None = None) -> list[str]:
-        """Newest first: `- path — wrote, edited`."""
+    def lines(self, shown: int | None = None, root: Path | None = None) -> list[str]:
+        """Newest first: `- path — wrote, edited`. `root` (DREAM-120, a cross-project /resume): the workspace the
+        relative paths are under, put before them because the reader's own tools resolve against another folder."""
         items = list(reversed(self._paths.items()))[:shown]
-        return [f"- {_clip(path, _PATH_CHARS)} — {', '.join(verbs)}" for path, verbs in items]
+
+        def shown_path(path: str) -> str:
+            return (Path(root) / path).as_posix() if root is not None and not os.path.isabs(path) else path
+        return [f"- {_clip(shown_path(path), _PATH_CHARS)} — {', '.join(verbs)}" for path, verbs in items]
+
+
+# A tool_use row the Engine cut at 2,000 characters is not JSON; the path is read from its head.
+_PATH_ARG = re.compile(r'"path"\s*:\s*"((?:[^"\\]|\\.)*)"')
+_APPEND_ARG = re.compile(r'"append"\s*:\s*true\b')
+
+
+def ledger_from_transcript(store: Any, session_id: str, workspace: Path | None) -> FileLedger:
+    """A past session's FileLedger, rebuilt from its transcript's tool_use rows (DREAM-120, /resume). The Engine logs
+    each call as json.dumps(input)[:2000] under the tool's name, so a write_file whose body ran past the cut is not
+    JSON any more: its `path` and `append` are read from the head of the row (a body logged before the path hides
+    it). A call is logged when it is made, not when it succeeds, so a write the tool refused is listed too."""
+    ledger = FileLedger()
+    with store._lock:
+        rows = store._conn.execute(
+            "SELECT tool_name, content FROM turns WHERE session_id=? AND role='tool_use' ORDER BY id",
+            (session_id,)).fetchall()
+    for tool, content in rows:
+        try:
+            args = json.loads(content or "")
+        except ValueError:
+            found = _PATH_ARG.search(content or "")
+            if not found:
+                continue
+            try:
+                path = json.loads(f'"{found.group(1)}"')
+            except ValueError:
+                continue
+            args = {"path": path, "append": bool(_APPEND_ARG.search(content))}
+        if tool:
+            ledger.record(tool, args, workspace)
+    return ledger
 
 
 @dataclass
@@ -103,6 +142,7 @@ class Parts:
     reply: str = ""
     tasks: list[str] = field(default_factory=list)
     plan: bool = False
+    lessons: list[str] = field(default_factory=list)   # PLAN.md's "## Lessons" (DREAM-123)
     session_id: str | None = None
 
 
@@ -115,6 +155,9 @@ def gather(context: Any) -> Parts:
     store, session_id, workspace = context.store, context.session_id, context.workspace
     parts.session_id = session_id
     parts.plan = workspace is not None and (Path(workspace) / "PLAN.md").is_file()
+    if parts.plan:
+        from ..tools.project import plan_lessons
+        parts.lessons = plan_lessons(Path(workspace) / "PLAN.md")
     if store is None:
         return parts
     from . import system_prompt
@@ -214,6 +257,8 @@ def compose(parts: Parts, ledger: FileLedger, notes: list[int]) -> str:
     if listed:
         out.append("This says what happened to each file, not what it holds now: read one before changing it again.")
     out += ["", "## Open tasks (task_list has their notes)", *(parts.tasks or ["(none open)"])]
+    if parts.lessons:
+        out += ["", f"## {LESSONS_HEAD}", *(f"- {lesson}" for lesson in parts.lessons)]
     out += ["", "## To recover detail"]
     if parts.plan:
         out.append("- PLAN.md in the workspace holds the phased plan: read it before the next step.")
@@ -227,6 +272,28 @@ def compose(parts: Parts, ledger: FileLedger, notes: list[int]) -> str:
     if len(text) > HANDOFF_MAX_CHARS:
         text = text[: HANDOFF_MAX_CHARS - 40].rsplit("\n", 1)[0] + "\n[the handoff was cut to fit]"
     return text
+
+
+LESSONS_HEAD = "Lessons (PLAN.md: facts learned the hard way; do not re-learn them)"
+LESSONS_NOTE_OPEN = "[Dream, not from the user: the conversation was just compacted. " + LESSONS_HEAD
+
+
+def lessons_note(workspace: Path | None) -> str | None:
+    """What a compaction leaves the model of PLAN.md's lessons (DREAM-123): the lessons verbatim, as Dream's own note,
+    so they arrive without a tool call; None when the workspace's PLAN.md has none."""
+    if workspace is None:
+        return None
+    from ..tools.project import plan_lessons
+    lessons = plan_lessons(Path(workspace) / "PLAN.md")
+    if not lessons:
+        return None
+    return (LESSONS_NOTE_OPEN + ":]\n" + "\n".join(f"- {lesson}" for lesson in lessons))
+
+
+def is_lessons_note(message: dict[str, Any]) -> bool:
+    """A note lessons_note wrote, as a compaction left it in the history."""
+    return (message.get("name") == "dream_recovery_instruction" and isinstance(message.get("content"), str)
+            and message["content"].startswith(LESSONS_NOTE_OPEN))
 
 
 def _clip(text: Any, n: int) -> str:

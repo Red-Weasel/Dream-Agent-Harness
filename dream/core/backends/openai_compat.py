@@ -20,7 +20,7 @@ import statistics
 import sys
 import time
 import uuid
-from collections import deque
+from collections import Counter, deque
 from contextvars import ContextVar
 from contextlib import aclosing, asynccontextmanager, nullcontext
 from copy import copy, deepcopy
@@ -208,6 +208,18 @@ _ASSUMED_CTX = int(os.environ.get("DREAM_ASSUMED_CTX", "32768"))
 _KEEP_RECENT_MSGS = 8
 # Headroom between the prompt and the window when clamping max_tokens.
 _CTX_MARGIN = 512
+# DREAM-126 (fix list #98): what admission keeps free for the reply when it decides whether to compact. Reserving
+# the whole output ceiling compacted a 138,781-token prompt -- 69 % of a 200k window -- once the owner raised the
+# ceiling to 60,000 (2026-09-25), and every compaction is a 2.5-6 minute re-read on MiMo. var/logs/runtime lead
+# replies, 45 sessions to 2026-09-25: 1,812 replies, median 296 tokens, p90 2,069, p99 8,831; since 2026-09-22
+# (578) p99 13,940. The largest is 16,384, the ceiling of the time, so the tail above it is not observed. A
+# reply is still asked for up to the ceiling, clamped to what the window holds (at least this much after
+# admission); one that runs longer is cut there and continued (DREAM-117).
+_ADMISSION_RESERVE = 16_384
+# DREAM-126 (fix list #99): a plan phase end compacts only above this fill of the window. Below it the boundary is
+# recorded and nothing is cut: a reset at 65k of 200k cost 272 s of re-reads for two phases and freed room that was
+# not needed yet; the fill trigger (compact_at) still stands behind it.
+_PHASE_RESET_AT = 0.5
 _ELIDED = "[elided:"
 # A tool_call whose result never landed (see _repair_dangling).
 _INTERRUPTED = "(interrupted — no result recorded)"
@@ -386,11 +398,22 @@ class _LoopGuardResult(str):
     """A repeated request was suppressed; it is not a new delivery attempt."""
 
 
+class _ScopeRefusal(str):
+    """A call outside a scoped ask's tools (DREAM-118): nothing ran and no meter was charged."""
+
+
 class _VisualResult(_ExecutedToolResult):
     def __new__(cls, text: str, images: list | None = None):
         instance = super().__new__(cls, text)
         instance.images = images or []
         return instance
+
+
+# DREAM-125: architectures where flipping `enable_thinking` between requests changes only the generation
+# prompt's tail. MiMo-V2.6 (`mimo_v2`, engine mimo26_render_chat) renders history the same either way and
+# ends in `<think>` or `<think></think>`. DeepSeek-V4.1 does not: its "Reasoning Effort" line at the start
+# of message 0 and its past assistant turns depend on the flag, so a flip re-reads the whole prompt.
+_THINKING_CAP_ARCHITECTURES = frozenset({"mimo_v2"})
 
 
 def _visual_message(images: list) -> dict:
@@ -451,6 +474,58 @@ def _parse_tool_args(raw: str | None) -> tuple[dict[str, Any], str | None]:
             f"{_clamp(raw, 600)}"
         )
     return parsed, None
+
+
+# Tools whose `code` argument is a program Dream runs (DREAM-128). Only these: a path, a shell
+# command, file content or a search query that begins another one is a real, different call.
+_CODE_TOOLS = frozenset({"blender__execute_blender_code", "run_script", "eval_js", "eval_js_user_view"})
+# The unfinished word a call was abandoned in, and the separators before it ("import bpy, o").
+_UNFINISHED_TAIL_RE = re.compile(r"[\s,]*\w*$")
+_START_MAX_CHARS = 40      # an abandoned start is one short line ...
+_START_RATIO = 4           # ... and the program it began is several times longer
+
+
+def _abandoned_starts(calls: list[dict[str, str]]) -> dict[int, int]:
+    """Calls in one reply that are only the abandoned start of a later call, as
+    {index of the start: index of the call that is run}.
+
+    Fix list #104 (DREAM-128, live 2026-09-25 13:04:38 UTC): one MiMo reply held
+    `{"code": "import bpy, o"}` and then the 728-character script it was the start of, both
+    to blender__execute_blender_code; the fragment ran first and failed. The server sent
+    the two calls with their own indexes, so the model's output held both. The rule is
+    deliberately narrow (the gate listed legitimate pairs a looser one would skip): a code
+    tool (_CODE_TOOLS), its only differing argument `code`; the earlier code one line of at
+    most _START_MAX_CHARS, the later one at least _START_RATIO times longer; the earlier is
+    NOT a prefix of the later (`save()` then `save()` + more is two real steps), but less
+    its unfinished last word and the separators before it, it is where the later begins."""
+    parsed = []
+    for c in calls:
+        try:
+            a = json.loads(c.get("args") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            a = None
+        parsed.append(a if isinstance(a, dict) else None)
+    found: dict[int, int] = {}
+    for i, a in enumerate(parsed):
+        x = a.get("code") if a is not None and calls[i]["name"] in _CODE_TOOLS else None
+        if not isinstance(x, str) or "\n" in x.strip() or len(x) > _START_MAX_CHARS:
+            continue
+        stem = _UNFINISHED_TAIL_RE.sub("", x, count=1)
+        if not stem.strip():
+            continue
+        for j in range(i + 1, len(calls)):
+            b = parsed[j]
+            if b is None or calls[j]["name"] != calls[i]["name"] or a.keys() != b.keys():
+                continue
+            y = b["code"]
+            if (isinstance(y, str) and all(a[k] == b[k] for k in a if k != "code")
+                    and len(y) >= _START_RATIO * len(x) and not y.startswith(x) and y.startswith(stem)):
+                found[i] = j
+                break
+    for i in found:                # a chain of starts points at the call that is run
+        while found[i] in found:
+            found[i] = found[found[i]]
+    return found
 
 
 def _clamp(text: str, cap: int) -> str:
@@ -870,6 +945,11 @@ class OpenAICompatBackend(Backend):
         self._idle_work = None
         self._background_emit = None
         self._foreground_prepared = False
+        # A scoped ask (the engine's exit consolidation, DREAM-118): only these tool names are offered
+        # and run, and a reply that asks for one tool more than `reply_repeat_limit` times fails before
+        # any of its calls run. None = the whole list and no reply guard, as every turn runs.
+        self.tool_scope: frozenset[str] | None = None
+        self.reply_repeat_limit: int | None = None
         self._all_tools = list(tools)
         self._configured_multimodal = bool(provider.multimodal)
         self._image_rejection_model: str | None = None
@@ -989,6 +1069,7 @@ class OpenAICompatBackend(Backend):
             if self._local_options.get("thinking") is not None:
                 self._sampling["enable_thinking"] = self._local_options["thinking"]
         self._effort: str | None = None  # reasoning_effort, when /effort is set
+        self._turn_changed = self._last_round_failed = False   # DREAM-125: this turn made a change / last round failed
         self._council_context = None
         self._council_notices: list[str] = []
         self._council_required_sources: set[tuple[str, int]] = set()
@@ -2138,24 +2219,61 @@ class OpenAICompatBackend(Backend):
         """A phase of the plan just finished (update_plan): compact now, in one
         step, so the next phase starts lean. PLAN.md and the phase summary carry
         the state; this is the planned reset the owner asked for, instead of the
-        context filling up and compacting mid-work."""
+        context filling up and compacting mid-work. Only above _PHASE_RESET_AT of the window (DREAM-126); every
+        boundary is recorded on the runtime meter either way."""
         if not self._phase_reset_pending:
             return []
         self._phase_reset_pending = False
         if self._context_overflow == "error":
             return []
-        before = self._ctx_fill()
+        before, window = self._ctx_fill(), self._window()
+        if before <= window * _PHASE_RESET_AT:
+            # DREAM-126: below the line a boundary is only recorded; the history (and the engine's cache) stay.
+            if self.runtime_meter:
+                self.runtime_meter.record("phase_boundary", compacted=False, fill=before, window=window,
+                                          threshold=_PHASE_RESET_AT)
+            return []
         size, msg_size = self._calibrated_size()
+        lifted = self._lift_lessons()
         prior = list(self.messages)
-        n = _compact_messages(self.messages, int(self._window() * 0.25), on_elide=self._note_elided(),
+        n = _compact_messages(self.messages, int(window * 0.25), on_elide=self._note_elided(),
                               size=size, msg_size=msg_size)
         self._record_council_omissions(prior, self.messages)
+        self._carry_lessons(lifted, compacted=bool(n))
+        if self.runtime_meter:
+            self.runtime_meter.record("phase_boundary", compacted=bool(n), fill=before, window=window,
+                                      threshold=_PHASE_RESET_AT)
         if not n:
             return []
         self._compacted()
+        if self.runtime_meter:
+            self.runtime_meter.record("compaction", source="phase", before=before, after=size(self.messages),
+                                      elided=n, window=window, threshold=_PHASE_RESET_AT)
         return [Event("system", f"Phase complete — compacted the conversation ({before:,} to about "
                                 f"{size(self.messages):,} tokens) so the next phase starts "
                                 "lean; PLAN.md carries the plan.")]
+
+    def _lift_lessons(self) -> list[tuple[int, dict[str, Any]]]:
+        """Before a compaction (DREAM-123): take the earlier lessons notes out of the history, with their places, so
+        the cut never stubs one (or spends a working note on it) and never counts one as its work."""
+        lifted = [(i, m) for i, m in enumerate(self.messages) if handoff.is_lessons_note(m)]
+        for i, _ in reversed(lifted):
+            del self.messages[i]
+        return lifted
+
+    def _carry_lessons(self, lifted: list[tuple[int, dict[str, Any]]], *, compacted: bool) -> None:
+        """After a compaction (DREAM-123): PLAN.md's lessons, verbatim, as Dream's own note at the tail -- the one copy
+        in the history -- so the facts the model learned the hard way arrive without a tool call. Named like the
+        other notes Dream adds mid-turn, so the filer and the verifier keep reading the owner's request. A pass that
+        cut nothing puts the lifted notes back where they were: the history is then exactly as it was."""
+        if not compacted:
+            for i, m in lifted:
+                self.messages.insert(i, m)
+            return
+        context = _bound_context()
+        note = handoff.lessons_note(context.workspace if context is not None else None)
+        if note:
+            self.messages.append({"role": "user", "name": "dream_recovery_instruction", "content": note})
 
     def fresh_start(self) -> list[Event]:
         """The owner's Fresh start (DREAM-113, fix list #33): the conversation becomes one handoff now
@@ -2173,6 +2291,7 @@ class OpenAICompatBackend(Backend):
             return [Event("system", "Fresh start: nothing to hand off yet — the conversation is empty.")]
         parts = handoff.gather(_bound_context())          # the reads first: one that fails changes nothing
         before, count = self._ctx_fill(), len(self.messages) - 1
+        self._lift_lessons()                               # the handoff quotes PLAN.md's lessons itself (DREAM-123)
         size, msg_size = self._calibrated_size()
         prior = list(self.messages)
         save, notes = self._note_elided(), []
@@ -2235,6 +2354,7 @@ class OpenAICompatBackend(Backend):
         # Halve past the trigger line, so one big tool result doesn't put us
         # straight back over it on the very next round. What goes is saved to
         # working notes first (Phase 10): the stub names the note.
+        lifted = self._lift_lessons()
         prior = list(self.messages)
         save = self._note_elided()
         # Aimed below the target by as much as the last landing came in above its projection (at most 2 % of
@@ -2261,6 +2381,7 @@ class OpenAICompatBackend(Backend):
             # The stale server count describes the OLD, larger history; keeping
             # it would pin _ctx_fill high and re-trigger compaction every round.
             self._compacted()
+        self._carry_lessons(lifted, compacted=bool(n))
         after = _est_tokens(self.messages)
         projected = size(self.messages)
         if n or snipped:
@@ -2269,7 +2390,7 @@ class OpenAICompatBackend(Backend):
             events.append(Event("system", f"compacted context: about {fill:,} to about {projected:,} "
                                           f"tokens ({n} messages elided)"))
             if self.runtime_meter:
-                self.runtime_meter.record("compaction", before=before, after=after, elided=n,
+                self.runtime_meter.record("compaction", source="window", before=before, after=after, elided=n,
                                           window=window, threshold=compact_at(window), fill=fill,
                                           bound=bound, target=target, projected=projected,
                                           text_ratio=round(self._text_ratio, 3),
@@ -2502,7 +2623,9 @@ class OpenAICompatBackend(Backend):
         available_schemas = [s for s in self.tool_schemas
                              if s["function"]["name"] in active_names
                              or s["function"]["name"] in {"task", "fork_verifier_agent"}]
-        allowed_lead = True
+        if self.tool_scope is not None:   # a scoped ask offers the scope's tools and nothing else
+            available_schemas = [s for s in available_schemas if s["function"]["name"] in self.tool_scope]
+        allowed_lead = self.tool_scope is None
         stable = self._stable_tool_list()
         # Revealing `snip` partway through a session rewrites the prompt's start --
         # tools render before the messages, so appending one shifts every message
@@ -2642,9 +2765,13 @@ class OpenAICompatBackend(Backend):
         """One admission gate for lead, delegated and recovery requests."""
         window, output = self._admission_limits(messages)
         counter, method = self._calibrated_counter()
-        report = account(messages, schemas, window, output, counter=counter, method=method)
+        # Compaction is decided on a typical reply's room, not the whole ceiling (DREAM-126, _ADMISSION_RESERVE);
+        # admit() below still asks for up to the ceiling, clamped to what the window holds.
+        reserve = min(output, _ADMISSION_RESERVE)
+        report = account(messages, schemas, window, reserve, counter=counter, method=method)
         elided = 0
         if report.remaining < 0 and self._context_overflow == "compact":
+            before = report.input_tokens
             # Preserve the system/current user messages. Only prior exchanges
             # can be elided, and lead elisions retain recovery notes. One big
             # step (to half the compaction line), never "just enough": trimming
@@ -2662,6 +2789,13 @@ class OpenAICompatBackend(Backend):
             self._record_council_omissions(prior, messages)
             if elided and lead and messages is self.messages:
                 self._compacted()   # the count described the larger history
+            if elided and self.runtime_meter is not None:
+                after = account(messages, schemas, window, reserve, counter=counter, method=method).input_tokens
+                self.runtime_meter.record("compaction", source="admission", before=before, after=after,
+                                          elided=elided, window=window, reserve=reserve, ceiling=output,
+                                          phase="lead" if lead else "delegated/recovery")
+            if elided:   # the ceiling was clamped to the uncut history's room; the cut one has more (DREAM-126)
+                window, output = self._admission_limits(messages)
         try:
             report = admit(messages, schemas, window, output, counter=counter, method=method)
         except ContextOverflow as exc:
@@ -2678,8 +2812,6 @@ class OpenAICompatBackend(Backend):
         if lead:
             self.context_report = report.as_dict()
             self.context_report["elided_messages"] = elided
-        if elided and self.runtime_meter is not None:
-            self.runtime_meter.record("context_compacted", messages=elided, phase="lead" if lead else "delegated/recovery")
         return report
 
     def _lookup_tool_schema(self, name: str, search: str = "") -> tuple[str, bool]:
@@ -3201,6 +3333,11 @@ class OpenAICompatBackend(Backend):
         # check then sees the real tool name.
         if name.lower() in _TOOL_ALIASES and name.lower() not in self.tools_by_name:
             name = _TOOL_ALIASES[name.lower()]
+        # A scoped ask (DREAM-118) runs the scope's tools and nothing else -- ahead of `task` and the
+        # lead's hatches below, so none of them is reachable from it. Costs no budget.
+        if allowed is None and self.tool_scope is not None and not {name, name.lower()} & self.tool_scope:
+            offered = ", ".join(sorted(self.tool_scope & set(self.tools_by_name)))
+            return _ScopeRefusal(f"Error: tool '{name}' is not offered to this step. Its tools: {offered}."), True
         # `task` is dispatched only by the lead (allowed is None). A subagent runs
         # with a scoped `allowed` set, so it can neither call `task` (recursion)
         # nor reach a tool outside its scope. Case-insensitive: Qwen was observed
@@ -3324,6 +3461,7 @@ class OpenAICompatBackend(Backend):
             return _LoopGuardResult(_LOOP_GUARD_BLOCK), True, False
         text, is_error = await self._exec_tool(name, args, allowed=allowed)
         executed = isinstance(text, _ExecutedToolResult)
+        refused = isinstance(text, _ScopeRefusal)
         images = getattr(text, "images", None)
 
         def canonical_name(tool_name: str) -> str:
@@ -3395,6 +3533,8 @@ class OpenAICompatBackend(Backend):
             text = _VisualResult(text, images)
         elif executed:
             text = _ExecutedToolResult(text)
+        elif refused:
+            text = _ScopeRefusal(text)
         return text, is_error, False
 
     # Providers whose server takes requests concurrently. MachX is a single-flight
@@ -3840,6 +3980,7 @@ class OpenAICompatBackend(Backend):
         self._msg_seq += 1
         self.messages.append({"role": "user",
                               "content": f"{prompt}\n\n[id:m{self._msg_seq:04d}]"})
+        self._turn_changed = self._last_round_failed = False   # DREAM-125's build-turn state
         if getattr(self, 'steering_inbox', None) is not None:
             self.messages[-1]['name'] = 'dream_active_user'
         self._stage_council_context()
@@ -3898,6 +4039,9 @@ class OpenAICompatBackend(Backend):
                 **self._sampling,
                 **self._effort_params(),
             }
+            thinking_capped = self._build_thinking_cap()
+            if thinking_capped:
+                payload["enable_thinking"] = False
             # A local server matches on the PROMPT'S HEAD — the system message and the
             # tool schemas, ~8,614 tokens here. If that head changes mid-session the
             # whole conversation is re-read, however little of it moved: live
@@ -4095,7 +4239,7 @@ class OpenAICompatBackend(Backend):
             if usage:
                 agg["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
                 if self.runtime_meter is not None:
-                    self.runtime_meter.usage({**usage, "head_hash": head_hash})
+                    self.runtime_meter.usage({**usage, "head_hash": head_hash, **({"thinking_capped": True} if thinking_capped else {})})
                 agg["completion_tokens"] += int(usage.get("completion_tokens") or 0)
                 agg["ctx_used"] = (int(usage.get("prompt_tokens") or 0)
                                    + int(usage.get("completion_tokens") or 0))
@@ -4286,14 +4430,30 @@ class OpenAICompatBackend(Backend):
             loop_break = False
             recorded = 0
             round_images = []
+            self._last_round_failed = False
             # Phase 13: on a provider that is not single-flight, a contiguous run
             # of `task` calls starts together — at its FIRST slot, so every tool
             # the model wrote before it has already finished. Results are taken
             # in the order the model issued them.
             runs = self._task_batches(calls)
+            # DREAM-128: a call that is only the abandoned start of a later one is not run (a
+            # batched `task` call starts with its batch, so it is left to run).
+            starts = {i: j for i, j in _abandoned_starts(calls).items()
+                      if not any(i in r for r in runs.values())}
             batch: dict[int, "asyncio.Future[Any]"] = {}
             batch_scopes: dict[int, CancelScope] = {}
             try:
+                # A scoped ask's per-reply guard (DREAM-118): one reply asking for the same tool more
+                # than the limit is a runaway (live 2026-09-25 02:47: memory_read 814 times or more in
+                # one 16,384-token reply, 376 of them run). None of its calls runs -- the finally below
+                # pairs each with an interrupted stub -- and the ask ends as a failure.
+                if self.reply_repeat_limit is not None and calls:
+                    repeated, times = Counter(c["name"] or "" for c in calls).most_common(1)[0]
+                    if times > self.reply_repeat_limit:
+                        yield Event("error", f"runaway: {repeated} repeated {times} times in one reply")
+                        yield Event("result", {"is_error": True, "subtype": "runaway",
+                                               "stats": self._turn_stats(agg, time.monotonic() - turn_t0)})
+                        return
                 for i, c in enumerate(calls):
                     name = c["name"]
                     call_id = c["id"] or f"call_{i}"
@@ -4308,6 +4468,12 @@ class OpenAICompatBackend(Backend):
                         # argument the model actually sent, and invite an identical
                         # retry. The parse failure IS the result.
                         result_text, is_error, stop = bad_args, True, False
+                    elif i in starts:
+                        result_text, is_error, stop = (
+                            f"[Dream] This call was not run: it looks like the abandoned start of a later "
+                            f"call in the same reply (call {starts[i] + 1}, the same {name} code, cut off where "
+                            f"that one begins). If you meant it on its own, send it again.",
+                            True, False)
                     elif i in batch:
                         try:
                             result_text, is_error, stop = await asyncio.shield(batch[i])
@@ -4340,9 +4506,15 @@ class OpenAICompatBackend(Backend):
                     self.messages.append({"role": "tool", "tool_call_id": call_id,
                                           "content": _clamp(result_text, _TOOL_RESULT_CAP)})
                     round_images.extend(getattr(result_text, "images", []))
+                    if is_error and i not in starts:   # a skipped start is not a failed tool (DREAM-125's cap)
+                        self._last_round_failed = True
+                    elif not is_error and not self._read_only_call({"function": {"name": name, "arguments": c["args"] or "{}"}}):
+                        self._turn_changed = True
                     recorded = i + 1
-                    yield Event("tool_result", {"name": name, "content": result_text,
-                                                "is_error": is_error, "id": call_id})
+                    result = {"name": name, "content": result_text, "is_error": is_error, "id": call_id}
+                    if isinstance(result_text, _ScopeRefusal):
+                        result["refused"] = True   # nothing ran: not a tool failure to the consolidation
+                    yield Event("tool_result", result)
             finally:
                 for index, fut in batch.items():
                     if not fut.done():
@@ -4521,24 +4693,44 @@ class OpenAICompatBackend(Backend):
             if m.get("role") != "assistant":
                 continue
             calls = m.get("tool_calls") or []
-            if not calls:
-                return False
-            for tc in calls:
-                fn = tc.get("function") or {}
-                name = str(fn.get("name") or "").split("__")[-1]
-                cap = policy.capability(name)
-                if cap in {policy.READONLY, policy.MEMORY}:
-                    continue
-                if cap == policy.SHELL:
-                    try:
-                        command = str((json.loads(fn.get("arguments") or "{}") or {}).get("command") or "")
-                    except ValueError:
-                        return False
-                    if policy.shell_read_only(command):
-                        continue
-                return False
-            return True
+            return bool(calls) and all(self._read_only_call(tc) for tc in calls)
         return False
+
+    @staticmethod
+    def _read_only_call(tc: dict) -> bool:
+        """A read (or memory) tool, or a shell command that only reads."""
+        fn = tc.get("function") or {}
+        name = str(fn.get("name") or "").split("__")[-1]
+        cap = policy.capability(name)
+        if cap in {policy.READONLY, policy.MEMORY}:
+            return True
+        if cap == policy.SHELL:
+            try:
+                command = str((json.loads(fn.get("arguments") or "{}") or {}).get("command") or "")
+            except ValueError:
+                return False
+            return policy.shell_read_only(command)
+        return False
+
+    def _build_thinking_cap(self) -> bool:
+        """DREAM-125 (2026-09-25): MiMo spent 16,384-token reasoning passes (22-28 minutes each) proving
+        geometry during a Blender build instead of changing, rendering and comparing. `ie serve` has no
+        reasoning budget for it, only `enable_thinking` on/off. So once this turn has made a change that
+        succeeded (a write, an edit, a consequential shell command), a request that follows a round with
+        no failed tool runs with thinking off: the model plans with thinking, then iterates; after a
+        failure it may think to debug. Only architectures in _THINKING_CAP_ARCHITECTURES that advertise
+        the `thinking` control; DREAM_BUILD_THINKING_CAP=0 turns it off."""
+        capabilities = self._local_capabilities or {}
+        if (self.provider.key != "machx" or os.environ.get("DREAM_BUILD_THINKING_CAP", "1") == "0"
+                or self._sampling.get("enable_thinking") is False
+                or capabilities.get("architecture") not in _THINKING_CAP_ARCHITECTURES
+                or "thinking" not in capabilities.get("load", [])
+                or not self._turn_changed or self._last_round_failed):
+            return False
+        i = len(self.messages)
+        while i and self.messages[i - 1].get("name") in {"dream_visual_evidence", "dream_live_state"}:
+            i -= 1                 # Dream's own notes after a round are not a new instruction
+        return bool(i) and self.messages[i - 1].get("role") == "tool"
 
     def _base_effort_params(self) -> dict[str, Any]:
         """reasoning_effort fragment for the request, or {} when no effort is set."""

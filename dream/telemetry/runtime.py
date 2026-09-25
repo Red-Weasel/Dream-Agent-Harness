@@ -120,6 +120,8 @@ class RunMeter:
             p["prompt_tokens"] += incoming
             p["output_tokens"] += outgoing
             head = {"head_hash": usage["head_hash"]} if isinstance(usage.get("head_hash"), str) else {}
+            if usage.get("thinking_capped") is True:     # DREAM-125: sent with thinking off by the build-turn cap
+                head["thinking_capped"] = True
             self.record("usage", phase=phase, input_tokens=incoming, output_tokens=outgoing, cached_tokens=cache,
                         **head)
 

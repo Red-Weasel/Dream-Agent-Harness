@@ -57,6 +57,41 @@ def merge_mcp_configs(root: list[dict], extra: list[dict]) -> tuple[list[dict], 
     return out, warnings
 
 
+# Fix list #90 and #94 (DREAM-118): the exit consolidation's own bounds. Live 2026-09-25 02:47 the
+# consolidation ran on the last turn's run meter (24 of 400 spent) and its ONE reply -- 16,384
+# tokens, the output ceiling -- asked for memory_read 814 times or more: 376 calls ran (368
+# memory_read; read_notes, task_list, skill_list, recall_sessions, memory_list, list_dir,
+# project_outline and checkpoint_list once each) and took that meter to 400, the rest were refused,
+# the next round ended "Run tool budget reached (400)" and no memory was written. The three bounds
+# act on that shape at different points; none of them shortens the 16,384-token decode itself (only
+# a smaller consolidation max_tokens or the #85 continuation would).
+# The tools the consolidation may use: the ten its prompt names, and the four read-only lookups the
+# system prompt (kept by the fresh-context dream) teaches -- task_list, recall_sessions, memory_list,
+# skill_find -- which the owner's four logged consolidations (runtime logs 20260911-141259-1e42,
+# 20260923-094144-f5ed, 20260918-183131-e2ce, 20260920-220222-c4a7) called. Only these are offered on
+# an OpenAI-compatible backend (a CLI/SDK backend's tool list is fixed when it connects); a call to
+# any other tool is refused at no cost and is not a failure of the consolidation.
+CONSOLIDATION_TOOLS = frozenset({"read_notes", "remember", "recall", "forget", "project_note",
+                                 "skill_list", "skill_save", "skill_patch", "task_add", "task_update",
+                                 "task_list", "recall_sessions", "memory_list", "skill_find"})
+# The memory-writing calls among them: what a consolidation that fails later has still kept.
+_CONSOLIDATION_WRITES = frozenset({"remember", "forget", "project_note", "skill_save", "skill_patch",
+                                   "task_add", "task_update"})
+# One reply may ask for the same tool at most this many times; more is a runaway, and the reply
+# fails before any of its calls run. Above the prompt's own worst case (20 stray notes folded in one
+# reply) and the batches ordinary turns make (eval_js 9-21 times in one reply in the owner's logs);
+# the four logged consolidations never asked for one tool more than twice in a reply, and the 02:47
+# reply asked for memory_read at least 368 times.
+CONSOLIDATION_REPLY_REPEATS = 24
+# The tool calls one consolidation may make in all, counted on a meter of its own so the run's spent
+# budget cannot refuse them; the run's meter is put back afterwards with its count untouched. Sized
+# from the four logs (9, 9, 12 and 25 calls) and the prompt's worst case (read_notes, a recall/remember
+# pair per fact, up to RECONCILE_MAX_CLUSTERS conflict groups, up to 20 stray notes, skill_list, one
+# skill, task updates) with headroom. The meter refuses the round after the cap-th call, so a
+# consolidation making fewer than this many calls always gets its summary round.
+CONSOLIDATION_TOOL_CALLS = 60
+
+
 def _consolidation_status(engine, state: str, error: str | None = None) -> None:
     """Record observed session-consolidation phases; this does not start work."""
     now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -133,6 +168,7 @@ class Engine:
         self.imported_memories = 0
         self.tool_warnings: list[str] = []
         self.tool_names: list[str] = []
+        self.tools_used: set[str] = set()      # DREAM-120: the tool names this session has called (the selector's `used`)
         self._custom_tool_names: set[str] = set()
         self._turn_index = 0
         self._started = False
@@ -1460,11 +1496,20 @@ class Engine:
 
         # Supply a short real workflow before inference. The original request is
         # already logged above; process guidance is not attributed to the user.
-        from ..skills.selection import guidance_budget, select_for_task
+        from ..skills.selection import TaskGuidance, guidance_budget, select_for_task
         from ..projects import build_context
         with self.turn_timing.phase("preparation") if self.turn_timing else nullcontext():
-            # DREAM-101: a large window carries the whole workflow of the skill the request asked for
-            guidance = await in_thread(select_for_task, prompt, max_chars=guidance_budget(self._guidance_window()))
+            # DREAM-101: a large window carries the whole workflow of the skill the request asked for.
+            # DREAM-120 (#92): /resume's priming prompt is Dream's restore text, not a task (its quoted exchange picked
+            # frontend-design for a modelling session): it selects nothing, and the owner's next message selects. The
+            # selector also learns which tools this session has already called, so in Blender work (a blender__* call
+            # made, or Blender named in the request) frontend-design needs a web-page word. Not the tools OFFERED: the
+            # live-Blender server is registered at every desktop session start, so that would narrow every session.
+            if turn_origin.current.get() == turn_origin.RESUME:
+                guidance = TaskGuidance()
+            else:
+                guidance = await in_thread(select_for_task, prompt, max_chars=guidance_budget(self._guidance_window()),
+                                           used=frozenset(self.tools_used))
             project_context = await in_thread(build_context, self.workspace, prompt)
         for warning in guidance.warnings:
             yield Event("system", "Workflow not loaded: " + warning)
@@ -1496,7 +1541,8 @@ class Engine:
                                "these workflows do not override user constraints or grant tool permissions.]\n"
                                + guidance.text)
             self.runtime_meter.record("task_guidance", skills=list(guidance.names),
-                                      chars=len(guidance.text), tools=list(guidance.tools))
+                                      chars=len(guidance.text), tools=list(guidance.tools),
+                                      matched=dict(guidance.matched))
             from ..extensions import extension_id, record_usage
             for name in guidance.names:
                 await in_thread(record_usage, extension_id("skill", name), "opened")
@@ -1519,6 +1565,8 @@ class Engine:
                     await in_thread(self.working.log_turn, "assistant", ev.data)
                 elif ev.kind == "tool_use":
                     self.tool_budget.record()
+                    if ev.data.get("name"):
+                        self.tools_used.add(str(ev.data["name"]))   # DREAM-120: the selector's `used` from the next turn
                     # Progress guard (fix #46): a run of read-only steps with no project write
                     # gets one steering note through the same inbox the owner's corrections use.
                     guard = getattr(self, "_progress_guard", None)
@@ -1632,19 +1680,67 @@ class Engine:
             _consolidation_status(self, "unavailable", "No provider is connected for consolidation.")
             return None
         self._consolidation_errors = deque(maxlen=8)
+        self._consolidation_kept: dict[str, int] = {}   # what was written, as it is written
+        self._consolidation_facets = 0
         _consolidation_status(self, "consolidating")
+        # DREAM-118: the consolidation's tool calls are counted on this meter, capped at
+        # CONSOLIDATION_TOOL_CALLS, in place of the run's meter on every enforcement point: the
+        # engine's (_wrap_tool, the CLI/SDK backends), the tool context's (what a council or review
+        # tool reads through bound_runtime_meter) and, for an OpenAI-compatible backend, the
+        # backend's, which for the same span offers only the prompt's tools and refuses a runaway
+        # reply. Everything is put back in the finally; the run's meter keeps its count. The
+        # consolidation's events land in the session's runtime log like a turn's.
+        from dataclasses import replace
+        from ..telemetry.runtime import RunMeter
+        meter = RunMeter(self.session_id, self._turn_index,
+                         replace(self.profile, max_run_tools=CONSOLIDATION_TOOL_CALLS),
+                         config.LOG_DIR / "runtime" / f"{self.session_id}.jsonl")
+        context = getattr(self, "_tool_context", None)
+        scoped = isinstance(self.backend, OpenAICompatBackend)
+        before = (self.runtime_meter, context.runtime_meter if context is not None else None,
+                  self.backend.runtime_meter if scoped else None)
+        self.runtime_meter = meter
+        if context is not None:
+            context.runtime_meter = meter
+        if scoped:
+            self.backend.runtime_meter = meter
+            self.backend.tool_scope = CONSOLIDATION_TOOLS
+            self.backend.reply_repeat_limit = CONSOLIDATION_REPLY_REPEATS
+
+        def failed(reason: str) -> None:
+            # Said, not only logged (the 02:47 failure left its only trace in cli.log): the runtime
+            # log, and one `system` line through the event funnel, which the console prints and the
+            # chat pane shows as Dream's own note. Honest about a partial save: what the model's
+            # memory-writing calls and the episodic save kept is named before the failure.
+            _consolidation_status(self, "failed", reason)
+            kept = ", ".join(f"{name} x{n}" if name in _CONSOLIDATION_WRITES else name
+                             for name, n in sorted(self._consolidation_kept.items()))
+            meter.record("consolidation_failed", reason=reason[:1000], kept=kept)
+            if self.emit:
+                self.emit(Event("system", f"memory partly saved: {kept}; {reason}" if kept
+                                else f"memory not saved: {reason}"))
+
         try:
             summary = await Engine._consolidate(self)
         except asyncio.CancelledError:
-            _consolidation_status(self, "failed", "Consolidation interrupted; the saved transcript remains available.")
+            failed("Consolidation interrupted; the saved transcript remains available.")
             raise
         except Exception as exc:
-            _consolidation_status(self, "failed", f"{type(exc).__name__}: {exc}")
+            failed(f"{type(exc).__name__}: {exc}")
             raise
+        finally:
+            self.runtime_meter = before[0]
+            if context is not None:
+                context.runtime_meter = before[1]
+            if scoped:
+                self.backend.runtime_meter = before[2]
+                self.backend.tool_scope = None
+                self.backend.reply_repeat_limit = None
         if self._consolidation_errors:
-            _consolidation_status(self, "failed", "; ".join(self._consolidation_errors))
+            failed("; ".join(self._consolidation_errors))
         else:
             _consolidation_status(self, "saved")
+            meter.record("consolidation_saved", facets=self._consolidation_facets)
         return summary
 
     async def _consolidate(self) -> str | None:
@@ -1834,12 +1930,21 @@ class Engine:
                                 f"consolidation result subtype {sub!r} — treating as incomplete"
                             )
                             self._consolidation_errors.append(f"Provider result incomplete: {sub}"[:500])
-                    elif ev.kind == "tool_result" and isinstance(ev.data, dict) and ev.data.get("is_error"):
-                        # Track which tools failed: a failed read_notes must not consume
-                        # notes; a failed remember/forget must not retire pairs.
+                    elif ev.kind == "tool_result" and isinstance(ev.data, dict):
                         name = str(ev.data.get("name") or "").split("__")[-1]
-                        tool_errors.add(name)
-                        self._log_stderr(f"consolidation tool error: {name}")
+                        if ev.data.get("refused"):
+                            # A call outside the consolidation's tools (DREAM-118): nothing ran and no
+                            # meter was charged, so it is not a tool failure of this consolidation.
+                            self._log_stderr(f"consolidation tool refused: {name}")
+                        elif ev.data.get("is_error"):
+                            # Track which tools failed: a failed read_notes must not consume
+                            # notes; a failed remember/forget must not retire pairs.
+                            tool_errors.add(name)
+                            self._log_stderr(f"consolidation tool error: {name}")
+                        elif name in _CONSOLIDATION_WRITES:
+                            # A memory-writing call that succeeded is kept whatever happens next, an
+                            # interrupt included: the failure note names it.
+                            self._consolidation_kept[name] = self._consolidation_kept.get(name, 0) + 1
         except Exception as e:
             ask_ok = False
             self._log_stderr(f"consolidation ask failed: {e}")
@@ -1906,6 +2011,7 @@ class Engine:
                     project=self.project,
                 )
                 await in_thread(longterm.write_markdown, mem)
+                self._consolidation_kept["the session's episodic memory"] = 1
             except Exception as e:
                 self._log_stderr(f"episodic save failed: {e}")
                 self._consolidation_errors.append(f"episodic save failed: {e}")
@@ -1931,6 +2037,7 @@ class Engine:
         # next wake-up leads with the person, not hardware notes. Cheap, idempotent.
         try:
             cur = await in_thread(curation.curate, self.store)
+            self._consolidation_facets = int(cur.get("classified") or 0)  # the consolidation_saved event's count
             if cur.get("classified"):
                 self._log_stderr(
                     f"curated {cur['classified']} memory facet(s) "
