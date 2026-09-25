@@ -45,7 +45,7 @@ class Backend:
 def engine(tmp_path, monkeypatch):
     monkeypatch.setattr(mod.config, 'SESSIONS_DIR', tmp_path / 'sessions')
     from dream.skills.selection import TaskGuidance
-    monkeypatch.setattr('dream.skills.selection.select_for_task', lambda prompt: TaskGuidance())
+    monkeypatch.setattr('dream.skills.selection.select_for_task', lambda prompt, **_: TaskGuidance())
     monkeypatch.setattr('dream.projects.build_context', lambda *args: {'text': '', 'warnings': [], 'names': [], 'revision': 0})
     e = Engine(provider='machx', model='original-model', workspace=tmp_path)
     e.store = MemoryStore(tmp_path / 'test.db')

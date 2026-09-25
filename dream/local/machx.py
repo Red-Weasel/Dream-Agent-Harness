@@ -12,6 +12,7 @@ import json
 import shlex
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -140,6 +141,15 @@ def _command(args: list[str]) -> list[str]:
     return ["bash", "-lc", "source scripts/env.sh && exec " + shlex.join(args)]
 
 
+def _stamped(command: list[str]) -> list[str]:
+    """The serve command with the engine's stdout and stderr through log_stamp.py (DREAM-127, fix list #102):
+    each machx.log line gets a wall-clock prefix. The shell redirects its own output first, so env.sh's lines are
+    stamped too, and still `exec`s the engine: the pid Dream records, signals and reads the args of stays the
+    engine's. The stamper writes to the shell's stdout at that point, the log file `serve` opened."""
+    stamper = f"exec {shlex.quote(sys.executable)} -I {shlex.quote(str(Path(__file__).with_name('log_stamp.py')))}"
+    return [*command[:-1], f"exec > >({stamper}) 2>&1; " + command[-1]]
+
+
 def capabilities(model_path: Path) -> dict:
     """Read architecture capabilities without allocating GPU/model weights."""
     result = subprocess.run(
@@ -185,7 +195,7 @@ def serve(model_path: Path, gpus: int | None = None, ctx: int | None = None,
     env.setdefault("IE_DS41_PROFILE_OUT", str(Path.home() / ".cache" / "machx-ie" / "ds41-dream-profile.txt"))
     with load_lock(PORT) as launch_fd, _log_file().open("a", encoding="utf-8") as log:
         proc = engine_guard.spawn(
-            _command(args), keep_hot=keep_hot, log_path=_log_file(), cwd=MACHX_DIR, env=env,
+            _stamped(_command(args)), keep_hot=keep_hot, log_path=_log_file(), cwd=MACHX_DIR, env=env,
             stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
             pass_fds=(launch_fd,),
         )

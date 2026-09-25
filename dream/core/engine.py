@@ -171,6 +171,7 @@ class Engine:
         self.tools_used: set[str] = set()      # DREAM-120: the tool names this session has called (the selector's `used`)
         self._custom_tool_names: set[str] = set()
         self._turn_index = 0
+        self._titled = False          # the session has its title (the owner's first prompt, DREAM-130)
         self._started = False
         self._backfill_task: asyncio.Task | None = None
         self.total_cost_usd = 0.0
@@ -1487,7 +1488,10 @@ class Engine:
                                   model=self.model, profile=self.profile.name)
         if isinstance(self.backend, OpenAICompatBackend):
             self.backend.runtime_meter = self.runtime_meter
-        if self._turn_index == 1:
+        # DREAM-130 (#105): the session is titled from the owner's first prompt, not Dream's (a /resume priming prompt,
+        # a guided task's, the loop's ...: core/turn_origin.py); the exit consolidation names its memory after it.
+        if not self._titled and not turn_origin.is_generated(turn_origin.current.get(), prompt):
+            self._titled = True
             title = prompt.strip().splitlines()[0][:70] if prompt.strip() else "session"
             await in_thread(self.store.set_session_title, self.session_id, title)
         if transfer is None:

@@ -169,7 +169,8 @@ class _StatsBackend:
 async def test_engine_passes_stats_events_through():
     eng = Engine(provider="machx", model="m")
     eng._started = True
-    eng._turn_index = 3  # not the title-setting first turn
+    eng._turn_index = 3
+    eng._titled = True  # the session already has its title (DREAM-130): no store write
     eng.working = _StubWorking()
     eng.backend = _StatsBackend()
     from dream.tools.context import ToolContext

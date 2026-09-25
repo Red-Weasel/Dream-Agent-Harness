@@ -20,6 +20,10 @@ class AttributedMeter:
             return
         self.meter.usage(usage, phase=f'{self.label}:{phase}')
 
+    def record(self, kind, **metadata):
+        # A reviewer's events (compaction, request failure, ...) go to the owning run, marked with whose they are.
+        self.meter.record(kind, **metadata, scope=self.label)
+
 
 def attributed_meter(provider, *, scope, meter=None):
     if meter is None:

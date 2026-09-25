@@ -3309,7 +3309,8 @@ class OpenAICompatBackend(Backend):
                 data = resp.json()
                 usage = data.get("usage") or {}
                 if self.runtime_meter is not None:
-                    self.runtime_meter.usage({**usage, "head_hash": self._head_hash(payload)}, phase="recovery")
+                    self.runtime_meter.usage({**usage, "head_hash": self._head_hash(payload),
+                                             "response_id": data.get("id")}, phase="recovery")
                 for key in self._delegated_usage:
                     self._delegated_usage[key] += int(usage.get(key) or 0)
                 msg = data["choices"][0]["message"]
@@ -3774,7 +3775,8 @@ class OpenAICompatBackend(Backend):
                 for key in self._delegated_usage:
                     self._delegated_usage[key] += int(usage.get(key) or 0)
                 if self.runtime_meter is not None:
-                    self.runtime_meter.usage({**usage, "head_hash": self._head_hash(payload)}, phase=subagent_type)
+                    self.runtime_meter.usage({**usage, "head_hash": self._head_hash(payload),
+                                             "response_id": data.get("id")}, phase=subagent_type)
                 try:
                     sub_prompt_tokens = int(usage.get("prompt_tokens") or 0)
                 except (TypeError, ValueError):
@@ -3915,14 +3917,21 @@ class OpenAICompatBackend(Backend):
             return False
         corrections = await inbox.drain(final=final)
         for receipt in corrections:
-            self._msg_seq += 1
             # Dream's continuation notice after a cut at the output ceiling (fix #85) is not a correction the
             # owner sent: it takes the name fix #14's instruction had, which the filer (_turn_text), the
             # verifier's request scope and compaction's last-user search all leave out.
             name = ('dream_recovery_instruction' if receipt.get('origin') == turn_origin.LENGTH
                     else 'dream_steering_user')
-            self.messages.append({'role': 'user', 'name': name,
-                'content': f"{receipt['text']}\n\n[id:m{self._msg_seq:04d}]"})
+            text = receipt['text']
+            if receipt.get('origin'):
+                # A note Dream wrote (DREAM-127, fix list #101): no owner's [id:] tag -- the model took one for a
+                # stray marker "that isn't mine" and ignored the note -- and it always opens as Dream's.
+                # Dream's openings: "[Dream] ", "[Dream progress guard]", "[Dream, not from ..."; "[Dreamy]" is not one.
+                content = text if re.match(r"\[Dream[\] ,]", text) else f"[Dream] {text}"
+            else:
+                self._msg_seq += 1
+                content = f"{text}\n\n[id:m{self._msg_seq:04d}]"
+            self.messages.append({'role': 'user', 'name': name, 'content': content})
         return bool(corrections)
 
     async def ask(self, prompt: str) -> AsyncIterator[Event]:
@@ -4088,6 +4097,7 @@ class OpenAICompatBackend(Backend):
             tool_calls: dict[int, dict[str, str]] = {}
             truncated_call: str | None = None
             usage = None
+            response_id = None      # the engine's id for this reply (chatcmpl-N), for the runtime log
             timings = None
             finish_reason: str | None = None
             t_req = time.monotonic()
@@ -4121,6 +4131,7 @@ class OpenAICompatBackend(Backend):
                         except json.JSONDecodeError:
                             continue
                         _raise_server_error(chunk)
+                        response_id = chunk.get("id") or response_id
                         if chunk.get("usage"):
                             usage = chunk["usage"]
                         if chunk.get("timings"):
@@ -4239,7 +4250,8 @@ class OpenAICompatBackend(Backend):
             if usage:
                 agg["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
                 if self.runtime_meter is not None:
-                    self.runtime_meter.usage({**usage, "head_hash": head_hash, **({"thinking_capped": True} if thinking_capped else {})})
+                    self.runtime_meter.usage({**usage, "head_hash": head_hash, "response_id": response_id,
+                                             **({"thinking_capped": True} if thinking_capped else {})})
                 agg["completion_tokens"] += int(usage.get("completion_tokens") or 0)
                 agg["ctx_used"] = (int(usage.get("prompt_tokens") or 0)
                                    + int(usage.get("completion_tokens") or 0))

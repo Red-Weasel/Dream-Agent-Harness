@@ -466,7 +466,7 @@ def engine(tmp_path, monkeypatch):
     from dream.skills.selection import TaskGuidance
     from dream.tools.context import ToolContext
     monkeypatch.setattr('dream.config.SESSIONS_DIR', tmp_path / 'sessions')
-    monkeypatch.setattr('dream.skills.selection.select_for_task', lambda _: TaskGuidance())
+    monkeypatch.setattr('dream.skills.selection.select_for_task', lambda *_, **__: TaskGuidance())
     monkeypatch.setattr('dream.projects.build_context', lambda *args: {
         'text': '', 'warnings': [], 'names': [], 'revision': 0,
     })

@@ -14,6 +14,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+# Wall-clock time on every event (DREAM-127, fix list #102): the engine log's lines carry the same clock, so a
+# request here and its [gen] line there can be joined. Bound at import: tests replace this module's `time`.
+_wall_clock = time.time
+
 
 class RunLimit(RuntimeError):
     pass
@@ -122,6 +126,8 @@ class RunMeter:
             head = {"head_hash": usage["head_hash"]} if isinstance(usage.get("head_hash"), str) else {}
             if usage.get("thinking_capped") is True:     # DREAM-125: sent with thinking off by the build-turn cap
                 head["thinking_capped"] = True
+            if isinstance(usage.get("response_id"), str):   # the engine's id for the reply (DREAM-127)
+                head["response_id"] = usage["response_id"]
             self.record("usage", phase=phase, input_tokens=incoming, output_tokens=outgoing, cached_tokens=cache,
                         **head)
 
@@ -130,7 +136,7 @@ class RunMeter:
             return
         with self._lock:
             wall, approval, active = self._times()
-        event = {"event": kind, "session": self.session_id, "turn": self.turn,
+        event = {"event": kind, "session": self.session_id, "turn": self.turn, "ts": round(_wall_clock(), 3),
                  "elapsed_s": round(wall, 3), "active_elapsed_s": round(active, 3),
                  "approval_wait_s": round(approval, 3), **metadata}
         try:
