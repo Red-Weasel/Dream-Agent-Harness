@@ -1,5 +1,4 @@
-"""Fix list #104, DREAM-128: one MiMo reply at 13:04:38 UTC on 2026-09-25 (session
-20260925-025648-88d2) carried two blender__execute_blender_code calls -- `{"code": "import bpy, o"}`
+"""Fix list #104, DREAM-128: one MiMo reply in a live session carried two blender__execute_blender_code calls -- `{"code": "import bpy, o"}`
 and then the full 728-character script it was the start of. The fragment ran first and failed
 (ModuleNotFoundError: No module named 'o').
 
