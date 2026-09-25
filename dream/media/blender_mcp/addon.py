@@ -14,8 +14,11 @@
 #     themselves there (startup.py);
 #   - the command table and get_addon_info's capability list name only the kept handlers;
 #   - Dream (DREAM-129) adds save_snapshot and open_snapshot (the scene snapshots the
-#     bridge takes before each call that can change the scene; scene_snapshots.py).
-# The kept handler bodies are unchanged.
+#     bridge takes before each call that can change the scene; scene_snapshots.py);
+#   - Dream (DREAM-132): get_viewport_screenshot draws a Rendered view whose engine the
+#     offscreen draw cannot run (Cycles) as Material Preview with the scene's lights and
+#     world, and reports the shading, the view and whether the pixels match the last capture.
+# The other kept handler bodies are unchanged.
 
 import bpy
 import mathutils
@@ -27,6 +30,7 @@ import time
 import traceback
 import os
 import io
+import hashlib
 from contextlib import redirect_stdout
 
 bl_info = {
@@ -42,6 +46,21 @@ bl_info = {
 
 # Keep in sync with blender_mcp.addon_manager.EXPECTED_ADDON_PROTOCOL_VERSION.
 ADDON_PROTOCOL_VERSION = 9
+
+# Dream (DREAM-132): GPUOffScreen.draw_view3d runs only Blender's own draw engines. A Rendered
+# view of any other engine (Cycles) comes back as the empty background and the overlays -- the
+# same pixels whatever the scene holds -- while the window shows the render.
+OFFSCREEN_ENGINES = {"BLENDER_EEVEE", "BLENDER_EEVEE_NEXT", "BLENDER_WORKBENCH"}
+
+
+def _shown(shading):
+    """Dream (DREAM-132): (shading type, scene lights on, scene world on, Solid colour source) as drawn.
+    The lights and world flags are the ones that shading type reads; None where it reads none."""
+    if shading.type == 'MATERIAL':
+        return shading.type, shading.use_scene_lights, shading.use_scene_world, None
+    if shading.type == 'RENDERED':
+        return shading.type, shading.use_scene_lights_render, shading.use_scene_world_render, None
+    return shading.type, None, None, shading.color_type if shading.type == 'SOLID' else None
 
 
 class BlenderMCPServer:
@@ -60,6 +79,7 @@ class BlenderMCPServer:
         # Live client sockets, so stop() can unblock threads parked in recv().
         self._clients = set()
         self._clients_lock = threading.Lock()
+        self._last_capture = None  # Dream (DREAM-132): the last viewport capture's sha256
 
 
     def start(self):
@@ -457,6 +477,9 @@ class BlenderMCPServer:
                 return {"error": "No 3D viewport found"}
 
             method = "offscreen"
+            # Dream (DREAM-132): the viewport's shading as the owner set it; always put back.
+            shading = space.shading
+            original = (shading.type, shading.use_scene_lights, shading.use_scene_world)
             try:
                 import gpu
                 import numpy as np
@@ -469,15 +492,29 @@ class BlenderMCPServer:
                 else:
                     width, height = src_w, src_h
 
-                offscreen = gpu.types.GPUOffScreen(width, height)
+                # Dream (DREAM-132): a Rendered view the offscreen draw cannot run is drawn as
+                # Material Preview with the scene's own render-view lights and world settings, and
+                # the owner's shading is put back whatever fails on the way.
+                offscreen = None
+                switched = False
                 try:
+                    if shading.type == 'RENDERED' and bpy.context.scene.render.engine not in OFFSCREEN_ENGINES:
+                        switched = True
+                        shading.type = 'MATERIAL'
+                        shading.use_scene_lights = shading.use_scene_lights_render
+                        shading.use_scene_world = shading.use_scene_world_render
+                    drawn = _shown(shading)
+                    offscreen = gpu.types.GPUOffScreen(width, height)
                     offscreen.draw_view3d(
                         bpy.context.scene, bpy.context.view_layer, space, region,
                         r3d.view_matrix, r3d.window_matrix, do_color_management=True,
                     )
                     buf = offscreen.texture_color.read()
                 finally:
-                    offscreen.free()
+                    if offscreen is not None:
+                        offscreen.free()
+                    if switched:
+                        shading.type, shading.use_scene_lights, shading.use_scene_world = original
 
                 buf.dimensions = width * height * 4
                 pixels = np.asarray(buf, dtype=np.float32) / 255.0  # GPU buffer is 0..255
@@ -505,12 +542,27 @@ class BlenderMCPServer:
                     img.save()
                 bpy.data.images.remove(img)
 
+            # Dream (DREAM-132): what the picture shows, and whether it is the last one again.
+            with open(filepath, "rb") as f:
+                digest = hashlib.sha256(f.read()).hexdigest()
+            same = digest == self._last_capture
+            self._last_capture = digest
+            if method != "offscreen":
+                drawn = _shown(shading)  # the window shows the owner's own shading
             return {
                 "success": True,
                 "width": width,
                 "height": height,
                 "filepath": filepath,
                 "method": method,
+                "shading": original[0],
+                "engine": bpy.context.scene.render.engine,
+                "drawn_as": drawn[0],
+                "scene_lights": drawn[1],
+                "scene_world": drawn[2],
+                "color_type": drawn[3],
+                "view": space.region_3d.view_perspective,
+                "same_as_previous": same,
             }
 
         except Exception as e:

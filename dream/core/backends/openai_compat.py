@@ -696,6 +696,17 @@ def _elide_pass(
 
 
 _MSG_ID_RE = re.compile(r"\[id:(m\d{4})\]\s*$")
+# How a note Dream writes opens (DREAM-127): "[Dream] ", "[Dream progress guard]", "[Dream, not from ..."; not "[Dreamy]".
+_DREAM_OPENING = re.compile(r"\[Dream[\] ,]")
+
+
+def _is_dream_note(m: dict[str, Any]) -> bool:
+    """A note Dream wrote through the steering inbox (the progress guard): it shares the owner's steering name but
+    has no [id:] tag and opens as Dream's (DREAM-127), while `_apply_steering` tags every owner correction. The
+    filer, the verifier and `snip` read the owner's words without these (DREAM-131)."""
+    body = m.get("content")
+    return (m.get("name") == "dream_steering_user" and isinstance(body, str)
+            and not _MSG_ID_RE.search(body) and _DREAM_OPENING.match(body) is not None)
 
 
 def _turn_of(messages: list[dict[str, Any]], i: int) -> str:
@@ -1148,8 +1159,9 @@ class OpenAICompatBackend(Backend):
                 continue  # never the live turn
             start = pos[f]
             end = pos[order[order.index(t) + 1]]
+            # The owner's words pin their span (ADR-024); Dream's own notes do not (DREAM-131).
             if any(m.get('name') in {'dream_handoff_user', 'dream_steering_user', 'dream_active_user'}
-                   for m in self.messages[start:end]):
+                   and not _is_dream_note(m) for m in self.messages[start:end]):
                 continue
             spans.append((start, end))
         self._snips.clear()
@@ -1354,7 +1366,7 @@ class OpenAICompatBackend(Backend):
             active = self.messages[active_start:]
             asked = [m['content'] for m in active if m.get('role') == 'user'
                      and m.get('name') in {'dream_active_user', 'dream_steering_user'}
-                     and isinstance(m.get('content'), str)]
+                     and isinstance(m.get('content'), str) and not _is_dream_note(m)]
             said = [m['content'] for m in active if m.get('role') == 'assistant'
                     and isinstance(m.get('content'), str) and m['content'].strip()]
             return ('The user (original request, then corrections in order): ' + '\n\n'.join(asked)
@@ -1380,12 +1392,12 @@ class OpenAICompatBackend(Backend):
         # verifier report. Do not truncate away required acceptance criteria;
         # the existing subagent admission path handles an oversized request.
         current = next((m.get("content") for m in reversed(self.messages)
-                        if m.get("role") == "user"
+                        if m.get("role") == "user" and not _is_dream_note(m)
                         and m.get("name") not in {"dream_visual_evidence", "dream_recovery_instruction"}), None)
         scope = {"page": path, "current_user_request": current if isinstance(current, str) else None}
         active_requests = [m['content'] for m in self.messages if m.get('role') == 'user'
                            and m.get('name') in {'dream_active_user', 'dream_steering_user'}
-                           and isinstance(m.get('content'), str)]
+                           and isinstance(m.get('content'), str) and not _is_dream_note(m)]
         if active_requests:
             scope['active_turn_requests_in_order'] = active_requests
         if task:
@@ -3477,10 +3489,12 @@ class OpenAICompatBackend(Backend):
 
         capability = policy.capability(canonical_name(name))
         if (not observation(name)
-                and capability in {policy.WRITE, policy.SHELL, policy.DESTRUCTIVE}
+                and capability in {policy.WRITE, policy.SHELL, policy.DESTRUCTIVE,
+                                   policy.CONTAINED, policy.MUTATING}
                 and (not is_error or isinstance(text, _ExecutedToolResult))):
             # A write or shell handler can change what a prior observation sees,
-            # including before it fails. Approval/validation refusals never get
+            # including before it fails. So can live Blender's code and snapshot
+            # restore and any other tool that acts on a live app (DREAM-133). Approval/validation refusals never get
             # the execution marker. A file write also permits rerunning a shell
             # command against the edited inputs. Preserve file-mutator histories
             # and never let shells reset shells or captures reset captures.
@@ -3927,7 +3941,7 @@ class OpenAICompatBackend(Backend):
                 # A note Dream wrote (DREAM-127, fix list #101): no owner's [id:] tag -- the model took one for a
                 # stray marker "that isn't mine" and ignored the note -- and it always opens as Dream's.
                 # Dream's openings: "[Dream] ", "[Dream progress guard]", "[Dream, not from ..."; "[Dreamy]" is not one.
-                content = text if re.match(r"\[Dream[\] ,]", text) else f"[Dream] {text}"
+                content = text if _DREAM_OPENING.match(text) else f"[Dream] {text}"
             else:
                 self._msg_seq += 1
                 content = f"{text}\n\n[id:m{self._msg_seq:04d}]"

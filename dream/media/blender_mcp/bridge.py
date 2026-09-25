@@ -19,7 +19,9 @@
 #   - FastMCP logs warnings and errors only;
 #   - DREAM-129: execute_blender_code and export_scene first save a numbered snapshot of the
 #     scene into the workspace (scene_snapshots.py) and say so on their result's first line;
-#     list_scene_snapshots and restore_scene_snapshot show and reopen them.
+#     list_scene_snapshots and restore_scene_snapshot show and reopen them;
+#   - DREAM-132: get_viewport_screenshot's result starts with a line saying what the picture
+#     shows (shading, view) and whether it has the same pixels as the previous screenshot.
 
 import json
 import logging
@@ -340,6 +342,49 @@ async def get_object_info(object_name: str) -> str:
         return _with_note(f"Error getting object info: {str(e)}")
 
 
+_SHADING = {"WIREFRAME": "Wireframe", "SOLID": "Solid", "MATERIAL": "Material Preview", "RENDERED": "Rendered"}
+
+
+def _lighting(lights: bool, world: bool) -> str:
+    """Which of the scene's own lights and world a Material Preview or Rendered picture shows."""
+    shown = [name for name, on in (("lights", lights), ("world", world)) if on]
+    hidden = [name for name, on in (("lights", lights), ("world", world)) if not on]
+    parts = [f"the scene's own {' and '.join(shown)} {'shows' if shown == ['world'] else 'show'}"] if shown else []
+    if hidden:
+        whose = "its" if shown else "the scene's"
+        parts.append(f"{whose} {' and '.join(hidden)} {'does' if hidden == ['world'] else 'do'} not"
+                     + (" (a studio HDRI stands in for the world)" if not world else ""))
+    return "; ".join(parts)
+
+
+def viewport_summary(result: dict) -> str:
+    """Dream (DREAM-132): what a viewport capture shows, so an unchanged picture is explained, not guessed at.
+    "" for a result without these fields (an add-on from before DREAM-132)."""
+    shading, drawn = result.get("shading"), result.get("drawn_as") or result.get("shading")
+    if drawn not in _SHADING:
+        return ""
+    view = ("the scene camera" if result.get("view") == "CAMERA"
+            else "the viewport's own view, not the scene camera" if result.get("view") else "the viewport")
+    lines = [f"Viewport: {_SHADING[drawn]} shading, seen from {view}."]
+    lights, world = result.get("scene_lights"), result.get("scene_world")
+    known = isinstance(lights, bool) and isinstance(world, bool)
+    engine = result.get("engine") or "its render engine"
+    if shading == "RENDERED" and drawn == "MATERIAL":
+        lines.append(f"The viewport is in Rendered shading with {engine}, which this capture cannot draw; the "
+                     "picture is Material Preview instead" + (f": {_lighting(lights, world)}." if known else ".")
+                     + f" To see the {engine} view itself, observe the window (blender__get_window, then "
+                       "computer_observe).")
+    elif drawn in ("MATERIAL", "RENDERED") and known and not (lights and world):
+        lines.append(f"In this picture {_lighting(lights, world)}.")
+    elif drawn == "SOLID" and result.get("color_type") == "TEXTURE":
+        lines.append("Solid shading with image textures: no scene lights, world or other shader-node colors show.")
+    elif drawn in ("SOLID", "WIREFRAME"):
+        lines.append("This shading shows no scene lights, world or shader-node colors.")
+    if result.get("same_as_previous"):
+        lines.append("The pixels are identical to the previous screenshot: nothing changed that this view shows.")
+    return "\n".join(lines)
+
+
 @mcp.tool()
 def get_viewport_screenshot(max_size: int = 1000):
     """
@@ -348,7 +393,8 @@ def get_viewport_screenshot(max_size: int = 1000):
     Parameters:
     - max_size: Maximum size in pixels for the largest dimension (default: 1000)
 
-    Returns the screenshot as an Image.
+    Returns a line saying what the picture shows (shading, view, whether it matches the previous
+    screenshot), then the screenshot as an Image.
     """
     try:
         blender = get_blender_connection()
@@ -377,7 +423,9 @@ def get_viewport_screenshot(max_size: int = 1000):
         os.remove(temp_path)
 
         note = _take_note()
-        return [f"[{note}]", Image(data=image_bytes, format="png")] if note else Image(data=image_bytes, format="png")
+        text = "\n".join(part for part in (f"[{note}]" if note else "", viewport_summary(result)) if part)
+        image = Image(data=image_bytes, format="png")
+        return [text, image] if text else image
 
     except Exception as e:
         logger.error(f"Error capturing screenshot: {str(e)}")

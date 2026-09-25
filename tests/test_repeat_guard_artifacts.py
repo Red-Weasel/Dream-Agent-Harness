@@ -237,3 +237,61 @@ async def test_shell_commands_cannot_unlock_each_other(guard):
         for command in ("fake render A", "fake render B"):
             await backend._guarded_exec("run_bash", {"command": command}, history)
     assert executions["run_bash"] == 4
+
+
+# DREAM-133: a call that changes a live app (live Blender's code and snapshot restore,
+# a computer action, any unclassified tool) can change what the next look at that app
+# sees, so the same screenshot after it is a fresh attempt.
+SHOT = "blender__get_viewport_screenshot"
+LIVE_CHANGES = [
+    ("blender__execute_blender_code", {"code": "fake scene change"}),
+    ("blender__restore_scene_snapshot", {"name": "fixture"}),
+    ("computer_action", {"action": "click", "x": 1, "y": 1}),
+    ("unclassified_fixture_tool", {}),
+]
+
+
+@pytest.mark.parametrize("name,args", LIVE_CHANGES)
+async def test_screenshot_after_each_live_change_runs(guard, name, args):
+    backend, executions, _ = guard
+    history = {}
+    results = []
+    for _ in range(3):
+        results.append(await backend._guarded_exec(SHOT, {}, history))
+        if len(results) < 3:
+            await backend._guarded_exec(name, args, history)
+    assert executions[SHOT] == 3
+    assert all("loop guard" not in text.lower() and not error and not stop
+               for text, error, stop in results)
+
+
+@pytest.mark.parametrize("name", [SHOT, "computer_observe"])
+async def test_unchanged_live_screenshot_spam_still_warns_blocks_and_stops(guard, name):
+    backend, executions, _ = guard
+    history = {}
+    results = [await backend._guarded_exec(name, {}, history) for _ in range(4)]
+    assert executions[name] == 2
+    assert "loop guard" in results[1][0].lower()
+    assert "not executed" in results[2][0].lower() and results[2][1:] == (True, False)
+    assert results[3][1:] == (True, True)
+
+
+async def test_unexecuted_blender_code_does_not_unlock_screenshot(guard):
+    backend, executions, outcomes = guard
+    outcomes["blender__execute_blender_code"] = ("Permission denied", True)
+    history = {}
+    for _ in range(2):
+        await backend._guarded_exec(SHOT, {}, history)
+    await backend._guarded_exec("blender__execute_blender_code", {"code": "x"}, history)
+    _, error, stop = await backend._guarded_exec(SHOT, {}, history)
+    assert executions[SHOT] == 2
+    assert error and not stop
+
+
+async def test_unchanged_blender_code_repeats_still_guard(guard):
+    backend, executions, _ = guard
+    history = {}
+    for _ in range(4):
+        await backend._guarded_exec("blender__execute_blender_code", {"code": "x"}, history)
+        await backend._guarded_exec(SHOT, {}, history)
+    assert executions["blender__execute_blender_code"] == 2
