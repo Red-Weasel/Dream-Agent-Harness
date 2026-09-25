@@ -44,11 +44,13 @@ async def test_incomplete_tool_generation_executes_nothing(reason):
         return []
     b._run_verifier_sweep, b._finish_filing = verify, file
     script = [tool_chunk(reason)] + (['data: [DONE]'] if reason else [])
-    b._client = _ScriptedClient([script, _text_round()])
+    # DREAM-117 (fix #85): a `length` cut with no completed call is continued twice within the turn before it
+    # ends; every attempt here is cut, so the turn still ends incomplete and nothing runs, is filed or is verified.
+    b._client = _ScriptedClient([script] if reason == 'length' else [script, _text_round()])
     events = [e async for e in b.ask('Write the requested artifact')]
     assert result(events)['is_error'] is True
     assert effects == [] and optional == []
-    assert b._client.attempts == 1
+    assert b._client.attempts == (3 if reason == 'length' else 1)
     assert not any(e.kind == 'tool_use' for e in events)
     assert not any(m.get('tool_calls') for m in b.messages)
 

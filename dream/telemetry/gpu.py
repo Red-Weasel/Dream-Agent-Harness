@@ -8,8 +8,9 @@ Reads what the xe/i915 drivers publish without root:
 - **utilization** and **per-process VRAM** from DRM fdinfo — every client's
   ``drm-cycles-<engine>`` (xe) or ``drm-engine-<engine>`` ns (i915) advance
   against a shared clock, so a delta between two sweeps is engine busy-time,
-- **VRAM used/total** from an ``xpu-smi --query-gpu`` one-shot at a slow
-  cadence (authoritative), falling back to the sum of fdinfo residents.
+- **VRAM used/total** from an ``xpu-smi --query-gpu`` one-shot at most once
+  every ``XPU_SMI_PERIOD_S`` (authoritative; the last value stands in
+  between), falling back to the sum of fdinfo residents.
 
 Everything is best-effort: a missing file is a ``None`` field, a missing GPU
 vendor is a disabled sampler with a reason, and no failure ever propagates —
@@ -29,6 +30,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 _INTEL_VENDOR = "0x8086"
+# Fix #81: one xpu-smi run costs ~0.4 s and logs 33 HECI/MDAPI permission errors (and tries to
+# add an OA perf configuration to the xe driver); at the old every-third-tick cadence that was
+# ~18 runs and ~590 journal lines a minute. VRAM total never changes and VRAM used is a slow
+# signal, so one run per 30 s; the fdinfo sweep (utilization, per-process VRAM) stays per tick.
+XPU_SMI_PERIOD_S = 30.0
 _XPU_FIELDS = "index,pci.bus_id,name,memory.total,memory.used"
 # fdinfo size values arrive as "201180 KiB"; cycles as bare integers.
 _SIZE_RE = re.compile(r"^(\d+)\s*(KiB|MiB|GiB)?$")
@@ -122,21 +128,19 @@ class GpuSampler:
         drm_root: str | Path = "/sys/class/drm",
         proc_root: str | Path = "/proc",
         xpu_smi: str | None = "xpu-smi",
-        xpu_every: int = 3,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.interval = interval
         self._drm_root = Path(drm_root)
         self._proc_root = Path(proc_root)
         self._xpu_smi = xpu_smi
-        self._xpu_every = max(xpu_every, 1)
+        self._xpu_at: float | None = None  # clock reading of the last xpu-smi attempt
         self._clock = clock
         self._devices: list[_Device] = []
         self._snapshot = GpuSnapshot(ok=False, reason="not started")
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._tick_no = 0
         # fdinfo state from the previous sweep, keyed by (pdev, client-id):
         # {engine_class: cycles} plus the shared total per class.
         self._prev_clients: dict[tuple[str, str], dict[str, Any]] = {}
@@ -220,9 +224,11 @@ class GpuSampler:
 
     def _enrich_from_xpu_smi(self, totals: bool = False) -> None:
         """One xpu-smi one-shot: names + VRAM total (at discovery) and VRAM used
-        (every few ticks). ~0.4 s of subprocess, so never on the TUI thread."""
+        (at most once per XPU_SMI_PERIOD_S; the last value stands in between).
+        ~0.4 s of subprocess, so never on the TUI thread."""
         if not self._xpu_smi:
             return
+        self._xpu_at = self._clock()  # an attempt, successful or not, starts the period
         try:
             out = subprocess.run(
                 [self._xpu_smi, f"--query-gpu={_XPU_FIELDS}", "--format=csv,noheader,nounits"],
@@ -256,8 +262,7 @@ class GpuSampler:
         """One synchronous tick — the thread calls this; tests call it directly."""
         if not self._devices:
             return self.snapshot()
-        self._tick_no += 1
-        if self._xpu_smi and self._tick_no > 1 and (self._tick_no - 1) % self._xpu_every == 0:
+        if self._xpu_at is not None and self._clock() - self._xpu_at >= XPU_SMI_PERIOD_S:
             self._enrich_from_xpu_smi()
         now = self._clock()
         utils, procs, resident = self._sweep_fdinfo(now)

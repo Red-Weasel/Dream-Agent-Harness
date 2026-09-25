@@ -252,6 +252,10 @@ DEFAULT_TOOL_BUDGET_LOCAL = read_numeric("DREAM_TOOL_BUDGET")
 # loop guard and the per-prompt tool budget; truncating real work is the worse
 # failure, so this is now generous and the window does the bounding.
 MAX_OUTPUT_TOKENS = read_numeric("DREAM_MAX_TOKENS")
+# Set by /maxtokens for the rest of the session (fix #86, DREAM-116). A local preset's
+# max_tokens wins over MAX_OUTPUT_TOKENS on every request; this explicit value wins over
+# the preset's. None until the command is used, so untouched sessions behave as before.
+MAX_OUTPUT_TOKENS_OVERRIDE: int | None = None
 
 # How many tool rounds a dispatched subagent may run before it must wrap up.
 # High by default so real research completes; the main loop's guard still catches

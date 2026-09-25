@@ -507,9 +507,14 @@ function handle(m){
     }
     case 'user': {
       endTurn();
+      // A guided task (tui/app.py _queue_workflow, fix #83) arrives as the owner's goal plus Dream's wrapper around
+      // it with its origin: the goal is the owner's message, the wrapper Dream's own note, never shown as "You".
+      const wrapped = m.data && typeof m.data === 'object' ? m.data : null;
       // A "Read ×2" message is stored doubled; show the words once.
-      const said = String(m.data || ''), again = said.indexOf(READ_AGAIN);
+      const said = String((wrapped ? wrapped.text : m.data) || ''), again = said.indexOf(READ_AGAIN);
       block('you','You').textContent = again >= 0 ? said.slice(0, again) : said;
+      if(wrapped && typeof wrapped.origin === 'string' && wrapped.origin.startsWith('dream:') && wrapped.note)
+        sysline(`${dreamNote(wrapped.origin)}, not from you: ${wrapped.note}`, 'dream-note');
       nMsg++; counts(); scroll(true); break;
     }
     case 'turn_start': busy(true); break;
@@ -803,6 +808,11 @@ function connect(){
 /* ---------- composer ----------------------------------------------------- */
 const input = $('input'), send = $('send');
 let steeringDraft = null, steeringTarget = null, steeringSnapshot = [];
+// Whose note a prompt Dream wrote itself is, by its origin (core/turn_origin.py): shown as Dream's, never as the owner's.
+function dreamNote(origin){
+  return {'dream:progress_guard': "Dream's progress-guard note", 'dream:guided': "Dream's guided-task note"}[origin]
+    || "Dream's own note";
+}
 function steeringNotice(receipt){
   if(!receipt || typeof receipt.status !== 'string') return;
   // A note Dream wrote itself (the progress guard's) travels the owner's steering path; its receipt names its
@@ -812,7 +822,7 @@ function steeringNotice(receipt){
       included:'added to the next request context; it has not yet been sent.',
       submitted:'sent with a model request.',
       retained:'retained without a confirmed submission; there is nothing for you to resubmit.'}[receipt.status];
-    const who = receipt.origin === 'dream:progress_guard' ? "Dream's progress-guard note" : "Dream's own note";
+    const who = dreamNote(receipt.origin);
     if(said) sysline(`${who}, not from you: ${said}` + (receipt.warning ? ' ' + receipt.warning : ''), 'dream-note');
     return;
   }

@@ -47,7 +47,10 @@ async def test_truncated_answer_is_failed_without_discarding_partial_text():
     assert result["subtype"] == "length"
     assert next(event.data for event in events if event.kind == "assistant_done") == "Useful but unfinished"
     assert b.messages[-1]["content"] == "Useful but unfinished"
-    assert len(b._client.payloads) == 1  # Truncation must not automatically retry work.
+    # DREAM-117 (fix #85): a cut with no completed tool call is continued twice, then the turn ends as
+    # incomplete; the partial text stays on every attempt and nothing that ran is repeated (nothing ran).
+    assert len(b._client.payloads) == 3
+    assert [m["content"] for m in b.messages if m.get("role") == "assistant"] == ["Useful but unfinished"] * 3
 
 
 @pytest.mark.asyncio

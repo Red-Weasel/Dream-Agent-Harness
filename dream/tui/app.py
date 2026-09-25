@@ -121,7 +121,7 @@ Commands:
   /model [name]         show or switch model
   /effort [level]       reasoning effort: med|high|xhigh|max|ultra
   /toolcalls [n|off]    tool-call budget per prompt (off = unlimited)
-  /maxtokens [n]        output-token ceiling for ONE generation (takes effect now)
+  /maxtokens [n]        output-token ceiling for the rest of this session (takes effect now)
   /export [path]        write this session to markdown (--json, --full, --no-tools)
   /export library       file this session into the Library instead
   /library [verb]       your Library: list · search · open · folders · trash · undelete
@@ -1354,7 +1354,14 @@ class App(CouncilControls):
             raise ValueError("Task dispatch metadata is invalid")
         queued = QueuedPrompt(prompt, task_id, attempt, version, str(self.workspace.resolve()))
         self._queue_gui_prompt(queued)
-        self.bus.publish(Event('user', prompt))
+        from ..core import turn_origin
+
+        # Fix #83: the pane showed the whole wrapper (workflows/service.py `_prepare`) as a message from "You".
+        # The owner's goal is their message; Dream's text around it is Dream's own note (gui/static/index.html,
+        # as the progress guard's notes of #76). The model still gets the whole prompt (App.run, marked dream:guided).
+        goal = turn_origin.owner_words(turn_origin.GUIDED, prompt)
+        self.bus.publish(Event('user', prompt if goal is None else {
+            'text': goal, 'origin': turn_origin.GUIDED, 'note': turn_origin.dream_words(turn_origin.GUIDED, prompt)}))
 
     async def _workflow_event(self, workflow: QueuedPrompt, kind: str, detail: str = '') -> None:
         from ..workflows import WorkflowService
@@ -2254,9 +2261,11 @@ class App(CouncilControls):
         elif cmd == "maxtokens":
             # config.MAX_OUTPUT_TOKENS is read on EVERY request (see
             # openai_compat._max_tokens), so setting it here takes effect on the
-            # next turn — no restart, no lost session. That is the whole point:
-            # hitting the ceiling mid-build should not cost you the context you
-            # hit it with.
+            # next turn and holds for the rest of this session — no restart, no
+            # lost session. That is the whole point: hitting the ceiling mid-build
+            # should not cost you the context you hit it with. A local preset's
+            # max_tokens is taken before it, so the value is also recorded as the
+            # session override the backend consults first (fix #86).
             if not arg:
                 c.print(f"max output tokens: [cyan]{config.MAX_OUTPUT_TOKENS:,}[/cyan] "
                         "per generation   usage: /maxtokens <n>")
@@ -2270,10 +2279,18 @@ class App(CouncilControls):
                     c.print("[red]too small — a generation needs at least 256[/red]")
                 else:
                     config.MAX_OUTPUT_TOKENS = n
-                    c.print(f"[green]max output tokens: {n:,} per generation "
-                            "(this session)[/green]")
+                    config.MAX_OUTPUT_TOKENS_OVERRIDE = n
+                    c.print(f"[green]max output tokens: {n:,} for the rest of this "
+                            "session[/green]")
                     c.print("[dim]persist it with DREAM_MAX_TOKENS in the "
                             "environment[/dim]")
+                    # The console is the window's Terminal tab. The chat pane renders
+                    # bus 'system' notes, in the style of Dream's own notes (#76), so
+                    # the acknowledgement appears where the command was typed.
+                    self.bus.publish(Event("system", (
+                        f"Dream's own note, not from you: max output tokens are now {n:,} "
+                        "for every following generation this session (clamped to what "
+                        "the context window and the active profile still allow).")))
             else:
                 c.print("usage: /maxtokens <n>")
 

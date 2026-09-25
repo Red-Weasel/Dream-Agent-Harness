@@ -33,7 +33,7 @@ from anyio.lowlevel import checkpoint_if_cancelled
 
 from ... import config
 from ...telemetry.runtime import RunLimit
-from .. import handoff, policy, tool_budget_schemas
+from .. import handoff, policy, tool_budget_schemas, turn_origin
 from ..providers import Provider
 from ..profiles import RuntimeProfile
 from ..context_budget import IMAGE_TOKENS, ContextOverflow, admit, account, estimate_parts
@@ -117,6 +117,11 @@ class _InterruptibleResponse:
             await close()
 
 _MAX_TOOL_ROUNDS = config.MAX_TOOL_ROUNDS
+# Fix #85 (1), DREAM-117: how many times in one turn Dream continues a reply that was cut at the
+# output ceiling with no completed tool call, before the turn ends as incomplete. Live 2026-09-24 the
+# first cut ended the turn and the owner typed "continue" by hand, twice (49 + 22 minutes); two
+# automatic continuations cover that without letting a reply that never fits spend a whole turn.
+_LENGTH_CONTINUATIONS = 2
 # A dispatched subagent runs its own bounded tool loop; the cap keeps a confused
 # subagent from grinding the (shared, single-flight) engine indefinitely. High by
 # default (config) so real research completes.
@@ -1276,7 +1281,8 @@ class OpenAICompatBackend(Backend):
         said: list[str] = []
         asked = prompt
         for m in reversed(self.messages):
-            if m.get("role") == "user" and m.get("name") != "dream_visual_evidence":
+            if (m.get("role") == "user"
+                    and m.get("name") not in {"dream_visual_evidence", "dream_recovery_instruction"}):
                 asked = str(m.get("content") or prompt)
                 break
             if m.get("role") == "assistant" and isinstance(m.get("content"), str) and m["content"].strip():
@@ -1294,7 +1300,7 @@ class OpenAICompatBackend(Backend):
         # the existing subagent admission path handles an oversized request.
         current = next((m.get("content") for m in reversed(self.messages)
                         if m.get("role") == "user"
-                        and m.get("name") != "dream_visual_evidence"), None)
+                        and m.get("name") not in {"dream_visual_evidence", "dream_recovery_instruction"}), None)
         scope = {"page": path, "current_user_request": current if isinstance(current, str) else None}
         active_requests = [m['content'] for m in self.messages if m.get('role') == 'user'
                            and m.get('name') in {'dream_active_user', 'dream_steering_user'}
@@ -1430,9 +1436,9 @@ class OpenAICompatBackend(Backend):
     def performance_status(self) -> dict:
         from ..performance import PerformanceModes
         from ..capabilities import ordered_reasoning_levels
-        ceiling = self._local_options.get("max_tokens", min(
+        ceiling = self._preset_max_tokens() or min(
             config.MAX_OUTPUT_TOKENS,
-            self.profile.output_tokens if self.profile else config.MAX_OUTPUT_TOKENS))
+            self.profile.output_tokens if self.profile else config.MAX_OUTPUT_TOKENS)
         effort = self._base_effort_params().get("reasoning_effort")
         levels = ordered_reasoning_levels(self.capability_status())
         baseline = (self.model, int(ceiling), effort, levels)
@@ -1497,8 +1503,8 @@ class OpenAICompatBackend(Backend):
                     else 'Backend request setting')
         capabilities = self.capability_status()
         effort_levels = ordered_reasoning_levels(capabilities)
-        ceiling = local.get('max_tokens', min(config.MAX_OUTPUT_TOKENS,
-            self.profile.output_tokens if self.profile else config.MAX_OUTPUT_TOKENS))
+        ceiling = self._preset_max_tokens() or min(config.MAX_OUTPUT_TOKENS,
+            self.profile.output_tokens if self.profile else config.MAX_OUTPUT_TOKENS)
         invalid_effort = False
         try:
             effort = self._base_effort_params().get('reasoning_effort')
@@ -2056,6 +2062,15 @@ class OpenAICompatBackend(Backend):
         return (getattr(self.provider, "key", "") == "machx"
                 or local_endpoint(getattr(self.provider, "base_url", "") or "") is not None)
 
+    def _preset_max_tokens(self) -> int | None:
+        """The local preset's max_tokens, or the ceiling /maxtokens set for the rest of
+        this session once there is one (fix #86): the explicit value wins over the
+        preset's. None when the preset pins nothing; the configured ceiling then
+        applies as before."""
+        if "max_tokens" not in self._local_options:
+            return None
+        return config.MAX_OUTPUT_TOKENS_OVERRIDE or self._local_options["max_tokens"]
+
     def _max_tokens(self, fill: int) -> int:
         ceiling = self._base_max_tokens(fill)
         if self._active_performance:
@@ -2067,9 +2082,9 @@ class OpenAICompatBackend(Backend):
         for the full 32k ceiling against a nearly-full window is an instant 400
         on a strict server and a silent system-prompt eviction on a lenient one.
         Unknown n_ctx → the configured ceiling, as before."""
-        if "max_tokens" in self._local_options:
-            return max(1, min(self._local_options["max_tokens"],
-                              self._window() - fill - _CTX_MARGIN))
+        preset = self._preset_max_tokens()
+        if preset is not None:
+            return max(1, min(preset, self._window() - fill - _CTX_MARGIN))
         if self.profile:
             return max(1, min(self.profile.output_tokens, config.MAX_OUTPUT_TOKENS,
                               self._window() - fill - _CTX_MARGIN))
@@ -3761,7 +3776,12 @@ class OpenAICompatBackend(Backend):
         corrections = await inbox.drain(final=final)
         for receipt in corrections:
             self._msg_seq += 1
-            self.messages.append({'role': 'user', 'name': 'dream_steering_user',
+            # Dream's continuation notice after a cut at the output ceiling (fix #85) is not a correction the
+            # owner sent: it takes the name fix #14's instruction had, which the filer (_turn_text), the
+            # verifier's request scope and compaction's last-user search all leave out.
+            name = ('dream_recovery_instruction' if receipt.get('origin') == turn_origin.LENGTH
+                    else 'dream_steering_user')
+            self.messages.append({'role': 'user', 'name': name,
                 'content': f"{receipt['text']}\n\n[id:m{self._msg_seq:04d}]"})
         return bool(corrections)
 
@@ -3835,9 +3855,8 @@ class OpenAICompatBackend(Backend):
         # already been blocked. Per-turn on purpose — a fresh user message may
         # legitimately redo an earlier call.
         call_history: dict[tuple[str, str], dict[str, Any]] = {}
-        cut_retries = 0
+        length_retries = 0        # automatic continuations after a cut at the output ceiling (fix #85)
         loop_retries = 0
-        prose_retries = 0
         since_change = 0          # tool calls since one that changed something
         # Rounds spent of _MAX_TOOL_ROUNDS. Each request costs one; a tool round of only looks on
         # a local engine is refunded half (fix #17, _round_cost). A round starts only while a whole
@@ -4129,27 +4148,54 @@ class OpenAICompatBackend(Backend):
                 self._keep_reasoning(self.messages[-1], reasoning_parts)
                 if full:
                     yield Event("assistant_done", full)
-                if subtype == "length" and cut_call and cut_retries < 1 and not last:
-                    # Retry once, in parts, instead of ending the turn: live, three
-                    # 16K-token write_file replies were lost and the next "continue"
-                    # attempted the same oversized call again (Dream fix #14).
-                    cut_retries += 1
-                    self.messages.append({"role": "user", "name": "dream_recovery_instruction", "content": (
-                        f"[Dream] Your last reply was cut off at the output limit while writing the {cut_call} "
-                        "call, so it did not run and nothing was written. Do it again in parts of at most "
-                        "~300 lines each: write_file the first part, then write_file with append=true for each "
-                        "further part. Check with list_dir/read_file what already exists before rewriting.")})
-                    yield Event("system", f"Asked the model to redo the cut-off {cut_call} call in parts.")
+                if subtype == "length" and length_retries < _LENGTH_CONTINUATIONS and not last:
+                    # Fix #85 (1), DREAM-117: a reply cut at the output ceiling with no completed tool call
+                    # ended the turn (live 2026-09-24: 16,384 tokens in 22 minutes, twice, and the owner typed
+                    # "continue" by hand each time). Say what happened and ask the model to go on in smaller
+                    # pieces, at most _LENGTH_CONTINUATIONS times a turn. A structured cut call never joins the
+                    # history (a text-format one stays in the reply text, as before). Fix #14's one
+                    # retry-in-parts for a named cut call is folded in here.
+                    length_retries += 1
+                    ceiling = int(payload["max_tokens"])
+                    what = f"while writing the {cut_call} call" if cut_call else "with no completed tool call"
+                    notice = (f"[Dream] Your last reply reached the {ceiling:,}-token output ceiling {what}, so "
+                              "nothing ran and nothing was written. Continue in smaller pieces: one file or one "
+                              "script per tool call, at most ~300 lines each (write_file the first part, then "
+                              "write_file with append=true for each further part), and make the call straight "
+                              "away rather than planning it out. Check with list_dir/read_file what already "
+                              "exists before rewriting.")
+                    inbox = getattr(self, 'steering_inbox', None)
+                    if inbox is not None:
+                        # The owner's chat: the note travels the steering inbox like the progress guard's, so
+                        # the transcript logs it as Dream's (tool_name dream:length, core/turn_origin.py), the
+                        # pane's receipts say whose it is, and _apply_steering adds it to the next request.
+                        try:
+                            receipt = await inbox.submit(notice, uuid.uuid4().hex, origin=turn_origin.LENGTH)
+                        except ValueError:          # closed for this turn, or its 32 receipts are taken
+                            receipt = None
+                        # Only a pending receipt is drained into the next request; a `retained` one (its
+                        # transcript write failed) would leave the re-ask with no notice at all.
+                        if not receipt or receipt.get('status') != 'pending':
+                            inbox = None
+                    if inbox is None:
+                        # No inbox (a guided task, an autonomous loop), or one that could not take the note:
+                        # in the request alone, as fix #14 did.
+                        self.messages.append({"role": "user", "name": "dream_recovery_instruction", "content": notice})
+                    if self.runtime_meter is not None:
+                        self.runtime_meter.record("length_continuation", attempt=length_retries, ceiling=ceiling,
+                                                  cut_call=cut_call)
+                    yield Event("system", f"The reply reached the {ceiling:,}-token output ceiling {what}, so "
+                                          "nothing ran; asked the model to continue in smaller pieces, one file or "
+                                          f"one script per call (automatic continuation {length_retries} of "
+                                          f"{_LENGTH_CONTINUATIONS}).")
                     continue
-                if subtype == "length" and not cut_call and not prose_retries:
+                if subtype == "length" and not cut_call:
                     # The whole output budget went on prose and the reply was cut at the
                     # cap without a single tool call (live 2026-09-20: 16,384 tokens over
                     # 40 minutes, ending "Now I'll build. Let me check the HTML controls
-                    # before editing."). SAY so -- the bare "Response incomplete (length)"
-                    # reads like a server fault. It is deliberately NOT an auto-retry:
-                    # truncation must not silently repeat work (see
-                    # test_truncated_answer_is_failed_without_discarding_partial_text).
-                    prose_retries += 1
+                    # before editing."). Reached once the automatic continuations are
+                    # spent or no round is left, so the turn ends: SAY so -- the bare
+                    # "Response incomplete (length)" reads like a server fault.
                     yield Event("system", "That reply used the whole output limit without making a single "
                                           "tool call, so it was cut off and nothing ran. Continue, and tell "
                                           "it to act rather than plan.")
@@ -4186,8 +4232,10 @@ class OpenAICompatBackend(Backend):
                     for ev in await self._finish_filing(turn_text):
                         yield ev
                 else:
+                    tried = (f" after {length_retries} automatic continuation{'s' if length_retries != 1 else ''}"
+                             if subtype == 'length' and length_retries else '')
                     detail = ('The reply kept repeating itself and was stopped'
-                              if subtype == 'repetition' else f'Response incomplete ({subtype})')
+                              if subtype == 'repetition' else f'Response incomplete ({subtype}){tried}')
                     yield Event('error', f'{detail}; no collected tool calls ran. Send new instructions to continue.')
                 if subtype == 'success':
                     review_status = self._delivery_review['status']

@@ -8,7 +8,8 @@ import time
 
 import pytest
 
-from dream.telemetry.gpu import GpuSampler, _bdf_tail, _short_name
+from dream.telemetry import gpu as gpu_module
+from dream.telemetry.gpu import XPU_SMI_PERIOD_S, GpuSampler, _bdf_tail, _short_name
 
 BDF = "0000:04:00.0"
 
@@ -236,7 +237,10 @@ def test_xpu_smi_enrichment(roots, tmp_path):
     assert d.vram_used_mib == pytest.approx(895.5)  # authoritative over fdinfo
 
 
-def test_xpu_refresh_cadence_every_1(roots, tmp_path):
+def test_xpu_smi_runs_at_most_once_per_period(roots, tmp_path):
+    """Fix #81: the monitor pane's sampler ran xpu-smi every third one-second tick (~18 runs and ~590 journal
+    lines a minute; each run logs 33 HECI/MDAPI permission errors). Now at most one run per XPU_SMI_PERIOD_S,
+    and the VRAM figure between runs is the last run's."""
     drm, proc = roots
     make_card(drm)
     stub = tmp_path / "xpu-smi-stub"
@@ -244,15 +248,47 @@ def test_xpu_refresh_cadence_every_1(roots, tmp_path):
     stub.write_text(
         "#!/bin/sh\n"
         f'echo x >> "{marker}"\n'
-        'echo "0, 0000:04:00.0, GPU, 32656, 100"\n'
+        f'n=$(wc -l < "{marker}")\n'
+        'echo "0, 0000:04:00.0, GPU, 32656, $((n * 100))"\n'   # the used figure counts the runs
     )
     stub.chmod(0o755)
-    s = GpuSampler(drm_root=drm, proc_root=proc, xpu_smi=str(stub), xpu_every=1,
-                   clock=Clock())
-    for _ in range(3):
+    clock = Clock()
+    s = GpuSampler(drm_root=drm, proc_root=proc, xpu_smi=str(stub), clock=clock)
+    assert XPU_SMI_PERIOD_S >= 30.0
+    assert marker.read_text().count("x") == 1                     # discovery: names and totals
+    for _ in range(int(XPU_SMI_PERIOD_S) - 1):                    # every tick inside the period
+        clock.t += 1.0
+        assert s.sample_once().devices[0].vram_used_mib == pytest.approx(100.0)   # the last run's value
+    assert marker.read_text().count("x") == 1
+    clock.t += 1.0                                                # the period is up: one more run
+    assert s.sample_once().devices[0].vram_used_mib == pytest.approx(200.0)
+    assert marker.read_text().count("x") == 2
+    for _ in range(int(XPU_SMI_PERIOD_S) - 1):
+        clock.t += 1.0
         s.sample_once()
-    # discovery + ticks 2 and 3 (xpu_every=1 refreshes every tick after the first)
-    assert marker.read_text().count("x") == 3
+    assert marker.read_text().count("x") == 2
+
+
+def test_a_failing_xpu_smi_is_not_retried_every_tick(roots, tmp_path, monkeypatch):
+    """A missing or failing xpu-smi costs one attempt per period too, not one per tick."""
+    drm, proc = roots
+    make_card(drm)
+    attempts = []
+
+    def run(*args, **kwargs):
+        attempts.append(args)
+        raise OSError("no such binary")
+
+    monkeypatch.setattr(gpu_module.subprocess, "run", run)
+    clock = Clock()
+    s = GpuSampler(drm_root=drm, proc_root=proc, xpu_smi=str(tmp_path / "xpu-smi-missing"), clock=clock)
+    for _ in range(10):
+        clock.t += 1.0
+        s.sample_once()
+    assert len(attempts) == 1                                     # discovery only
+    clock.t += XPU_SMI_PERIOD_S
+    s.sample_once()
+    assert len(attempts) == 2
 
 
 def test_thread_starts_and_stops(roots):

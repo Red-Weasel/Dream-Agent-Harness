@@ -305,14 +305,34 @@ class ProjectLibrary:
                     ('Initial user request', 'user', 'ASC', 600),
                     ('Latest user request', 'user', 'DESC', 800),
                     ('Assistant report, not independent verification', 'assistant', 'DESC', 1000)):
+                # Read a little past the excerpt: Dream's closing line after a guided task's goal is then in the
+                # read exactly when the goal ends inside the excerpt (core/turn_origin.py CLOSING_LINE).
                 rows = db.execute(
                     'SELECT id,role,ts,substr(content,1,?) AS content,length(content)>? AS truncated,tool_name '
                     f'FROM turns WHERE session_id=? AND role IN (?,?) ORDER BY id {order}',
-                    (limit, limit, session_id, role, 'assistant_partial' if role == 'assistant' else role))
+                    (limit + turn_origin.CLOSING_LINE, limit, session_id, role,
+                     'assistant_partial' if role == 'assistant' else role))
                 # A user-role turn Dream wrote itself (a progress-guard note, a loop, /review, /resume, /learn,
-                # Council work or guided-task prompt: core/turn_origin.py) is not the user's request.
-                turn = next((row for row in rows
-                             if role != 'user' or not turn_origin.is_generated(row['tool_name'], row['content'])), None)
+                # Council work or guided-task prompt: core/turn_origin.py) is not the user's request; the owner's own
+                # words inside a wrapper (a guided task's goal, a Council task) are (fix #83).
+                turn = None
+                for row in rows:
+                    row = dict(row)
+                    if role == 'user' and turn_origin.is_generated(row['tool_name'], row['content']):
+                        words = turn_origin.owner_words(row['tool_name'], row['content'])
+                        if words and turn_origin.closing_line_read(row['tool_name'], row['content']):
+                            row['truncated'] = 0        # the closing line follows the words: they are whole
+                        elif words:
+                            # The words run to the read's end: show their share of the excerpt; the turn's length
+                            # says whether they go on past it.
+                            words = words[:max(0, limit - (len(row['content']) - len(words)))]
+                        if not words:
+                            continue
+                        row['content'] = words
+                    else:
+                        row['content'] = row['content'][:limit]
+                    turn = row
+                    break
                 if turn is not None and turn['id'] not in [item[1]['id'] for item in evidence]:
                     if turn['role'] == 'assistant_partial':
                         label = 'Partial assistant report, not independent verification'

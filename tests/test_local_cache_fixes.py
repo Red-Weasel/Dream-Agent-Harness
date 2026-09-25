@@ -98,9 +98,11 @@ async def test_reasoning_is_not_sent_to_other_providers():
     assert not any(m.get("reasoning_content") for m in b.messages)
 
 
-async def test_a_cut_off_tool_call_is_retried_once_in_parts():
+async def test_a_cut_off_tool_call_is_retried_in_parts():
     """Dream fix #8/#14: a reply cut off at the output limit inside a write_file
-    call ended the turn; the plain Continue attempted the same oversized call."""
+    call ended the turn; the plain Continue attempted the same oversized call.
+    DREAM-117 (fix #85): the retry is now one of the automatic continuations, and
+    the notice names the cut call and the ceiling."""
     b = _backend(n_ctx=65536)
     b._client = _FakeClient([
         _usage_round(text="Writing the module.", finish="length", truncated="write_file"),
@@ -109,18 +111,21 @@ async def test_a_cut_off_tool_call_is_retried_once_in_parts():
     events = [ev async for ev in b.ask("build it")]
     systems = [e.data for e in events if e.kind == "system"]
     assert any("cut off" in s and "(write_file)" in s for s in systems)
-    assert any("redo the cut-off write_file call in parts" in s for s in systems)
+    assert any("while writing the write_file call" in s and "automatic continuation 1 of 2" in s for s in systems)
     retry = b._client.payloads[1]["messages"][-1]
     assert retry["name"] == "dream_recovery_instruction" and "append=true" in retry["content"]
+    assert "while writing the write_file call" in retry["content"]
     assert events[-1].data["subtype"] == "success"
 
 
-async def test_a_second_cut_ends_the_turn_as_incomplete():
+async def test_a_third_cut_ends_the_turn_as_incomplete():
+    """DREAM-117: two automatic continuations, then the turn ends as today, saying how many were tried."""
     b = _backend(n_ctx=65536)
     cut = _usage_round(text="Writing.", finish="length", truncated="write_file")
-    b._client = _FakeClient([cut, cut])
+    b._client = _FakeClient([cut, cut, cut])
     events = [ev async for ev in b.ask("build it")]
-    assert len(b._client.payloads) == 2 and events[-1].data["subtype"] == "length"
+    assert len(b._client.payloads) == 3 and events[-1].data["subtype"] == "length"
+    assert any("after 2 automatic continuations" in e.data for e in events if e.kind == "error")
 
 
 async def test_the_model_is_told_when_rounds_run_low(monkeypatch):
@@ -178,7 +183,10 @@ async def test_a_second_loop_ends_the_turn_and_says_why():
 async def test_a_reply_that_spends_the_whole_budget_without_acting_is_asked_to_act():
     """Live 2026-09-20: 16,384 tokens over 40 minutes, no tool call, cut at the cap,
     ending "Now I'll build. Let me check the HTML controls before editing." Nothing ran,
-    and the oversized reply then forced a compaction."""
+    and the oversized reply then forced a compaction. DREAM-117 (fix #85): Dream now
+    continues the turn itself, telling the model to act in smaller pieces; the
+    owner-facing "without making a single tool call" line is kept for the turn that
+    ends once the continuations are spent."""
     b = _backend(n_ctx=65536)
     b._client = _FakeClient([
         _usage_round(text="Analysis. " * 50, finish="length"),
@@ -186,11 +194,19 @@ async def test_a_reply_that_spends_the_whole_budget_without_acting_is_asked_to_a
     ])
     events = [ev async for ev in b.ask("build it")]
     systems = [e.data for e in events if e.kind == "system"]
-    assert any("without making a single tool call" in s for s in systems)
-    # Deliberately NOT an auto-retry: truncation must not silently repeat work
-    # (test_harness_backend_quality::test_truncated_answer_is_failed_...).
-    assert len(b._client.payloads) == 1
-    assert events[-1].data["subtype"] == "length"
+    assert any("with no completed tool call" in s and "automatic continuation 1 of 2" in s for s in systems)
+    assert not any("without making a single tool call" in s for s in systems)
+    retry = b._client.payloads[1]["messages"][-1]
+    assert retry["name"] == "dream_recovery_instruction" and "rather than planning" in retry["content"]
+    assert len(b._client.payloads) == 2
+    assert events[-1].data["subtype"] == "success"
+
+    b = _backend(n_ctx=65536)
+    b._client = _FakeClient([_usage_round(text="Analysis. " * 50, finish="length")])   # cut, cut, cut
+    events = [ev async for ev in b.ask("build it")]
+    systems = [e.data for e in events if e.kind == "system"]
+    assert sum("without making a single tool call" in s for s in systems) == 1
+    assert len(b._client.payloads) == 3 and events[-1].data["subtype"] == "length"
 
 
 async def test_a_cut_off_tool_call_still_takes_priority_over_the_prose_guard():
@@ -203,5 +219,5 @@ async def test_a_cut_off_tool_call_still_takes_priority_over_the_prose_guard():
     ])
     events = [ev async for ev in b.ask("build it")]
     systems = [e.data for e in events if e.kind == "system"]
-    assert any("redo the cut-off write_file call in parts" in s for s in systems)
-    assert not any("without making a single tool call" in s for s in systems)
+    assert any("while writing the write_file call" in s for s in systems)
+    assert not any("with no completed tool call" in s or "without making a single tool call" in s for s in systems)

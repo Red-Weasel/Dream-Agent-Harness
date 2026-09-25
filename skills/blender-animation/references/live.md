@@ -11,6 +11,8 @@ The viewport renders on the CPU, so keep scenes light while working live.
 - Change with `blender__execute_blender_code`, one small step at a time. Look names up
   with `blender__bpy_api_lookup` and node sockets with `blender__describe_node_type`
   instead of guessing.
+- Build in parts, one script per part — never the whole model in one call; a reply that
+  hits the output ceiling is discarded, so nothing runs and the whole generation is lost.
 - Look at the result with `blender__get_viewport_screenshot`. For what only the window
   shows (menus, panels, the render view), call `blender__get_window`, then
   `computer_open(kind="desktop", window_id=...)`, `computer_observe` and `computer_action`
