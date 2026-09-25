@@ -120,8 +120,8 @@ button:disabled{opacity:.35;cursor:default}
 .companion .composer{flex-wrap:wrap}
 .companion #plan-panel{order:-1;flex-basis:100%;max-width:none;padding-bottom:0}
 @media (min-width:1000px){.companion #plan-panel{order:0;flex-basis:auto;max-width:45%;padding-bottom:5px}}
-/* A narrow browser window (below 760 px) has no room either: the same own-line placement. At 45 % the busy row (Queue + Steer) leaves the textarea 150 px only from ~745 px. */
-@media (max-width:759px){.composer{flex-wrap:wrap} #plan-panel{order:-1;flex-basis:100%;max-width:none;padding-bottom:0}}
+/* A narrow browser window (below 900 px) has no room either: the same own-line placement. At 45 % the busy row (Queue + Steer) leaves the textarea 150 px only from ~745 px, and beside the box the age ("2 h 22 min ago") was clipped up to ~815 px; 900 leaves margin for longer ages. */
+@media (max-width:899px){.composer{flex-wrap:wrap} #plan-panel{order:-1;flex-basis:100%;max-width:none;padding-bottom:0}}
 #plan-panel .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;border:1.5px solid #6b7280}
 #plan-panel .done > .dot, #plan-panel .done > div > .dot{background:#22c55e;border-color:#22c55e}
 #plan-panel .in_progress > .dot, #plan-panel .in_progress > div > .dot{background:#f59e0b;border-color:#f59e0b}

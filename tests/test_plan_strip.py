@@ -189,12 +189,13 @@ async def test_the_plan_nudge_travels_as_the_guards_note(live):
 # --- the gate's findings (round 2): a narrow browser window, and the age at the companion's 1000 px breakpoint --
 
 
-@pytest.mark.parametrize("width,own_line", [(640, True), (480, True), (760, False)])
+@pytest.mark.parametrize("width,own_line", [(640, True), (480, True), (760, True), (899, True), (900, False)])
 async def test_a_narrow_browser_window_keeps_the_prompt_box_usable_idle_and_busy(studio, width, own_line):
     """The gate's probe: beside the strip the textarea had 191 px idle / 109 busy at 640 px and 98 / 16 at 480 px
-    (pristine: 283 / 201). Below 760 px the browser view gives the strip its own line above the box, as the 480 px
-    pane does (at 45 % the busy textarea reaches 150 px only from ~745 px: 740 -> 147, 760 -> 158, 780 -> 169);
-    from 760 px it stays left of the box. Busy = a running turn (Send reads Queue, Steer shows)."""
+    (pristine: 283 / 201). Below 900 px the browser view gives the strip its own line above the box, as the 480 px
+    pane does (at 45 % the busy textarea reaches 150 px only from ~745 px: 740 -> 147, 760 -> 158, 780 -> 169; and
+    from 760 to about 815 px the age was clipped by a few px, fix list #95); from 900 px it stays left of the box. Busy = a
+    running turn (Send reads Queue, Steer shows)."""
     srv, page, url, _, errors = studio
     await page.set_viewport_size({"width": width, "height": 800})
     await page.goto(_url(url, "browser"))
@@ -235,4 +236,23 @@ async def test_the_age_is_whole_at_the_companions_side_by_side_breakpoint(studio
     assert widths[0] <= widths[1], widths                                 # nothing hidden behind an ellipsis
     age, head = await strip.locator(".age").bounding_box(), await summary.bounding_box()
     assert age["x"] + age["width"] <= head["x"] + head["width"] + 0.5, (age, head)
+    assert errors == []
+
+
+@pytest.mark.parametrize("width", [760, 790, 810, 899, 900])
+async def test_the_age_is_whole_in_a_browser_window(studio, width):
+    """Fix list #95: from 760 to about 815 px the browser view put the strip left of the box and the age lost its
+    last pixels (the 760, 790 and 810 cases fail on the old 759 px rule); below 900 px the strip now takes its own line,
+    and from 900 px it fits beside the box with margin."""
+    srv, page, url, _, errors = studio
+    await page.set_viewport_size({"width": width, "height": 800})
+    await page.goto(_url(url, "browser"))
+    await expect(page.locator("#stat")).to_have_text(CONNECTED)
+    srv.bus.publish(Event("plan", dict(_plan(time.time() - (142 * 60 + 30)), phases=WIDE)))
+    strip, summary = page.locator(STRIP), page.locator(STRIP + " > summary")
+    await expect(summary).to_have_text("Plan · phase 3 of 6 · 5/14 steps · updated 2 h 22 min ago")
+    widths = await summary.evaluate("el => [el.scrollWidth, el.clientWidth]")
+    assert widths[0] <= widths[1], (width, widths)                        # nothing hidden behind an ellipsis
+    age, head = await strip.locator(".age").bounding_box(), await summary.bounding_box()
+    assert age["x"] + age["width"] <= head["x"] + head["width"] + 0.5, (width, age, head)
     assert errors == []
