@@ -297,7 +297,7 @@ async def test_actual_app_and_engine_retain_advisor_outcome_and_healthy_sibling(
                                 advisor_models={'anthropic': 'fixture-sdk', 'openai': 'healthy-fixture'},
                                 advisor_efforts={'anthropic': 'high', 'openai': 'medium'})
     app = App.__new__(App)
-    app.engine, app.workspace = engine, tmp_path
+    app.engine, app.workspace, app.mode = engine, tmp_path, 'ask'
     app.bus = EventBus()
     app.renderer = SimpleNamespace(console=Console(record=True, width=240))
     async with asyncio.timeout(3):

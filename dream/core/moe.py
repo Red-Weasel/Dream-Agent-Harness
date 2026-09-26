@@ -2,8 +2,9 @@
 
 An orchestrator provider runs a normal Dream session and can poll a set of *advisors*
 — other frontier engines — for an independent take. Each consultation is a single
-headless turn on that advisor's provider: private configuration, restricted tools,
-no worker memory or acting. CLI isolation provenance is retained with the answer.
+headless run on that advisor's provider. A CLI advisor runs like the main-model CLI
+path (DREAM-136): the owner's CLI configuration, the Dream workspace as cwd, its own
+tools, sandboxed by Dream's permission mode. Its provenance is retained with the answer.
 The three per-provider-kind invokers are separate module-level functions so the
 council's fan-out and failure-tolerance can be exercised without spawning a CLI or
 touching the network (tests monkeypatch the invokers).
@@ -26,12 +27,14 @@ from .review_usage import attributed_meter
 
 CONFIG_PATH = config.VAR_DIR / "moe.json"
 
-# Framing every advisor is booted with. Advisors think and answer; they never act.
+# Framing every advisor is booted with. CLI advisors run with their own tools
+# under Dream's permission mode (DREAM-136); the framing does not promise otherwise.
 ADVISOR_SYSTEM = (
     "You are being consulted by another AI agent as an independent advisor. Give your "
     "own honest, concise take on the question it puts to you — your real reasoning, not "
-    "a rubber stamp. You are read-only: you do not act, edit files, or run tools; you "
-    "think and answer. Disagree when you disagree, name the risks or trade-offs the "
+    "a rubber stamp. Where your tools allow, you may inspect the workspace's files and "
+    "images and search the web to ground your answer, and act only within Dream's "
+    "permission mode. Disagree when you disagree, name the risks or trade-offs the "
     "asker may have missed. Attribute claims to inspectable sources, explicitly mark "
     "unsupported legal claims unverified, and preserve dissent. Agreement is never proof."
 )
@@ -103,9 +106,10 @@ async def _run_backend(backend, prompt: str) -> str:
         await asyncio.wait_for(backend.disconnect(), timeout=5)
 
 
-async def _consult_cli(provider: Provider, prompt: str, *, cwd: str | None = None, model=None, effort=None) -> str:
+async def _consult_cli(provider: Provider, prompt: str, *, cwd: str | None = None, model=None, effort=None,
+                       mode: str | None = None) -> str:
     from .cli_review import CLIConsultation
-    consultation = CLIConsultation(provider, model, runtime_meter=_context_meter(provider))
+    consultation = CLIConsultation(provider, model, runtime_meter=_context_meter(provider), cwd=cwd, mode=mode)
     try:
         consultation.prepare()
         if effort is not None:
@@ -295,12 +299,14 @@ async def _consult_openai(provider: Provider, prompt: str, *, cwd: str | None = 
 async def consult_advisor(
     provider_key: str, question: str, context: str = "", *, cwd: str | None = None,
     model: str | None = None, timeout: float | None = None, effort: str | None = None,
+    mode: str | None = None,
 ) -> str:
     """Ask one advisor for its take. Dispatches by provider kind. Never raises —
     any failure comes back as a short ``[label: unavailable — reason]`` string.
 
     The invoker is looked up by bare name (not a captured dict) so tests can
-    monkeypatch ``_consult_cli`` / ``_consult_anthropic`` / ``_consult_openai``."""
+    monkeypatch ``_consult_cli`` / ``_consult_anthropic`` / ``_consult_openai``.
+    ``mode`` is Dream's permission mode; only a CLI advisor takes it (its sandbox)."""
     label = provider_key
     try:
         provider = get_provider(provider_key)
@@ -316,6 +322,8 @@ async def consult_advisor(
             from .council_config import validate_effort
             validate_effort(provider_key, effort, model)
             kwargs['effort'] = effort
+        if mode is not None and provider.kind == 'cli':
+            kwargs['mode'] = mode
         invoker = {'cli': _consult_cli, 'anthropic': _consult_anthropic, 'openai': _consult_openai}.get(provider.kind)
         if invoker is None:
             return f"[{label}: unavailable — unknown provider kind '{provider.kind}']"
@@ -335,6 +343,7 @@ async def council(
     advisors: list[str], question: str, context: str = "", *, cwd: str | None = None,
     max_concurrency: int | None = None, timeout: float | None = None,
     models: dict[str, str] | None = None, efforts: dict[str, str] | None = None, legal: bool = False, sources: list[dict] | None = None,
+    mode: str | None = None,
 ) -> list[dict]:
     """Bounded independent consultations; preserve every answer and its dissent.
 
@@ -358,6 +367,8 @@ async def council(
                     kwargs['model'] = models[key]
                 if efforts and key in efforts:
                     kwargs['effort'] = efforts[key]
+                if mode is not None:
+                    kwargs['mode'] = mode
                 answer = await asyncio.wait_for(consult_advisor(key, question, context, **kwargs), timeout=seconds + 6)
             except Exception as exc:
                 answer = f'[{_label_for(key)}: unavailable — {type(exc).__name__}: {exc}]'
@@ -366,7 +377,8 @@ async def council(
                       'verification': 'unverified', 'consensus_is_proof': False}
             if key in ('codex', 'grok', 'gemini'):
                 from .cli_review import CLIConsultation
-                result['isolation'] = CLIConsultation(get_provider(key), (models or {}).get(key)).provenance
+                result['isolation'] = CLIConsultation(get_provider(key), (models or {}).get(key),
+                                                      cwd=cwd, mode=mode).provenance
             if legal:
                 result['legal_review'] = assess_legal(answer, inspected)
             return result

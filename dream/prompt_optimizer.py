@@ -209,7 +209,9 @@ async def optimize(body, files, workspace, settings: ReviewSettings) -> dict:
     try:
         if settings.provider.kind == 'cli':
             consultation = CLIConsultation(settings.provider, settings.model,
-                runtime_meter=attributed_meter(settings.provider, scope='prompt_optimizer', meter=settings.runtime_meter))
+                runtime_meter=attributed_meter(settings.provider, scope='prompt_optimizer', meter=settings.runtime_meter),
+                # It drafts prompts only, so it stays read-only whatever the session's mode.
+                cwd=str(workspace), mode='plan')
             try:
                 consultation.prepare()
                 raw = await asyncio.wait_for(consultation.run(_SYSTEM + '\nSOURCE DATA\n' + prompt), settings.timeout)

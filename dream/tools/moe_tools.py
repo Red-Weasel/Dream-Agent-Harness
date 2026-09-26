@@ -38,7 +38,7 @@ def _format_results(results):
     for result in results:
         block = f"### {result['label']}\n{result['answer']}"
         if 'isolation' in result:
-            block += '\n\nCLI isolation provenance: ' + json.dumps(result['isolation'], ensure_ascii=False)
+            block += '\n\nCLI run provenance: ' + json.dumps(result['isolation'], ensure_ascii=False)
         if 'legal_review' in result:
             block += '\n\nEvidence check (agreement is not proof; legal correctness unverified):\n'
             block += json.dumps(result['legal_review'], ensure_ascii=False, indent=2)
@@ -84,11 +84,16 @@ async def consult(args: dict[str, Any]) -> dict[str, Any]:
     from ..core import moe  # lazy: advisors live in core, avoid an import-time cycle
 
     options = _options(cfg, args)
+    mode_getter = getattr(c, 'mode_getter', None)
+    if mode_getter is not None:
+        options['mode'] = mode_getter()
     try:
         if options.get('legal'):
             results = await moe.council([advisor], args['question'], args.get('context', ''), cwd=str(c.workspace), **options)
             return ok(_format_results(results))
         kwargs = {'cwd': str(c.workspace)}
+        if 'mode' in options:
+            kwargs['mode'] = options['mode']
         if 'timeout' in options:
             kwargs['timeout'] = options['timeout']
         if advisor in options.get('models', {}):
@@ -104,7 +109,8 @@ async def consult(args: dict[str, Any]) -> dict[str, Any]:
         label = advisor
     provenance = ''
     if advisor in ('codex', 'grok', 'gemini'):
-        provenance = 'CLI consultation uses private sign-in/config and provider-native tool restrictions; no worker MCP.\n'
+        provenance = ("CLI consultation runs like the main CLI path: the owner's CLI configuration, "
+                      "this workspace, its own tools, sandboxed by Dream's permission mode.\n")
     return ok(f"{label} says:\n{provenance}{answer}")
 
 
@@ -139,8 +145,12 @@ async def council(args: dict[str, Any]) -> dict[str, Any]:
     from ..core import moe  # lazy: advisors live in core, avoid an import-time cycle
 
     try:
+        options = _options(cfg, args)
+        mode_getter = getattr(c, 'mode_getter', None)
+        if mode_getter is not None:
+            options['mode'] = mode_getter()
         results = await moe.council(
-            cfg.advisors, args["question"], args.get("context", ""), cwd=str(c.workspace), **_options(cfg, args)
+            cfg.advisors, args["question"], args.get("context", ""), cwd=str(c.workspace), **options
         )
     except (ValueError, OSError, TypeError, KeyError) as exc:
         return err(f'Council configuration/evidence unavailable: {exc}')

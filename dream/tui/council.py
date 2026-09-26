@@ -233,7 +233,7 @@ class CouncilControls:
         self.bus.publish(Event('system', f'Consulting {", ".join(advisors)}: {question.strip()}'))
         options = {'cwd': str(self.workspace), 'max_concurrency': cfg.max_concurrency,
                    'timeout': cfg.timeout_seconds, 'models': cfg.advisor_models,
-                   'legal': cfg.legal_review, 'sources': sources}
+                   'legal': cfg.legal_review, 'sources': sources, 'mode': self.mode}
         efforts = getattr(cfg, 'advisor_efforts', None)
         if efforts:
             options['efforts'] = efforts

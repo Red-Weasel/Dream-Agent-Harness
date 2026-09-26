@@ -19,6 +19,7 @@ def app(tmp_path):
     obj = App.__new__(App)
     obj.workspace = tmp_path
     obj.provider = 'machx'
+    obj.mode = 'ask'
     obj.model = 'local-model'
     obj.provider_label = 'MachX'
     obj.provider_kind = 'machx'
@@ -119,6 +120,7 @@ async def test_direct_consultation_passes_exact_roster_limits_and_records_advice
         assert context == 'Existing user context'
         assert kwargs['max_concurrency'] == 1 and kwargs['timeout'] == 123
         assert kwargs['models'] == {'codex': 'chosen-advisor'}
+        assert kwargs['mode'] == 'ask'  # DREAM-136: a CLI advisor's sandbox follows it
         return [{'advisor': 'codex', 'label': 'Codex', 'answer': 'Check the edge case', 'model': 'chosen-advisor'}]
     monkeypatch.setattr(moe, 'council', consult)
     result = await app._consult_council('Review this', 'codex')

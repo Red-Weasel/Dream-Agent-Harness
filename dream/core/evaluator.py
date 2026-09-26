@@ -30,6 +30,8 @@ class ReviewSettings:
     timeout: float = 120.0
     profile: RuntimeProfile | None = None
     runtime_meter: Any = field(default=None, repr=False, compare=False)
+    # Dream's permission mode; a CLI reviewer's sandbox follows it (DREAM-136).
+    mode: str | None = None
 
     @classmethod
     def resolve(cls, engine, *, provider=None, model=None, timeout=None):
@@ -46,8 +48,9 @@ class ReviewSettings:
             raise ValueError('Evaluator timeout must be between 0 and 3600 seconds')
         profile = (getattr(engine, 'profile', None) if selected.key == worker.key
                    and chosen_model == getattr(engine, 'model', None) else None)
+        mode_getter = getattr(engine, '_mode_getter', None)
         return cls(selected, chosen_model, seconds, profile or resolve_profile(selected, model=chosen_model),
-                   getattr(engine, 'runtime_meter', None))
+                   getattr(engine, 'runtime_meter', None), mode_getter() if mode_getter else None)
 
 
 class ScopedReader:

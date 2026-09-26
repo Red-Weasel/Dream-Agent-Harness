@@ -56,6 +56,9 @@ class ToolContext:
     # What the Studio pane holds for this session (DREAM-104): path, shown name, kind
     # and file signature, written by dream.tools.mirror so a later edit reloads it.
     studio_shown: Any = None
+    # () -> Dream's current permission mode, or None. A CLI Council advisor's
+    # sandbox follows it, as the main-model CLI path's does (DREAM-136).
+    mode_getter: Callable[[], str] | None = None
 
 
 _CTX: ToolContext | None = None

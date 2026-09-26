@@ -176,10 +176,18 @@ async def test_sdk_review_has_only_bound_tools_and_denies_builtins(tmp_path, mon
 
 
 async def test_cli_advisor_reports_missing_signin_without_cross_provider_fallback(tmp_path, monkeypatch):
-    monkeypatch.setenv('GROK_HOME', str(tmp_path))
-    monkeypatch.setattr('dream.core.cli_review.shutil.which', lambda _: '/fixture/grok')
-    answer = await moe.consult_advisor('grok', 'q')
-    assert 'unavailable' in answer and 'sign-in' in answer
+    # DREAM-136: the owner's own sign-in is used in place, so a missing one shows
+    # as the CLI's own failed exit, never as a switch to another provider.
+    executable = tmp_path / 'fixture-grok'
+    executable.write_text('#!/bin/sh\necho not signed in >&2\nexit 1\n')
+    executable.chmod(0o700)
+    monkeypatch.setattr('dream.core.cli_review.shutil.which', lambda _: str(executable))
+    async def other(*args, **kwargs):
+        raise AssertionError('no cross-provider fallback')
+    monkeypatch.setattr(moe, '_consult_anthropic', other)
+    monkeypatch.setattr(moe, '_consult_openai', other)
+    answer = await moe.consult_advisor('grok', 'q', cwd=str(tmp_path))
+    assert 'unavailable' in answer and 'sign-in' in answer and 'not signed in' not in answer
 
 
 def test_extended_council_config_roundtrip(tmp_path, monkeypatch):

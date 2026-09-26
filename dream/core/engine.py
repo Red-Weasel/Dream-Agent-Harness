@@ -218,7 +218,7 @@ class Engine:
                 self.store, self.working, self.browser, self.session_id,
                 workspace=self.workspace, moe_config=self._moe,
                 multimodal=self.provider.multimodal, emit=self.emit, tasks=self.tasks,
-                vision_helper=self.profile.vision_helper,
+                vision_helper=self.profile.vision_helper, mode_getter=self._mode_getter,
         )
         set_context(self._tool_context)
         from .execution import probe_sandbox
