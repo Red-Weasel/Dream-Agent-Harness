@@ -37,6 +37,9 @@ _FAILED = re.compile(r"^\[[^\]\n]*unavailable — |\[failed — ")
 # The critic's first line says whether it opened the images; anything but "opened" is not forwarded (a critique of
 # images it never saw would be a guess).
 OPENED, NOT_OPENED = "IMAGES: opened", "IMAGES: not opened"
+# The first line as critics write it (DREAM-139): a heading or blockquote marker, markdown emphasis, no space after
+# the colon, a trailing period. Only the word "opened" itself passes; "not opened" and any other text do not.
+_OPENED_LINE = re.compile(r"[#>\s]*[*`_\s]*images\s*:\s*opened[*`_\s]*\.?[*`_\s]*", re.IGNORECASE)
 MAX_KEPT = 8000   # characters of a critique stored and sent on
 
 
@@ -64,8 +67,9 @@ def _images(folder: Path, workspace: Path) -> list[Path]:
 
 
 def _clean(text: str) -> str:
-    """A file name as prompt text: control characters (line breaks included) removed, so a name cannot add lines."""
-    return "".join(ch for ch in text if not unicodedata.category(ch).startswith("C"))
+    """A file name as prompt text: control characters (line breaks included), line and paragraph separators and
+    every space but a plain one removed, so a name cannot add lines."""
+    return "".join(ch for ch in text if ch == " " or unicodedata.category(ch)[0] not in "CZ")
 
 
 def _cap(text: str) -> str:
@@ -74,8 +78,8 @@ def _cap(text: str) -> str:
 
 def _opened(answer: str) -> str | None:
     """The critique after its "IMAGES: opened" first line, or None when the critic did not say it opened them."""
-    first, _, rest = answer.partition("\n")
-    return rest.strip() if first.strip().strip("*`_ ").lower() == OPENED.lower() else None
+    first, _, rest = answer.replace("\r\n", "\n").lstrip().partition("\n")
+    return rest.strip() if _OPENED_LINE.fullmatch(first) else None
 
 
 def select_images(workspace: Path) -> dict | None:
