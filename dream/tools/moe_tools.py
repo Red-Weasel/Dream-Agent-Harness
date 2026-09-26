@@ -112,8 +112,9 @@ async def consult(args: dict[str, Any]) -> dict[str, Any]:
         provenance = ("CLI consultation runs like the main CLI path: the owner's CLI configuration, "
                       "this workspace, its own tools, sandboxed by Dream's permission mode.\n")
     elif advisor == 'anthropic':
-        provenance = ("Claude consultation runs like the main Claude path: this workspace, Dream's tools, "
-                      "Dream's policy in the permission mode; anything that would need your approval is refused.\n")
+        provenance = ("Claude consultation runs like Claude Code in VS Code: your Claude settings, this "
+                      "workspace, Claude Code's own tools in the matching permission mode; anything that would "
+                      "need your approval is refused.\n")
     return ok(f"{label} says:\n{provenance}{answer}")
 
 

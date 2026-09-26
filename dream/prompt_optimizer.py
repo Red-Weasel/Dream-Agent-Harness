@@ -220,8 +220,9 @@ async def optimize(body, files, workspace, settings: ReviewSettings) -> dict:
                 consultation.close()
         elif settings.provider.kind == 'anthropic':
             # A Claude drafter runs like the main Claude path in the workspace (DREAM-137),
-            # pinned read-only like the CLI path.
+            # pinned read-only like the CLI path; not Claude Code's posture (DREAM-140).
             backend = review_backend(replace(settings, mode='plan'), [], _SYSTEM, Path(workspace))
+            backend.claude_code_posture = False
             raw = await asyncio.wait_for(_collect(backend, prompt, require_terminal=False), settings.timeout)
         else:
             # SDK receives an empty temporary cwd, never the active project configuration.

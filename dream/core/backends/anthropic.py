@@ -193,6 +193,99 @@ def consult_provenance(cwd: str, mode: str | None, *, dream_tools: bool) -> dict
     }
 
 
+# DREAM-140, the owner's decision: the Claude advisor and SDK reviewer run like Claude Code in
+# VS Code (the owner's settings, Claude Code's prompt and native tools), LOOSER than Dream's own
+# main Claude path. The prompt optimizer keeps consult_options above.
+CLAUDE_CODE_PERMISSION_MODES = {"plan": "plan", "ask": "plan", "accept-edits": "acceptEdits",
+                                "auto": "bypassPermissions"}
+_EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+
+
+def claude_code_refusal(tool_name: str, mode: str) -> str | None:
+    """Why a consultation may not run this tool whatever Claude Code's own rules say, or None.
+
+    Dream's tools are matched by name on ANY MCP server, so a Dream bridge registered in the
+    owner's Claude config under another name is caught too."""
+    from .. import policy
+
+    parts = tool_name.split("__", 2) if tool_name.startswith("mcp__") else ()
+    if len(parts) == 3:
+        short = parts[2]
+        if short in ("consult", "council"):
+            return "a consultation may not convene the Council again"
+        if short in CONSULT_OWNER_FACING:
+            return "a consultation cannot show things to or ask the owner"
+        if policy.capability(config.tool_id(short)) == policy.MEMORY and not (
+                short == "remember" and mode in ("accept-edits", "auto")):
+            return "a consultation may not change the main session's plan, todos, skills, tasks or memories"
+    elif tool_name in _EDIT_TOOLS and CLAUDE_CODE_PERMISSION_MODES.get(mode, "plan") == "plan":
+        return "plan mode is read-only"
+    return None
+
+
+def claude_code_options(*, system_prompt: str, cwd: str, mode: str | None, model, effort,
+                        extra_servers: dict | None = None, extra_allowed=()) -> ClaudeAgentOptions:
+    """Claude Code's own posture for a consultation: the owner's user/project/local settings
+    (CLAUDE.md, hooks, MCP servers, plugins, permission rules), Claude Code's preset prompt with
+    ``system_prompt`` appended, its native tools, and a permission mode mapped from Dream's (no
+    mode runs as ask). Dream's tool server is not attached. A consult has no UI, so whatever
+    Claude Code would prompt the owner for is refused; a PreToolUse hook, which runs even under
+    bypassPermissions, keeps claude_code_refusal's guards in every mode."""
+    from claude_agent_sdk import HookMatcher
+
+    mode = mode or "ask"
+    preapproved = list(extra_allowed)
+
+    async def decide(tool_name, tool_input, context):
+        reason = claude_code_refusal(tool_name, mode)
+        if reason is None and tool_name in preapproved:
+            return PermissionResultAllow()
+        return PermissionResultDeny(message=f"Not run: {reason or 'a consultation cannot ask the owner (Claude Code would prompt)'}.")
+
+    async def guard(input_data, tool_use_id, context):
+        reason = claude_code_refusal(str(input_data.get("tool_name", "")), mode)
+        if reason is None:
+            return {}  # no decision: Claude Code's own rules apply
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": f"Not run: {reason}."}}
+
+    return ClaudeAgentOptions(
+        system_prompt={"type": "preset", "preset": "claude_code", "append": system_prompt},
+        tools={"type": "preset", "preset": "claude_code"},
+        setting_sources=["user", "project", "local"],
+        mcp_servers=dict(extra_servers or {}),
+        allowed_tools=preapproved,
+        disallowed_tools=list(CONSULT_DISALLOWED),
+        permission_mode=CLAUDE_CODE_PERMISSION_MODES.get(mode, "plan"),
+        can_use_tool=decide,
+        hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[guard])]},
+        cwd=cwd,
+        model=model,
+        effort=effort,
+        env={"CLAUDE_AGENT_SDK_CLIENT_APP": "dream/0.1.0"},
+    )
+
+
+def claude_code_provenance(cwd: str, mode: str | None) -> dict:
+    """How a Claude consultation ran under claude_code_options."""
+    sdk_mode = CLAUDE_CODE_PERMISSION_MODES.get(mode or "ask", "plan")
+    return {
+        "isolation": "none: runs like Claude Code (owner's settings)",
+        "configuration": "Claude Code's preset system prompt with Dream's text appended; the owner's user, "
+                         "project and local settings (CLAUDE.md, hooks, MCP servers, plugins, permission rules)",
+        "tool_scope": "Claude Code's native tools (Bash, WebSearch, WebFetch, Read incl. images, Write, Edit, "
+                      "Glob, Grep, ...) and the owner's MCP servers; Dream's tool server is not attached; "
+                      "consult, council, Dream's session-state tools and the tools that show things to or ask "
+                      "the owner are refused on any MCP server",
+        "cwd": cwd,
+        "permission_mode": mode or "ask",
+        "sdk_permission_mode": sdk_mode,
+        "without_asking": f"what Claude Code runs without a prompt in {sdk_mode} under the owner's permission "
+                          "rules; anything it would prompt the owner for is refused",
+        "credentials": "owner's own sign-in, used in place",
+    }
+
+
 class AnthropicBackend(Backend):
     provider_label = "Claude · Anthropic"
 

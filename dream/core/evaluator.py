@@ -1,8 +1,9 @@
 """Provider-selectable reviews with independent conversations and bound read tools.
 
 No Engine is constructed, no global ToolContext is installed, and no provider fallback
-is attempted. A Claude review runs like the main-model Claude path (DREAM-137) and reads
-the bound session's Dream tool server from the ToolContext; CLI reviews run like the
+is attempted. A Claude review runs like Claude Code in VS Code (DREAM-140) with the bound
+review reader attached; the prompt optimizer's Claude path keeps the main-model Claude path
+(DREAM-137) and reads the bound session's Dream tool server from the ToolContext; CLI reviews run like the
 main-model CLI path (DREAM-136) with a bounded textual read protocol bound to the same
 scoped file handlers.
 """
@@ -185,6 +186,10 @@ class IsolatedOpenAIBackend(OpenAICompatBackend):
 
 
 class SDKReviewBackend:
+    # DREAM-140: a reviewer runs like Claude Code in VS Code; the prompt optimizer sets this
+    # False to keep DREAM-137's main-path posture, pinned read-only.
+    claude_code_posture = True
+
     def __init__(self, settings, tools, system_prompt, cwd, sdk_query=None):
         self.settings, self.tools, self.system_prompt, self.cwd = settings, tools, system_prompt, cwd
         self.sdk_query = sdk_query
@@ -192,7 +197,9 @@ class SDKReviewBackend:
 
     @property
     def provenance(self):
-        from .backends.anthropic import _session_tools, consult_provenance
+        from .backends.anthropic import _session_tools, claude_code_provenance, consult_provenance
+        if self.claude_code_posture:
+            return claude_code_provenance(str(self.cwd), self.settings.mode)
         return consult_provenance(str(self.cwd), self.settings.mode, dream_tools=bool(_session_tools()))
 
     async def connect(self):
@@ -206,12 +213,14 @@ class SDKReviewBackend:
         import types
         from claude_agent_sdk import (AssistantMessage, ResultMessage,
                                       TextBlock, create_sdk_mcp_server, query)
-        from .backends.anthropic import consult_options
+        from .backends.anthropic import claude_code_options, consult_options
         names = ['mcp__review__' + tool.name for tool in self.tools]
-        # Runs like the main Claude path (DREAM-137); the bound review reader stays
-        # pre-approved, since the loop downgrades a PASS when a file it read changes.
+        # Runs like Claude Code (DREAM-140), or the main Claude path for the optimizer
+        # (DREAM-137); the bound review reader stays pre-approved, since the loop
+        # downgrades a PASS when a file it read changes.
         servers = {'review': create_sdk_mcp_server(name='review', tools=self.tools)} if self.tools else None
-        opts = consult_options(system_prompt=self.system_prompt, cwd=str(self.cwd), mode=self.settings.mode,
+        build = claude_code_options if self.claude_code_posture else consult_options
+        opts = build(system_prompt=self.system_prompt, cwd=str(self.cwd), mode=self.settings.mode,
                                model=self.settings.model, effort=None, extra_servers=servers, extra_allowed=names)
         if self.runtime_meter:
             self.runtime_meter.check()

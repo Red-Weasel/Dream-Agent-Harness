@@ -90,8 +90,8 @@ async def test_actual_council_rejects_missing_or_contradictory_receipt(monkeypat
                       model='fixture-sdk', effort='high', answer=row['answer'],
                       independent=True, verification='unverified', consensus_is_proof=False,
                       isolation=row['isolation'])
-    # DREAM-137: a Claude row carries its run provenance, as CLI rows do.
-    assert row['isolation']['isolation'] == 'none: runs like the main-model Claude path'
+    # DREAM-137: a Claude row carries its run provenance, as CLI rows do (DREAM-140 wording).
+    assert row['isolation']['isolation'] == "none: runs like Claude Code (owner's settings)"
     assert observed['closed'] and observed['queries'] == 1
     assert observed['messages'] == messages
     assert observed['prompts'][0]['message']['content'] == 'shared background\n\nquestion'
@@ -318,12 +318,15 @@ async def test_actual_app_and_engine_retain_advisor_outcome_and_healthy_sibling(
     assert len(options_seen) == len(streams) == len(clients) == 1 and streams[0].closed
     options = options_seen[0]
     assert options.model == 'fixture-sdk' and options.effort == 'high' and options.cwd == str(tmp_path)
-    # DREAM-137: the main Claude path's options (was: no tools, one turn); ask mode stays read-only.
-    assert options.setting_sources == [] and options.strict_mcp_config and options.max_turns is None
-    assert json.loads(options.settings) == {'disableAllHooks': True}
-    assert options.permission_mode == 'default'
+    # DREAM-140: Claude Code's posture (was DREAM-137's main-path options); ask mode is
+    # Claude Code's plan mode and stays read-only.
+    assert options.setting_sources == ['user', 'project', 'local'] and not options.strict_mcp_config
+    assert options.settings is None and options.max_turns is None
+    assert options.permission_mode == 'plan'
     assert (await options.can_use_tool('Bash', {'command': 'forbidden'}, None)).behavior == 'deny'
-    assert (await options.can_use_tool('Write', {'file_path': str(tmp_path / 'x')}, None)).behavior == 'deny'
+    guard = options.hooks['PreToolUse'][0].hooks[0]
+    write = await guard({'tool_name': 'Write', 'tool_input': {'file_path': str(tmp_path / 'x')}}, None, {})
+    assert write['hookSpecificOutput']['permissionDecision'] == 'deny'
     assert clients[0].closed
     payload, = clients[0].payloads
     assert payload['model'] == 'healthy-fixture' and payload['reasoning_effort'] == 'medium'

@@ -1,6 +1,12 @@
 """DREAM-137: the Claude advisor, the SDK reviewer and the prompt optimizer's Claude path
 run like the main-model Claude path (AnthropicBackend). Fake SDK streams only; no live
-Claude call is made and nothing is written to the owner's Claude home."""
+Claude call is made and nothing is written to the owner's Claude home.
+
+DREAM-140 moved the advisor and the reviewer to Claude Code's posture (the owner's settings,
+native tools; see test_claude_consult_vscode_posture.py). consult_options and its tests below
+still pin the prompt optimizer's path; the advisor/reviewer tests keep their DREAM-137 intent
+(multi-turn, sub-agent suppression, the review reader, no session-state or owner-facing tools)
+against the new posture."""
 import asyncio
 import json
 from pathlib import Path
@@ -76,6 +82,14 @@ async def _verdict(options, name, args):
     return (await options.can_use_tool(name, args, None)).behavior
 
 
+async def _hook(options, name, args=None):
+    """DREAM-140: the PreToolUse guard's decision ('deny') or None (Claude Code's own rules)."""
+    matcher, = options.hooks['PreToolUse']
+    out = await matcher.hooks[0]({'hook_event_name': 'PreToolUse', 'tool_name': name, 'tool_input': args or {}},
+                                 None, {'signal': None})
+    return (out.get('hookSpecificOutput') or {}).get('permissionDecision') if out else None
+
+
 @pytest.mark.parametrize('mode', ['plan', 'ask'])
 async def test_plan_and_ask_consults_are_read_only(mode, tmp_path):
     with context.bind_context(_session()):
@@ -131,8 +145,9 @@ async def test_advisor_multi_turn_consult_with_tool_events(tmp_path, monkeypatch
         yield AssistantMessage(content=[TextBlock(text='Checking the file.'),
                                         ToolUseBlock(id='t1', name='Write', input={'file_path': str(target)})],
                                model='fixture-sdk')
-        # The SDK consults the permission callback before running the tool.
-        assert (await options.can_use_tool('Write', {'file_path': str(target)}, None)).behavior == 'allow'
+        # DREAM-140: acceptEdits lets Claude Code run the write itself; Dream's guard does not intervene.
+        assert options.permission_mode == 'acceptEdits'
+        assert await _hook(options, 'Write', {'file_path': str(target)}) is None
         target.write_text('written by the fixture tool')
         yield UserMessage(content=[ToolResultBlock(tool_use_id='t1', content='ok', is_error=False)])
         yield AssistantMessage(content=[TextBlock(text='nested sub-agent chatter')], model='fixture-sdk',
@@ -145,7 +160,7 @@ async def test_advisor_multi_turn_consult_with_tool_events(tmp_path, monkeypatch
     assert answer == 'Checking the file.\n\nFinal advice.'
     assert (tmp_path / 'note.txt').read_text() == 'written by the fixture tool'
     assert seen[0].cwd == str(tmp_path) and seen[0].max_turns is None
-    assert seen[0].system_prompt == moe.ADVISOR_SYSTEM
+    assert seen[0].system_prompt == {'type': 'preset', 'preset': 'claude_code', 'append': moe.ADVISOR_SYSTEM}
 
 
 class _HangingStream:
@@ -198,7 +213,7 @@ async def test_council_threads_mode_and_records_claude_provenance(tmp_path, monk
     monkeypatch.setattr(moe, '_consult_anthropic', advisor)
     row, = await moe.council(['anthropic'], 'q', cwd=str(tmp_path), mode='plan')
     assert calls[0]['mode'] == 'plan' and calls[0]['cwd'] == str(tmp_path)
-    assert row['isolation']['isolation'] == 'none: runs like the main-model Claude path'
+    assert row['isolation']['isolation'] == "none: runs like Claude Code (owner's settings)"
     assert row['isolation']['permission_mode'] == 'plan'
 
 
@@ -214,7 +229,7 @@ async def test_consult_tool_passes_mode_and_says_how_claude_ran(tmp_path, monkey
         result = await moe_tools.consult.handler({'advisor': 'anthropic', 'question': 'q'})
     text = result['content'][0]['text']
     assert calls[0]['mode'] == 'auto'
-    assert 'runs like the main Claude path' in text and 'advice' in text
+    assert 'runs like Claude Code' in text and 'advice' in text
 
 
 def test_tool_context_carries_the_claude_tool_bundle():
@@ -228,7 +243,7 @@ def _reviewer(tmp_path, mode, query, tools=None):
 
 
 @pytest.mark.parametrize('mode', ['plan', 'ask', 'accept-edits', 'auto'])
-async def test_sdk_reviewer_runs_like_the_main_path(mode, tmp_path):
+async def test_sdk_reviewer_reads_through_its_reader_under_claude_code_posture(mode, tmp_path):
     seen = []
     async def query(**kwargs):
         options = kwargs['options']
@@ -244,18 +259,16 @@ async def test_sdk_reviewer_runs_like_the_main_path(mode, tmp_path):
         text = await collect_review(backend, 'q', 5)
     assert 'Inspecting.' in text and 'VERDICT: PASS' in text
     options = seen[0]
-    main = _main_options(tmp_path, model='fixture-sdk')
-    for name in ('setting_sources', 'settings', 'strict_mcp_config', 'permission_mode', 'cwd', 'env',
-                 'tools', 'max_turns'):
-        assert getattr(options, name) == getattr(main, name), name
-    assert options.mcp_servers[config.MCP_SERVER_NAME] is _SERVER and 'review' in options.mcp_servers
+    # DREAM-140: Claude Code's posture (was: equal to the main path's options).
+    assert options.setting_sources == ['user', 'project', 'local'] and options.max_turns is None
+    assert options.cwd == str(tmp_path) and config.MCP_SERVER_NAME not in options.mcp_servers
+    assert 'review' in options.mcp_servers
     assert {'mcp__review__read_file', 'mcp__review__list_files'} <= set(options.allowed_tools)
-    assert set(main.allowed_tools) <= set(options.allowed_tools)
     assert _RECURSION <= set(options.disallowed_tools)
-    assert await _verdict(options, 'mcp__review__read_file', {'path': 'x'}) == 'allow'
-    write = await _verdict(options, 'Write', {'file_path': str(tmp_path / 'a')})
-    assert write == ('deny' if mode in ('plan', 'ask') else 'allow')
-    assert backend.provenance['isolation'] == 'none: runs like the main-model Claude path'
+    assert await _hook(options, 'mcp__review__read_file', {'path': 'x'}) is None
+    write = await _hook(options, 'Write', {'file_path': str(tmp_path / 'a')})
+    assert write == ('deny' if mode in ('plan', 'ask') else None)
+    assert backend.provenance['isolation'] == "none: runs like Claude Code (owner's settings)"
     assert backend.provenance['permission_mode'] == mode
 
 
@@ -321,6 +334,15 @@ async def _assert_state_rule(options, tmp_path, *, remember):
     assert config.tool_id('web_search') in options.allowed_tools
 
 
+async def _assert_state_rule_claude_code(options, *, remember):
+    """DREAM-140: Dream's server is not attached; the guard refuses the session-state tools by
+    name on any MCP server (a Dream bridge in the owner's Claude config), in every mode."""
+    assert not any(tool.startswith(f'mcp__{config.MCP_SERVER_NAME}__') for tool in options.allowed_tools)
+    for name in _SESSION_STATE:
+        assert await _hook(options, config.tool_id(name)) == 'deny', name
+    assert (await _hook(options, config.tool_id('remember'))) == (None if remember else 'deny')
+
+
 @pytest.mark.parametrize('mode', ['plan', 'ask', 'accept-edits', 'auto'])
 async def test_advisor_consult_never_gets_session_state_tools(mode, tmp_path, monkeypatch):
     seen = []
@@ -332,7 +354,7 @@ async def test_advisor_consult_never_gets_session_state_tools(mode, tmp_path, mo
     with context.bind_context(_real_session()):
         answer = await moe.consult_advisor('anthropic', 'q', cwd=str(tmp_path), mode=mode, timeout=5)
     assert answer == 'advice'
-    await _assert_state_rule(seen[0], tmp_path, remember=mode in ('accept-edits', 'auto'))
+    await _assert_state_rule_claude_code(seen[0], remember=mode in ('accept-edits', 'auto'))
 
 
 @pytest.mark.parametrize('mode', ['plan', 'auto'])
@@ -344,7 +366,7 @@ async def test_sdk_reviewer_never_gets_session_state_tools(mode, tmp_path):
         yield _result()
     with context.bind_context(_real_session()):
         await collect_review(_reviewer(tmp_path, mode, query), 'q', 5)
-    await _assert_state_rule(seen[0], tmp_path, remember=mode == 'auto')
+    await _assert_state_rule_claude_code(seen[0], remember=mode == 'auto')
 
 
 async def test_prompt_optimizer_refuses_every_memory_and_session_state_tool(tmp_path, monkeypatch):
@@ -395,6 +417,15 @@ async def _assert_owner_rule(options, tmp_path):
     assert await _verdict(options, 'Read', {'file_path': str(tmp_path / 'x.png')}) == 'allow'
 
 
+async def _assert_owner_rule_claude_code(options, tmp_path):
+    """DREAM-140: owner-facing tools refused by the guard in every mode; a consult looks with
+    Claude Code's native Read (images), WebSearch and WebFetch instead of Dream's tools."""
+    for name in _OWNER_FACING:
+        assert await _hook(options, config.tool_id(name), {'path': str(tmp_path / 'x.html')}) == 'deny', name
+    for name in ('Read', 'WebSearch', 'WebFetch'):
+        assert name not in options.disallowed_tools and await _hook(options, name) is None, name
+
+
 def test_owner_facing_tools_are_registered_where_the_rule_expects_them():
     from dream.tools import registry
     names = set(registry.build()['names'])
@@ -414,7 +445,7 @@ async def test_consult_and_reviewer_never_reach_the_owner(mode, tmp_path, monkey
         await moe.consult_advisor('anthropic', 'q', cwd=str(tmp_path), mode=mode, timeout=5)
         await collect_review(_reviewer(tmp_path, mode, query), 'q', 5)
     for options in seen:
-        await _assert_owner_rule(options, tmp_path)
+        await _assert_owner_rule_claude_code(options, tmp_path)
 
 
 async def test_prompt_optimizer_never_reaches_the_owner(tmp_path, monkeypatch):

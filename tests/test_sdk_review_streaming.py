@@ -130,10 +130,9 @@ async def test_real_sdk_accepts_streaming_prompt_and_enforces_review_scope(consu
     assert wire.users == [{'type': 'user', 'message': {'role': 'user', 'content': 'Source S1: one visitor.'},
                            'parent_tool_use_id': None, 'session_id': ''}]
     opts = wire.options
-    # DREAM-137: the main Claude path's options; no Dream session is bound here.
-    assert opts.setting_sources == [] and opts.strict_mcp_config
-    assert json.loads(opts.settings)['disableAllHooks'] is True
-    assert opts.permission_mode == 'default'
+    # DREAM-140: Claude Code's posture (the owner's settings); no mode is ask = Claude Code's plan.
+    assert opts.setting_sources == ['user', 'project', 'local'] and not opts.strict_mcp_config
+    assert opts.settings is None and opts.permission_mode == 'plan'
     assert opts.permission_prompt_tool_name == 'stdio'  # SDK's streaming callback configuration
     for name in ('native', 'foreign'):
         assert wire.responses[name]['response']['behavior'] == 'deny'

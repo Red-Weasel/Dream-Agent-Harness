@@ -4,9 +4,9 @@ An orchestrator provider runs a normal Dream session and can poll a set of *advi
 — other frontier engines — for an independent take. Each consultation is a single
 headless run on that advisor's provider. A CLI advisor runs like the main-model CLI
 path (DREAM-136): the owner's CLI configuration, the Dream workspace as cwd, its own
-tools, sandboxed by Dream's permission mode. A Claude advisor runs like the main-model
-Claude path (DREAM-137): its SDK options, the session's Dream tools, Dream's policy in
-the permission mode. Their provenance is retained with the answer.
+tools, sandboxed by Dream's permission mode. A Claude advisor runs like Claude Code in
+VS Code (DREAM-140): the owner's Claude settings, Claude Code's native tools, a
+permission mode mapped from Dream's. Their provenance is retained with the answer.
 The three per-provider-kind invokers are separate module-level functions so the
 council's fan-out and failure-tolerance can be exercised without spawning a CLI or
 touching the network (tests monkeypatch the invokers).
@@ -30,7 +30,7 @@ from .review_usage import attributed_meter
 CONFIG_PATH = config.VAR_DIR / "moe.json"
 
 # Framing every advisor is booted with. CLI and Claude advisors run with their own
-# tools under Dream's permission mode (DREAM-136, DREAM-137); the framing does not
+# tools under Dream's permission mode (DREAM-136, DREAM-140); the framing does not
 # promise otherwise.
 ADVISOR_SYSTEM = (
     "You are being consulted by another AI agent as an independent advisor. Give your "
@@ -128,8 +128,9 @@ async def _consult_cli(provider: Provider, prompt: str, *, cwd: str | None = Non
 
 async def _consult_anthropic(provider: Provider, prompt: str, *, cwd: str | None = None, model=None, effort=None,
                              mode: str | None = None) -> str:
-    """A Claude Agent SDK consultation that runs like the main-model Claude path (DREAM-137):
-    its options, multiple turns, tools under Dream's policy in ``mode`` (none runs as ask)."""
+    """A Claude Agent SDK consultation that runs like Claude Code in VS Code (DREAM-140):
+    the owner's settings, native tools, multiple turns, a permission mode mapped from ``mode``
+    (none runs as ask)."""
     import types
     from claude_agent_sdk import (
         AssistantMessage,
@@ -137,10 +138,10 @@ async def _consult_anthropic(provider: Provider, prompt: str, *, cwd: str | None
         TextBlock,
         query,
     )
-    from .backends.anthropic import consult_options
+    from .backends.anthropic import claude_code_options
 
-    opts = consult_options(system_prompt=ADVISOR_SYSTEM, cwd=cwd or str(config.ROOT), mode=mode,
-                           model=model or provider.default_model, effort=effort)
+    opts = claude_code_options(system_prompt=ADVISOR_SYSTEM, cwd=cwd or str(config.ROOT), mode=mode,
+                               model=model or provider.default_model, effort=effort)
     texts: list[str] = []
     meter = _context_meter(provider)
     if meter:
@@ -377,9 +378,8 @@ async def council(
                 result['isolation'] = CLIConsultation(get_provider(key), (models or {}).get(key),
                                                       cwd=cwd, mode=mode).provenance
             elif key == 'anthropic':
-                from .backends.anthropic import _session_tools, consult_provenance
-                result['isolation'] = consult_provenance(cwd or str(config.ROOT), mode,
-                                                         dream_tools=bool(_session_tools()))
+                from .backends.anthropic import claude_code_provenance
+                result['isolation'] = claude_code_provenance(cwd or str(config.ROOT), mode)
             if legal:
                 result['legal_review'] = assess_legal(answer, inspected)
             return result

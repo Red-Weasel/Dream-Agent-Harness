@@ -159,16 +159,18 @@ async def test_sdk_review_keeps_bound_tools_and_is_read_only_in_ask_mode(tmp_pat
     async def query(**kwargs):
         opts = kwargs['options']
         seen.append(opts)
-        # DREAM-137: the main Claude path's options; the bound review reader stays pre-approved.
-        assert opts.setting_sources == []
-        assert json.loads(opts.settings)['disableAllHooks'] is True
+        # DREAM-140: Claude Code's posture (the owner's settings); the bound review reader stays
+        # pre-approved; no mode runs as ask, which is Claude Code's plan mode, read-only.
+        assert opts.setting_sources == ['user', 'project', 'local'] and opts.settings is None
         assert {'mcp__review__read_file', 'mcp__review__list_files'} <= set(opts.allowed_tools)
-        assert 'Bash' in opts.disallowed_tools
-        assert (await opts.can_use_tool('Write', {'file_path': str(tmp_path / 'x')}, None)).behavior == 'deny'
+        assert opts.permission_mode == 'plan'
+        guard = opts.hooks['PreToolUse'][0].hooks[0]
+        write = await guard({'tool_name': 'Write', 'tool_input': {'file_path': str(tmp_path / 'x')}}, None, {})
+        assert write['hookSpecificOutput']['permissionDecision'] == 'deny'
+        assert await guard({'tool_name': 'mcp__review__read_file', 'tool_input': {'path': 'fixture'}}, None, {}) == {}
+        # A shell command Claude Code would prompt for is refused (nobody to ask).
         denied = await opts.can_use_tool('Bash', {'command': 'touch forbidden'}, None)
         assert denied.behavior == 'deny'
-        allowed = await opts.can_use_tool('mcp__review__read_file', {'path': 'fixture'}, None)
-        assert allowed.behavior == 'allow'
         yield AssistantMessage(content=[TextBlock(text='VERDICT: PASS\nGAPS: none')], model='fixture-sdk')
         yield ResultMessage(subtype='success', duration_ms=1, duration_api_ms=1, is_error=False,
                             num_turns=1, session_id='fixture-sdk', terminal_reason='completed')
@@ -228,13 +230,14 @@ async def test_http_council_profile_and_reported_usage_are_bound_to_parent(tmp_p
     assert meter.phases['council:machx:lead']['requests'] == 1
 
 
-async def test_anthropic_council_disables_hooks_explicitly(monkeypatch):
+async def test_anthropic_council_loads_the_owners_claude_settings(monkeypatch):
     from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
     async def query(**kwargs):
         options = kwargs['options']
-        assert json.loads(options.settings)['disableAllHooks'] is True
-        # DREAM-137: no Dream session is bound here, so no Dream tool server; no owner settings.
-        assert options.mcp_servers == {} and options.setting_sources == []
+        # DREAM-140 (was: hooks off, no settings sources): the owner's settings and hooks load;
+        # Dream's tool server is never attached; no mode runs as ask, i.e. Claude Code's plan.
+        assert options.settings is None and options.setting_sources == ['user', 'project', 'local']
+        assert options.mcp_servers == {} and options.permission_mode == 'plan'
         yield AssistantMessage(content=[TextBlock(text='Independent fixture assessment')], model='fixture-sdk')
         yield ResultMessage(subtype='success', duration_ms=1, duration_api_ms=1, is_error=False,
                             num_turns=1, session_id='fixture-sdk')
