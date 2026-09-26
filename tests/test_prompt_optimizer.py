@@ -213,9 +213,14 @@ async def test_http_requires_single_success_terminal(monkeypatch,tmp_path,termin
 
 @pytest.mark.parametrize('terminal', [True,False])
 @pytest.mark.asyncio
-async def test_real_sdk_adapter_uses_no_tools_and_requires_its_terminal(monkeypatch,tmp_path,terminal):
+async def test_real_sdk_adapter_is_read_only_in_the_workspace_and_requires_its_terminal(monkeypatch,tmp_path,terminal):
+    # DREAM-137: the Claude drafter runs like the main Claude path, in the workspace,
+    # pinned read-only (it was a tool-less run in an empty temporary cwd).
     from claude_agent_sdk import AssistantMessage, TextBlock, ResultMessage
+    from dream.core.backends.anthropic import SAFE_BUILTINS
     from dream.core.evaluator import review_backend
+    from dream.tools import context
+    monkeypatch.setattr(context, '_CTX', None)
     captured={}
     async def query(*,prompt,options):
         captured['options']=options
@@ -231,11 +236,11 @@ async def test_real_sdk_adapter_uses_no_tools_and_requires_its_terminal(monkeypa
     else:
         with pytest.raises(RuntimeError): await call
     options=captured['options']
-    assert options.tools == [] and options.allowed_tools == []
+    assert options.allowed_tools == SAFE_BUILTINS and options.mcp_servers == {}
     assert options.setting_sources == [] and options.strict_mcp_config
     assert options.model == 'pinned'
-    assert options.cwd != str(tmp_path)
-    assert not Path(options.cwd).exists()
+    assert options.cwd == str(tmp_path)
+    assert (await options.can_use_tool('Write',{'file_path':str(tmp_path/'x')},None)).behavior == 'deny'
 
 
 @pytest.mark.parametrize('heading', ['**GOAL**', 'GOAL:', '## GOAL', '**GOAL:**'])

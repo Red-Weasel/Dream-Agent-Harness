@@ -38,7 +38,7 @@ def _format_results(results):
     for result in results:
         block = f"### {result['label']}\n{result['answer']}"
         if 'isolation' in result:
-            block += '\n\nCLI run provenance: ' + json.dumps(result['isolation'], ensure_ascii=False)
+            block += '\n\nRun provenance: ' + json.dumps(result['isolation'], ensure_ascii=False)
         if 'legal_review' in result:
             block += '\n\nEvidence check (agreement is not proof; legal correctness unverified):\n'
             block += json.dumps(result['legal_review'], ensure_ascii=False, indent=2)
@@ -111,6 +111,9 @@ async def consult(args: dict[str, Any]) -> dict[str, Any]:
     if advisor in ('codex', 'grok', 'gemini'):
         provenance = ("CLI consultation runs like the main CLI path: the owner's CLI configuration, "
                       "this workspace, its own tools, sandboxed by Dream's permission mode.\n")
+    elif advisor == 'anthropic':
+        provenance = ("Claude consultation runs like the main Claude path: this workspace, Dream's tools, "
+                      "Dream's policy in the permission mode; anything that would need your approval is refused.\n")
     return ok(f"{label} says:\n{provenance}{answer}")
 
 

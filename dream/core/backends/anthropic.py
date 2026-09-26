@@ -31,6 +31,168 @@ SAFE_BUILTINS = ["Read", "Glob", "Grep", "LS", "NotebookRead", "TodoWrite"]
 DISALLOWED_BUILTINS = ["WebSearch", "WebFetch", "Bash"]
 
 
+def sdk_options(*, system_prompt, mcp_servers, preapproved_tool_ids, agents, can_use_tool, model, effort, cwd,
+                stderr=None, disallowed_tools=()) -> ClaudeAgentOptions:
+    """The main Claude path's SDK options. Council and review consultations build theirs
+    here too (DREAM-137), so their posture cannot drift from the main path's."""
+    return ClaudeAgentOptions(
+        system_prompt=system_prompt,
+        mcp_servers=mcp_servers,
+        strict_mcp_config=True,
+        # Only the exempt subset is pre-approved; everything else (Write/Edit/
+        # Bash, mutating Dream tools, custom tools) routes through can_use_tool.
+        allowed_tools=list(preapproved_tool_ids) + SAFE_BUILTINS,
+        disallowed_tools=DISALLOWED_BUILTINS + list(disallowed_tools),
+        # "default" routes the rest through can_use_tool, making the TUI's mode
+        # cycle + workspace boundary the single permission authority.
+        # (acceptEdits would silently bypass the callback.)
+        permission_mode="default",
+        can_use_tool=can_use_tool,
+        agents=agents,
+        cwd=cwd,
+        # Dream assembles project guidance and runs its reviewed hooks.
+        # Importing a second settings tree would reintroduce independent
+        # hooks and automatic permission grants behind those controls.
+        setting_sources=[],
+        settings='{"disableAllHooks":true}',
+        include_partial_messages=True,
+        model=model,
+        effort=effort,
+        env={
+            "CLAUDE_AGENT_SDK_CLIENT_APP": "dream/0.1.0",
+            "ENABLE_TOOL_SEARCH": "auto:100",
+        },
+        stderr=stderr,
+    )
+
+
+# DREAM-137: a consultation may not convene the Council again from inside itself.
+CONSULT_DISALLOWED = [config.tool_id("consult"), config.tool_id("council")]
+
+
+# DREAM-137: Dream tools that reach the owner -- a form or question whose answer becomes the main
+# session's next prompt, a page, card or widget in the owner's Studio, JS in the owner's open
+# view, the Studio's shared hidden frame. Read-only on the main path, refused in every consult.
+CONSULT_OWNER_FACING = frozenset({
+    "questions_v2", "ask_user_input", "suggest_research", "visual_check", "image_search",
+    "eval_js_user_view", "screenshot_user_view", "done", "show_html", "show_to_user", "eval_js",
+    "get_webview_logs", "multi_screenshot", "present_fs_item_for_download", "visualize_show_widget",
+    "save_screenshot", "end_conversation",
+    # offer cards: they also spend the main session's once-per-session offer (plugin_tools._OFFERED)
+    "suggest_plugin_install", "suggest_skills",
+    # see mirrors what it looks at into the owner's pane; a consult views images with Read
+    "see",
+    "chart_display_v0", "comparison_card_display_v0", "featured_card_display_v0", "itinerary_display_v0",
+    "link_preview_display_v0", "options_card_display_v0", "places_list_display_v0",
+    "product_carousel_display_v0", "quiz_display_v0", "step_card_display_v0", "translation_display_v0",
+})
+
+
+def _session_tools() -> dict | None:
+    """The main path's Dream tool bundle of the bound session, as the engine sets it."""
+    from ...tools.context import ctx
+    try:
+        return getattr(ctx(), "claude_tools", None)
+    except RuntimeError:
+        return None
+
+
+def consult_permission(mode: str, workspace: str, preapproved=(), execution=None):
+    """The permission callback of a Claude consultation, which has no owner to ask.
+
+    Dream's policy decides as on the main path, in the consult's mode: what the main
+    path runs without a prompt runs; what it would ask the owner about, or denies, is
+    refused with the reason. So plan and ask are read-only, and accept-edits/auto may
+    write inside the workspace.
+
+    One departure from the main path: Dream's own-mind tools (the session's plan, todos,
+    skills, tasks, title, notes and memories), free in every mode there, belong to the
+    main session. A consult may add a memory with ``remember`` in accept-edits/auto and
+    is refused every other one in every mode, so the prompt optimizer (plan) gets none.
+    Tools that reach the owner (CONSULT_OWNER_FACING) are refused in every mode."""
+    from pathlib import Path
+
+    from .. import policy
+
+    async def decide(tool_name, tool_input, context):
+        if policy._short(tool_name) in CONSULT_OWNER_FACING:
+            return PermissionResultDeny(message="Not run: a consultation cannot show things to or ask the owner.")
+        if tool_name in preapproved:
+            return PermissionResultAllow()
+        if policy.capability(tool_name) == policy.MEMORY:
+            if policy._short(tool_name) == "remember" and mode in ("accept-edits", "auto"):
+                return PermissionResultAllow()
+            return PermissionResultDeny(message="Not run: a consultation may not change the main session's "
+                                                "plan, todos, skills, tasks or memories.")
+        scope, capability = execution() if execution is not None else (None, None)
+        native_shell = tool_name in {"run_bash", config.tool_id("run_bash")}
+        decision, reason = policy.decide(tool_name, tool_input, mode, Path(workspace),
+                                         execution_scope=scope,
+                                         execution_capability=capability if native_shell else None)
+        if native_shell and capability is not None and not capability.available and decision != "deny":
+            decision, reason = "ask", "outside workspace protection unavailable"
+        if decision == "allow":
+            return PermissionResultAllow()
+        why = reason or decision
+        if decision == "ask":
+            return PermissionResultDeny(message=f"Not run: a consultation cannot ask the owner ({why}).")
+        return PermissionResultDeny(message=f"Not run: blocked by Dream's policy ({why}).")
+
+    return decide
+
+
+def consult_options(*, system_prompt: str, cwd: str, mode: str | None, model, effort,
+                    extra_servers: dict | None = None, extra_allowed=()) -> ClaudeAgentOptions:
+    """A Claude consultation runs like the main-model Claude path (DREAM-137): the same
+    options, the session's Dream tool server, and Dream's policy in the consult's mode
+    (no mode runs as ask) in place of the owner's approval prompts, except that the main
+    session's own-mind tools are not the consult's (see consult_permission)."""
+    from ..subagents import subagents
+
+    from .. import policy
+
+    tools = _session_tools()
+    servers = dict(extra_servers or {})
+    preapproved = list(extra_allowed)
+    execution = None
+    if tools:
+        servers[config.MCP_SERVER_NAME] = tools["server"]
+        # Only the read-only exempt tools are pre-approved; the session's own-mind tools
+        # go to consult_permission, which refuses them (see there).
+        preapproved = [tool for tool in tools["exempt_tool_ids"]
+                       if policy.capability(tool) == policy.READONLY
+                       and policy._short(tool) not in CONSULT_OWNER_FACING] + preapproved
+        execution = tools.get("execution")
+    return sdk_options(
+        system_prompt=system_prompt, mcp_servers=servers, preapproved_tool_ids=preapproved,
+        agents=subagents(), can_use_tool=consult_permission(mode or "ask", cwd, preapproved, execution),
+        model=model, effort=effort, cwd=cwd, disallowed_tools=CONSULT_DISALLOWED,
+    )
+
+
+def consult_provenance(cwd: str, mode: str | None, *, dream_tools: bool) -> dict:
+    """How a Claude consultation ran, stored under the key DREAM-136's CLI rows use."""
+    scope = ("Claude built-ins Read/Glob/Grep/LS/NotebookRead/TodoWrite (images through Read), Write/Edit by mode, "
+             "and the session's Dream tool server (web_search, browse, media_read, run_bash, ...) as on the main path, "
+             "except consult, council and the tools that show things to or ask the owner" if dream_tools else
+             "Claude built-ins only: no Dream session tools were bound (no web or shell); consult and council "
+             "are unavailable")
+    return {
+        "isolation": "none: runs like the main-model Claude path",
+        "configuration": "the main Claude path's SDK options: Dream's own guidance and tools, no settings "
+                         "sources, hooks off, strict MCP",
+        "tool_scope": scope,
+        "cwd": cwd,
+        "permission_mode": mode or "ask",
+        "sdk_permission_mode": "default",
+        "without_asking": "what Dream's policy allows in this mode without a prompt, except the main session's "
+                          "plan, todos, skills, tasks and memories (only remember, in accept-edits/auto) and "
+                          "every tool that shows things to or asks the owner; "
+                          "anything it would ask the owner about is refused",
+        "credentials": "owner's own sign-in, used in place",
+    }
+
+
 class AnthropicBackend(Backend):
     provider_label = "Claude · Anthropic"
 
@@ -79,33 +241,15 @@ class AnthropicBackend(Backend):
         return PermissionResultAllow() if ok else PermissionResultDeny(message="Declined by the user.")
 
     def _build_options(self) -> ClaudeAgentOptions:
-        return ClaudeAgentOptions(
+        return sdk_options(
             system_prompt=self.system_prompt,
             mcp_servers={config.MCP_SERVER_NAME: self.mcp_server},
-            strict_mcp_config=True,
-            # Only the exempt subset is pre-approved; everything else (Write/Edit/
-            # Bash, mutating Dream tools, custom tools) routes through can_use_tool.
-            allowed_tools=self.preapproved_tool_ids + SAFE_BUILTINS,
-            disallowed_tools=DISALLOWED_BUILTINS,
-            # "default" routes the rest through can_use_tool, making the TUI's mode
-            # cycle + workspace boundary the single permission authority.
-            # (acceptEdits would silently bypass the callback.)
-            permission_mode="default",
-            can_use_tool=self._permission_handler,
+            preapproved_tool_ids=self.preapproved_tool_ids,
             agents=self.agents,
-            cwd=str(self.cwd or config.ROOT),
-            # Dream assembles project guidance and runs its reviewed hooks.
-            # Importing a second settings tree would reintroduce independent
-            # hooks and automatic permission grants behind those controls.
-            setting_sources=[],
-            settings='{"disableAllHooks":true}',
-            include_partial_messages=True,
+            can_use_tool=self._permission_handler,
             model=self.model,
             effort=self._effort,
-            env={
-                "CLAUDE_AGENT_SDK_CLIENT_APP": "dream/0.1.0",
-                "ENABLE_TOOL_SEARCH": "auto:100",
-            },
+            cwd=str(self.cwd or config.ROOT),
             stderr=self.stderr_cb,
         )
 

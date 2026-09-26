@@ -368,10 +368,11 @@ async def test_scoped_read_permissions_options_and_streamed_input_survive(tmp_pa
     assert await collect_review(backend(tmp_path, query, tools=tools), 'fixture question', 1) == 'VERDICT: PASS\nGAPS: none'
     opts = query.options
     assert opts.model == 'fixture-sdk' and opts.system_prompt == 'fixture review system'
-    assert opts.cwd == str(tmp_path) and opts.max_turns == 10
-    assert opts.tools == [] and opts.setting_sources == [] and opts.strict_mcp_config is True
+    # DREAM-137: the main Claude path's options (was: no built-ins, 10 turns).
+    assert opts.cwd == str(tmp_path) and opts.max_turns is None
+    assert opts.setting_sources == [] and opts.strict_mcp_config is True
     assert opts.permission_mode == 'default' and json.loads(opts.settings) == {'disableAllHooks': True}
-    assert set(opts.allowed_tools) == {'mcp__review__read_file', 'mcp__review__list_files'}
+    assert {'mcp__review__read_file', 'mcp__review__list_files'} <= set(opts.allowed_tools)
     assert (await opts.can_use_tool('Bash', {}, None)).behavior == 'deny'
     assert (await opts.can_use_tool('mcp__review__read_file', {}, None)).behavior == 'allow'
     assert query.users == [{'type': 'user', 'message': {'role': 'user', 'content': 'fixture question'},

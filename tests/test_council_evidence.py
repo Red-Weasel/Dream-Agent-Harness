@@ -151,7 +151,7 @@ async def test_legal_tool_setting_cannot_be_disabled_by_model(tmp_path, legal_so
     assert 'effective date' in text
 
 
-async def test_sdk_review_has_only_bound_tools_and_denies_builtins(tmp_path, monkeypatch):
+async def test_sdk_review_keeps_bound_tools_and_is_read_only_in_ask_mode(tmp_path, monkeypatch):
     from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
     sentinel = object()
     monkeypatch.setattr(context, '_CTX', sentinel)
@@ -159,9 +159,12 @@ async def test_sdk_review_has_only_bound_tools_and_denies_builtins(tmp_path, mon
     async def query(**kwargs):
         opts = kwargs['options']
         seen.append(opts)
-        assert opts.tools == [] and opts.setting_sources == []
+        # DREAM-137: the main Claude path's options; the bound review reader stays pre-approved.
+        assert opts.setting_sources == []
         assert json.loads(opts.settings)['disableAllHooks'] is True
-        assert set(opts.allowed_tools) == {'mcp__review__read_file', 'mcp__review__list_files'}
+        assert {'mcp__review__read_file', 'mcp__review__list_files'} <= set(opts.allowed_tools)
+        assert 'Bash' in opts.disallowed_tools
+        assert (await opts.can_use_tool('Write', {'file_path': str(tmp_path / 'x')}, None)).behavior == 'deny'
         denied = await opts.can_use_tool('Bash', {'command': 'touch forbidden'}, None)
         assert denied.behavior == 'deny'
         allowed = await opts.can_use_tool('mcp__review__read_file', {'path': 'fixture'}, None)
@@ -230,7 +233,8 @@ async def test_anthropic_council_disables_hooks_explicitly(monkeypatch):
     async def query(**kwargs):
         options = kwargs['options']
         assert json.loads(options.settings)['disableAllHooks'] is True
-        assert options.tools == [] and options.mcp_servers == {} and options.setting_sources == []
+        # DREAM-137: no Dream session is bound here, so no Dream tool server; no owner settings.
+        assert options.mcp_servers == {} and options.setting_sources == []
         yield AssistantMessage(content=[TextBlock(text='Independent fixture assessment')], model='fixture-sdk')
         yield ResultMessage(subtype='success', duration_ms=1, duration_api_ms=1, is_error=False,
                             num_turns=1, session_id='fixture-sdk')

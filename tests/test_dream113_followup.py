@@ -364,6 +364,7 @@ PROMPT_SITES = Counter({
     ("dream/tui/app.py", "App._review.ask", "self.engine.ask", "REVIEW"): 1,
     ("dream/tui/app.py", "App._resume", "self._ask", "RESUME"): 1,
     ("dream/tui/learn_cmd.py", "command", "app._ask", "LEARN"): 1,
+    ("dream/tui/critique_cmd.py", "command", "app._ask", "CRITIQUE"): 1,
     ("dream/tui/council.py", "CouncilControls._work_council", "self._ask", "COUNCIL"): 1,
 })
 # Calls that write a user-role turn, each able to carry the marker (a tool_name keyword or ** of one).

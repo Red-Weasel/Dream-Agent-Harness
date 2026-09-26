@@ -130,7 +130,8 @@ async def test_real_sdk_accepts_streaming_prompt_and_enforces_review_scope(consu
     assert wire.users == [{'type': 'user', 'message': {'role': 'user', 'content': 'Source S1: one visitor.'},
                            'parent_tool_use_id': None, 'session_id': ''}]
     opts = wire.options
-    assert opts.tools == [] and opts.setting_sources == [] and opts.strict_mcp_config
+    # DREAM-137: the main Claude path's options; no Dream session is bound here.
+    assert opts.setting_sources == [] and opts.strict_mcp_config
     assert json.loads(opts.settings)['disableAllHooks'] is True
     assert opts.permission_mode == 'default'
     assert opts.permission_prompt_tool_name == 'stdio'  # SDK's streaming callback configuration
@@ -138,7 +139,7 @@ async def test_real_sdk_accepts_streaming_prompt_and_enforces_review_scope(consu
         assert wire.responses[name]['response']['behavior'] == 'deny'
     assert wire.responses['reader']['response']['behavior'] == ('allow' if consumer == 'evaluator' else 'deny')
     if consumer == 'evaluator':
-        assert set(opts.allowed_tools) == {'mcp__review__read_file', 'mcp__review__list_files'}
+        assert {'mcp__review__read_file', 'mcp__review__list_files'} <= set(opts.allowed_tools)
         listed = wire.responses['list-result']['response']['mcp_response']['result']['tools']
         assert {tool['name'] for tool in listed} == {'read_file', 'list_files'}
         schema = next(tool['inputSchema'] for tool in listed if tool['name'] == 'read_file')
@@ -147,7 +148,7 @@ async def test_real_sdk_accepts_streaming_prompt_and_enforces_review_scope(consu
         read = wire.responses['read-result']['response']['mcp_response']['result']
         assert 'one blue ticket admits one visitor' in read['content'][0]['text']
     else:
-        assert opts.mcp_servers == {} and opts.allowed_tools == []
+        assert opts.mcp_servers == {} and 'mcp__review__read_file' not in opts.allowed_tools
     assert context._CTX is sentinel
 
 

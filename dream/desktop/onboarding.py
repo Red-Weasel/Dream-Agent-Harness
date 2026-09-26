@@ -65,7 +65,7 @@ class Onboarding(Gtk.Box):
         self.council = Gtk.Expander(label='Council advisors (optional)')
         self.council_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.council_box.get_style_context().add_class('council-startup')
-        help_text = label('Enable read-only advisors. Selecting one does not contact it or load weights.', 'muted')
+        help_text = label('Enable advisors; they act only within Dream\'s permission mode. Selecting one does not contact it or load weights.', 'muted')
         help_text.set_line_wrap(True)
         self.council_box.pack_start(help_text, False, False, 0)
         self.advisor_grid = Gtk.Grid(column_spacing=10, row_spacing=8)

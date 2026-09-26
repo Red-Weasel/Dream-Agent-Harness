@@ -1,4 +1,4 @@
-"""Bounded prompt drafting, with no tools or execution of the requested task."""
+"""Bounded prompt drafting: read-only, with no execution of the requested task."""
 from __future__ import annotations
 
 import asyncio
@@ -7,6 +7,7 @@ import json
 import re
 from pathlib import Path
 import tempfile
+from dataclasses import replace
 
 from .core.cli_review import CLIConsultation
 from .core.evaluator import ReviewSettings, ScopedReader, review_backend
@@ -201,7 +202,7 @@ async def _collect(backend, prompt, *, require_terminal):
 
 
 async def optimize(body, files, workspace, settings: ReviewSettings) -> dict:
-    """Draft once with the caller's pinned provider; never fall back or use tools."""
+    """Draft once with the caller's pinned provider; never fall back. Any tools it has are read-only."""
     request = validate_request(body)
     evidence = _evidence(files, workspace)
     prompt = json.dumps({'request': request, 'evidence': evidence,
@@ -217,6 +218,11 @@ async def optimize(body, files, workspace, settings: ReviewSettings) -> dict:
                 raw = await asyncio.wait_for(consultation.run(_SYSTEM + '\nSOURCE DATA\n' + prompt), settings.timeout)
             finally:
                 consultation.close()
+        elif settings.provider.kind == 'anthropic':
+            # A Claude drafter runs like the main Claude path in the workspace (DREAM-137),
+            # pinned read-only like the CLI path.
+            backend = review_backend(replace(settings, mode='plan'), [], _SYSTEM, Path(workspace))
+            raw = await asyncio.wait_for(_collect(backend, prompt, require_terminal=False), settings.timeout)
         else:
             # SDK receives an empty temporary cwd, never the active project configuration.
             with tempfile.TemporaryDirectory(prefix='dream-prompt-optimizer-') as cwd:

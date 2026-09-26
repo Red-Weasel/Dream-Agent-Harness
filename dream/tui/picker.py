@@ -142,7 +142,7 @@ async def moe_role_screen(console: Console, r: Renderer, providers: list[Provide
     for i, e in enumerate(engines, 1):
         table.add_row(str(i), e.label, e.status)
     console.print(table)
-    r.system("Choose the main engine, then enable each advisor. Advisors are read-only.")
+    r.system("Choose the main engine, then enable each advisor. Advisors act only within Dream's permission mode.")
     sel = await _ask("orchestrator # · ")
     if not sel.isdigit() or not (1 <= int(sel) <= len(engines)):
         r.error("No orchestrator chosen.")

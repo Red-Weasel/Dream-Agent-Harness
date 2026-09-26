@@ -1,8 +1,10 @@
 """Provider-selectable reviews with independent conversations and bound read tools.
 
-No Engine is constructed, no global ToolContext is installed or consulted, and no
-provider fallback is attempted. CLI reviews use private provider-native controls
-and a bounded textual read protocol bound to the same scoped file handlers.
+No Engine is constructed, no global ToolContext is installed, and no provider fallback
+is attempted. A Claude review runs like the main-model Claude path (DREAM-137) and reads
+the bound session's Dream tool server from the ToolContext; CLI reviews run like the
+main-model CLI path (DREAM-136) with a bounded textual read protocol bound to the same
+scoped file handlers.
 """
 from __future__ import annotations
 
@@ -30,7 +32,7 @@ class ReviewSettings:
     timeout: float = 120.0
     profile: RuntimeProfile | None = None
     runtime_meter: Any = field(default=None, repr=False, compare=False)
-    # Dream's permission mode; a CLI reviewer's sandbox follows it (DREAM-136).
+    # Dream's permission mode; a CLI or Claude reviewer's tool posture follows it (DREAM-136, DREAM-137).
     mode: str | None = None
 
     @classmethod
@@ -188,6 +190,11 @@ class SDKReviewBackend:
         self.sdk_query = sdk_query
         self.runtime_meter = attributed_meter(settings.provider, scope='evaluator', meter=settings.runtime_meter)
 
+    @property
+    def provenance(self):
+        from .backends.anthropic import _session_tools, consult_provenance
+        return consult_provenance(str(self.cwd), self.settings.mode, dream_tools=bool(_session_tools()))
+
     async def connect(self):
         pass
 
@@ -197,17 +204,15 @@ class SDKReviewBackend:
     async def ask(self, prompt):
         import json
         import types
-        from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, ResultMessage,
+        from claude_agent_sdk import (AssistantMessage, ResultMessage,
                                       TextBlock, create_sdk_mcp_server, query)
+        from .backends.anthropic import consult_options
         names = ['mcp__review__' + tool.name for tool in self.tools]
-        async def permit(name, args, context):
-            from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
-            return PermissionResultAllow() if name in names else PermissionResultDeny(message='Read-only reviewer')
-        opts = ClaudeAgentOptions(system_prompt=self.system_prompt, tools=[], allowed_tools=names,
-                                 mcp_servers={'review': create_sdk_mcp_server(name='review', tools=self.tools)},
-                                 can_use_tool=permit, permission_mode='default', strict_mcp_config=True, setting_sources=[],
-                                 settings='{"disableAllHooks":true}',
-                                 cwd=str(self.cwd), model=self.settings.model, max_turns=10)
+        # Runs like the main Claude path (DREAM-137); the bound review reader stays
+        # pre-approved, since the loop downgrades a PASS when a file it read changes.
+        servers = {'review': create_sdk_mcp_server(name='review', tools=self.tools)} if self.tools else None
+        opts = consult_options(system_prompt=self.system_prompt, cwd=str(self.cwd), mode=self.settings.mode,
+                               model=self.settings.model, effort=None, extra_servers=servers, extra_allowed=names)
         if self.runtime_meter:
             self.runtime_meter.check()
         # Keep callback-based read permissions active with streaming input.
@@ -283,6 +288,8 @@ class SDKReviewBackend:
                     break
                 # A successful read ends its witness before consumer-facing yields.
                 read_cancels = []
+                if getattr(message, 'parent_tool_use_id', None):
+                    continue  # a sub-agent's own output, suppressed as on the main path
                 if isinstance(message, AssistantMessage):
                     yield Event('assistant_done', ''.join(block.text for block in message.content if isinstance(block, TextBlock)))
                 elif isinstance(message, ResultMessage):

@@ -59,6 +59,9 @@ class ToolContext:
     # () -> Dream's current permission mode, or None. A CLI Council advisor's
     # sandbox follows it, as the main-model CLI path's does (DREAM-136).
     mode_getter: Callable[[], str] | None = None
+    # The main Claude path's tool bundle ({server, exempt_tool_ids, execution}), set by
+    # the engine, so a Claude Council advisor or reviewer gets the same tools (DREAM-137).
+    claude_tools: Any = None
 
 
 _CTX: ToolContext | None = None

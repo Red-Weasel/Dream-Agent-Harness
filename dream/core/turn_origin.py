@@ -4,8 +4,8 @@ The session transcript logs the prompt of every turn as role "user": the owner's
 steering corrections, and also prompts Dream writes -- the progress guard's steering notes and the notice
 after a reply cut at the output ceiling (progress_guard.py, backends/openai_compat.py; both through the steering
 inbox), the autonomous loop's prompts (loop.py), /review's,
-/resume's priming prompt, /learn analyze's, the Council work prompt that wraps the owner's task and a
-guided task's prompt that wraps the owner's goal (tui/app.py, tui/learn_cmd.py, tui/council.py,
+/resume's priming prompt, /learn analyze's, /critique's, the Council work prompt that wraps the owner's task and a
+guided task's prompt that wraps the owner's goal (tui/app.py, tui/learn_cmd.py, tui/critique_cmd.py, tui/council.py,
 workflows/service.py). A prompt Dream wrote carries its origin in the turn's `tool_name` column, which
 is unused on user turns and NULL on the owner's: "dream:<origin>". Readers that want the owner's words
 (the Fresh start handoff, the project library's handoff draft) skip those; the Fresh start handoff and
@@ -30,6 +30,7 @@ LEARN = PREFIX + "learn"
 COUNCIL = PREFIX + "council"
 GUIDED = PREFIX + "guided"
 LENGTH = PREFIX + "length"      # the continuation notice after a reply cut at the output ceiling (fix #85)
+CRITIQUE = PREFIX + "critique"  # /critique: the render critic's answer, sent as the owner's request (#100)
 
 # Dream's prompts around the owner's own words: (the line before the words, Dream's line after them or None).
 # The Council work prompt (tui/council.py `_work_council`) is Dream's instructions, then "User task:", then the

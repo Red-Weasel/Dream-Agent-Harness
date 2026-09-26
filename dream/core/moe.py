@@ -4,7 +4,9 @@ An orchestrator provider runs a normal Dream session and can poll a set of *advi
 — other frontier engines — for an independent take. Each consultation is a single
 headless run on that advisor's provider. A CLI advisor runs like the main-model CLI
 path (DREAM-136): the owner's CLI configuration, the Dream workspace as cwd, its own
-tools, sandboxed by Dream's permission mode. Its provenance is retained with the answer.
+tools, sandboxed by Dream's permission mode. A Claude advisor runs like the main-model
+Claude path (DREAM-137): its SDK options, the session's Dream tools, Dream's policy in
+the permission mode. Their provenance is retained with the answer.
 The three per-provider-kind invokers are separate module-level functions so the
 council's fan-out and failure-tolerance can be exercised without spawning a CLI or
 touching the network (tests monkeypatch the invokers).
@@ -27,8 +29,9 @@ from .review_usage import attributed_meter
 
 CONFIG_PATH = config.VAR_DIR / "moe.json"
 
-# Framing every advisor is booted with. CLI advisors run with their own tools
-# under Dream's permission mode (DREAM-136); the framing does not promise otherwise.
+# Framing every advisor is booted with. CLI and Claude advisors run with their own
+# tools under Dream's permission mode (DREAM-136, DREAM-137); the framing does not
+# promise otherwise.
 ADVISOR_SYSTEM = (
     "You are being consulted by another AI agent as an independent advisor. Give your "
     "own honest, concise take on the question it puts to you — your real reasoning, not "
@@ -123,31 +126,22 @@ async def _consult_cli(provider: Provider, prompt: str, *, cwd: str | None = Non
         consultation.close()
 
 
-async def _consult_anthropic(provider: Provider, prompt: str, *, cwd: str | None = None, model=None, effort=None) -> str:
-    """One-shot Claude Agent SDK query — no tools, no acting."""
+async def _consult_anthropic(provider: Provider, prompt: str, *, cwd: str | None = None, model=None, effort=None,
+                             mode: str | None = None) -> str:
+    """A Claude Agent SDK consultation that runs like the main-model Claude path (DREAM-137):
+    its options, multiple turns, tools under Dream's policy in ``mode`` (none runs as ask)."""
     import types
     from claude_agent_sdk import (
         AssistantMessage,
-        ClaudeAgentOptions,
         ResultMessage,
         TextBlock,
-        PermissionResultDeny,
         query,
     )
+    from .backends.anthropic import consult_options
 
-    async def deny_tools(*args):
-        return PermissionResultDeny(message='Advisors have no tool access')
-
-    opts = ClaudeAgentOptions(
-        system_prompt=ADVISOR_SYSTEM,
-        tools=[], allowed_tools=[], mcp_servers={}, strict_mcp_config=True, setting_sources=[],
-        permission_mode="default", can_use_tool=deny_tools,
-        settings='{"disableAllHooks":true}',
-        cwd=cwd or str(config.ROOT), max_turns=1,
-        model=model or provider.default_model,
-        effort=effort,
-    )
-    text = ""
+    opts = consult_options(system_prompt=ADVISOR_SYSTEM, cwd=cwd or str(config.ROOT), mode=mode,
+                           model=model or provider.default_model, effort=effort)
+    texts: list[str] = []
     meter = _context_meter(provider)
     if meter:
         meter.check()
@@ -213,10 +207,13 @@ async def _consult_anthropic(provider: Provider, prompt: str, *, cwd: str | None
             except StopAsyncIteration:
                 break
             reading_cancels = []
+            if getattr(msg, 'parent_tool_use_id', None):
+                continue  # a sub-agent's own output, suppressed as on the main path
             if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        text += block.text
+                # Text on either side of a tool call stays separated, as for CLI advisors.
+                part = ''.join(block.text for block in msg.content if isinstance(block, TextBlock)).strip()
+                if part:
+                    texts.append(part)
             elif isinstance(msg, ResultMessage):
                 if result_seen:
                     failure = failure or 'Advisor returned duplicate ResultMessage receipts'
@@ -274,7 +271,7 @@ async def _consult_anthropic(provider: Provider, prompt: str, *, cwd: str | None
         failure = 'Advisor incomplete: missing ResultMessage receipt'
     if failure:
         raise RuntimeError(failure)
-    return text.strip() or '[unavailable — advisor returned no answer]'
+    return '\n\n'.join(texts) or '[unavailable — advisor returned no answer]'
 
 
 async def _consult_openai(provider: Provider, prompt: str, *, cwd: str | None = None, model=None, effort=None) -> str:
@@ -306,7 +303,7 @@ async def consult_advisor(
 
     The invoker is looked up by bare name (not a captured dict) so tests can
     monkeypatch ``_consult_cli`` / ``_consult_anthropic`` / ``_consult_openai``.
-    ``mode`` is Dream's permission mode; only a CLI advisor takes it (its sandbox)."""
+    ``mode`` is Dream's permission mode; CLI and Claude advisors take it (their tool posture)."""
     label = provider_key
     try:
         provider = get_provider(provider_key)
@@ -322,7 +319,7 @@ async def consult_advisor(
             from .council_config import validate_effort
             validate_effort(provider_key, effort, model)
             kwargs['effort'] = effort
-        if mode is not None and provider.kind == 'cli':
+        if mode is not None and provider.kind in ('cli', 'anthropic'):
             kwargs['mode'] = mode
         invoker = {'cli': _consult_cli, 'anthropic': _consult_anthropic, 'openai': _consult_openai}.get(provider.kind)
         if invoker is None:
@@ -379,6 +376,10 @@ async def council(
                 from .cli_review import CLIConsultation
                 result['isolation'] = CLIConsultation(get_provider(key), (models or {}).get(key),
                                                       cwd=cwd, mode=mode).provenance
+            elif key == 'anthropic':
+                from .backends.anthropic import _session_tools, consult_provenance
+                result['isolation'] = consult_provenance(cwd or str(config.ROOT), mode,
+                                                         dream_tools=bool(_session_tools()))
             if legal:
                 result['legal_review'] = assess_legal(answer, inspected)
             return result

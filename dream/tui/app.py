@@ -190,6 +190,7 @@ Commands:
   /monitor [on|off]     GPU + inference-speed pane on the right (bare = toggle)
   /plan                 print the current task plan
   /council <q>          ask configured advisors (choose them in Council)
+  /critique [cli] [note] ask claude|codex|gemini|grok to critique the latest render vs its reference
   /rewind [id]          list file checkpoints · roll one back (asks first)
   /review [--staged]    code-review the diff (or /review <base ref>)
   /fresh                compact this conversation into a handoff now (between turns)
@@ -2410,6 +2411,9 @@ class App(CouncilControls):
                 c.print("usage: /council <question>")
             else:
                 await self._run_turn(self._consult_council(arg))
+        elif cmd == "critique":
+            from . import critique_cmd
+            await critique_cmd.command(self, arg)
         elif cmd == "rewind":
             await self._rewind(arg)
         elif cmd == "review":

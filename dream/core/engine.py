@@ -256,6 +256,12 @@ class Engine:
         built = registry.build(annotate=self._annotate_custom_tool,
                                extra_tools=extra_tools or None, wrap_tool=self._wrap_tool)
         self._built_tools = built
+        # DREAM-137: a Claude consultation runs with the main path's tool server and
+        # this session's executor, under Dream's policy in the consult's mode.
+        self._tool_context.claude_tools = {
+            "server": built["server"], "exempt_tool_ids": built["exempt_tool_ids"],
+            "execution": lambda: (self.execution_scope, self.execution_capability),
+        }
         self._session_tools = {tool.name: tool for tool in built["tools"]}
         self.tool_warnings = (plugin_warnings + built["warnings"] + mcp_warnings
                               + merge_warnings + live_warnings + connect_warnings)

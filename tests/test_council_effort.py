@@ -44,7 +44,7 @@ async def test_council_fanout_passes_exact_advisor_effort(monkeypatch):
     assert results[0]['effort'] == 'high'
 
 
-async def test_sdk_advisor_receives_effort_without_tools(monkeypatch):
+async def test_sdk_advisor_receives_effort(monkeypatch):
     import claude_agent_sdk as sdk
     captured = []
     async def query(*, prompt, options):
@@ -54,7 +54,7 @@ async def test_sdk_advisor_receives_effort_without_tools(monkeypatch):
     monkeypatch.setattr(sdk, 'query', query)
     await moe._consult_anthropic(get_provider('anthropic'), 'q', effort='high')
     assert captured[0].effort == 'high'
-    assert captured[0].tools == [] and captured[0].mcp_servers == {}
+    # DREAM-137: the advisor runs with the main Claude path's options (tools included).
 
 
 async def test_http_advisor_effort_reaches_request_payload(monkeypatch):
