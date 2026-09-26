@@ -1081,6 +1081,9 @@ class OpenAICompatBackend(Backend):
         self.temperature = self._local_options.get("temperature", temperature)
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         self._client: httpx.AsyncClient | None = None
+        # The owner's switch for vital signs (behaviour.vitals, DREAM-142): read at connect, on by default.
+        self.vitals = True
+        self._settings_notices: list[str] = []
         self._interrupts = _InterruptState()
         self.last_usage: dict[str, Any] | None = None
         self.n_ctx: int | None = None  # the server's loaded context window, if knowable
@@ -1287,7 +1290,7 @@ class OpenAICompatBackend(Backend):
         if not path:
             return ("Error: nothing to verify — call `done(path)` first, or pass `path`.", True)
         slots, source = self._prompt_cache_slots()
-        if slots == 1 and (task or _single_slot_verifier() == "skip"):
+        if slots == 1 and not await self._verifier_separate() and (task or _single_slot_verifier() == "skip"):
             # Fix #71: a separate verifier conversation would evict this one from an engine that
             # caches one conversation. A check inside this conversation is the model's own.
             return (f"Not run: this engine keeps one conversation cached ({source}), and a separate "
@@ -1506,7 +1509,9 @@ class OpenAICompatBackend(Backend):
         # Fix #71 (live 2026-09-24: ten verifier requests evicted a 135k-token chat from MiMo's one
         # cached conversation, and the next message waited 8 minutes for the re-read).
         slots, source = self._prompt_cache_slots()
-        continuation = slots == 1
+        # A verifier confirmed to run on a separately served model (roles.verifier, DREAM-142) cannot continue
+        # the lead's cache and does not evict it.
+        continuation = slots == 1 and not await self._verifier_separate()
         if continuation and _single_slot_verifier() == "skip":
             text = (f"skipped on {path}: this engine keeps one conversation cached ({source}), and the "
                     "verifier's separate conversation would evict this one, so your next message would "
@@ -1788,6 +1793,10 @@ class OpenAICompatBackend(Backend):
         # times out mid-stream while the server is still working. Bounded by
         # MAX_OUTPUT_TOKENS + Ctrl-C. Connect stays short.
         from ..inference_coordination import local_endpoint
+        from ..settings import role_notes, vitals_enabled
+        self.vitals = vitals_enabled()
+        # Roles the file holds that this session does not apply, said once at the first request (DREAM-142).
+        self._settings_notices = role_notes(self.provider.key)
         transport_timeout = (config.LLM_READ_TIMEOUT_S
             if "DREAM_LLM_READ_TIMEOUT_S" in os.environ or self.profile is None
             else self.profile.idle_timeout_s)
@@ -2824,6 +2833,7 @@ class OpenAICompatBackend(Backend):
 
     def _context_notices(self):
         notices, self._council_notices = self._council_notices, []
+        notices, self._settings_notices = self._settings_notices + notices, []
         return [Event('system', notice) for notice in notices]
 
     def _record_council_omissions(self, before, after):
@@ -3685,6 +3695,41 @@ class OpenAICompatBackend(Backend):
         except Exception:
             pass
 
+    def _role_model(self, subagent_type: str) -> str | None:
+        """The model the owner's roles name for this sub-agent, verifier or filer (DREAM-142), on this session's
+        endpoint; None: the lead's model. Raises ValueError for a role that cannot apply here."""
+        from ..settings import role_model
+        return role_model(subagent_type, self.provider.key)
+
+    async def _verifier_separate(self) -> bool:
+        """Whether a routed verifier (roles.verifier) is confirmed to run apart from the lead's cached
+        conversation, so fix #71's continuation/skip is not needed. A model name alone confirms nothing: today's
+        engine answers any name with its one loaded model, on its one slot -- the 8-minute re-read #71 fixed.
+        Confirmed only when the endpoint reports more than one cached conversation, or its /v1/models lists the
+        verifier's model as its own entry beside another. A role that cannot apply counts as separate, so the
+        check path runs and its error is shown (it fails before any request) instead of a skip hiding it."""
+        try:
+            model = self._role_model("verifier")
+        except ValueError:
+            return True
+        if model is None or model == self.model:
+            return False
+        slots, _ = self._prompt_cache_slots()
+        if slots is not None and slots > 1:
+            return True
+        served = await self._served_models()
+        return model in served and len(served) > 1
+
+    async def _served_models(self) -> set[str]:
+        """The model ids the endpoint lists at /v1/models; empty when it cannot be read."""
+        try:
+            resp = await self._client.get(f"{self.provider.base_url}/models", timeout=3.0)
+            data = resp.json().get("data") if resp.status_code == 200 else None
+            return {m["id"] for m in data if isinstance(m, dict) and isinstance(m.get("id"), str)} \
+                if isinstance(data, list) else set()
+        except Exception:
+            return set()
+
     async def _run_subagent(self, subagent_type: str, prompt: str, *, continuation: bool = False) -> tuple[str, bool]:
         """Run scoped, non-streaming work without borrowing the lead event stream. `continuation`
         runs it inside the lead conversation instead of its own (_subagent_loop, fix #71)."""
@@ -3740,6 +3785,11 @@ class OpenAICompatBackend(Backend):
         # tool in the spec is silently skipped, never a crash.
         names = self._subagent_tool_names(spec)
         allowed = set(names)
+        try:
+            # A continuation extends the lead's own conversation, so it stays on the lead's model.
+            routed = None if continuation else self._role_model(subagent_type)
+        except ValueError as exc:
+            return f"(subagent '{subagent_type}' not run: {exc})", True
         required_inspection = {"show_html", "get_webview_logs", "save_screenshot", "see"}
         inspected: set[str] = set()
         failed_inspections: set[str] = set()
@@ -3820,7 +3870,7 @@ class OpenAICompatBackend(Backend):
                         sub_prompt_tokens = 0
                     fill = max(_est_tokens(messages), sub_prompt_tokens)
             payload = {
-                "model": self.model,
+                "model": routed or self.model,
                 "messages": messages,
                 "tools": schemas,
                 "tool_choice": "auto",
@@ -4160,7 +4210,9 @@ class OpenAICompatBackend(Backend):
                 # doesn't know the field ignores it.
                 payload["stream_tool_preview"] = True
                 # Vital signs (DREAM-135): MachX only -- another server could reject a field it does not know.
-                payload["ie_vitals"] = True
+                # The owner can switch them off (behaviour.vitals, DREAM-142).
+                if self.vitals:
+                    payload["ie_vitals"] = True
             if self.profile or self._local_options or self.capability_status()['context_tokens']['known']:
                 try:
                     payload["max_tokens"] = self._admit_request(self.messages, payload["tools"]).output

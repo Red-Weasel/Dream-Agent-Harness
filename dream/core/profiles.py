@@ -240,6 +240,20 @@ def _settings_lock(path: Path):
         os.close(fd)  # also releases the advisory lock
 
 
+# The environment variables resolve_profile reads over saved overrides (dream/core/settings.py names them too).
+PROFILE_ENVS = {
+    "context_limit": ("DREAM_CONTEXT_WINDOW", int),
+    "output_tokens": ("DREAM_MAX_TOKENS", int),
+    "max_parallel": ("DREAM_MAX_PARALLEL", int),
+    "subagent_timeout_s": ("DREAM_SUBAGENT_TIMEOUT_S", float),
+    "idle_timeout_s": ("DREAM_IDLE_TIMEOUT_S", float),
+    "max_run_tokens": ("DREAM_RUN_TOKEN_BUDGET", int),
+    "max_run_tools": ("DREAM_RUN_TOOL_BUDGET", int),
+    "max_run_seconds": ("DREAM_RUN_SECONDS", float),
+    "max_wall_seconds": ("DREAM_WALL_SECONDS", float),
+}
+
+
 def resolve_profile(provider: Provider, name: str | None = None, *, overrides: dict | None = None,
                     model: str | None = None) -> RuntimeProfile:
     saved = read_settings()
@@ -254,18 +268,7 @@ def resolve_profile(provider: Provider, name: str | None = None, *, overrides: d
         raise ValueError("model must be a string or None")
     model_settings = saved.get("models", {}).get(f"{provider.key}:{model}", {}) if model else {}
     values.update(model_settings)
-    envs = {
-        "context_limit": ("DREAM_CONTEXT_WINDOW", int),
-        "output_tokens": ("DREAM_MAX_TOKENS", int),
-        "max_parallel": ("DREAM_MAX_PARALLEL", int),
-        "subagent_timeout_s": ("DREAM_SUBAGENT_TIMEOUT_S", float),
-        "idle_timeout_s": ("DREAM_IDLE_TIMEOUT_S", float),
-        "max_run_tokens": ("DREAM_RUN_TOKEN_BUDGET", int),
-        "max_run_tools": ("DREAM_RUN_TOOL_BUDGET", int),
-        "max_run_seconds": ("DREAM_RUN_SECONDS", float),
-        "max_wall_seconds": ("DREAM_WALL_SECONDS", float),
-    }
-    for key, (env, cast) in envs.items():
+    for key, (env, cast) in PROFILE_ENVS.items():
         if env in os.environ:
             try:
                 values[key] = cast(os.environ[env])
@@ -297,12 +300,18 @@ def save_settings(profile: str, overrides: dict | None = None, path: Path | None
     """
     _profile_name(profile)
     values = _validate_overrides(overrides) if overrides is not None else None
+    update_settings(lambda saved: {**saved, "version": 1, "profile": profile,
+                                   "overrides": values if values is not None else saved.get("overrides", {})}, path)
+
+
+def update_settings(change, path: Path | None = None) -> dict:
+    """Read-modify-write the settings file under its lock, atomically; `change(saved)` returns the new
+    object. Every section it does not touch -- including ones this version does not know -- is kept."""
     target = Path(path) if path is not None else settings_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     with _settings_lock(target):
         saved = read_settings(target)
-        updated = _validate_settings({**saved, "version": 1, "profile": profile,
-                                      "overrides": values if values is not None else saved.get("overrides", {})})
+        updated = _validate_settings(change(saved))
         data = (json.dumps(updated, indent=2, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
         if len(data) > MAX_SETTINGS_BYTES:
             raise ValueError(f"Runtime settings exceed {MAX_SETTINGS_BYTES} bytes; no changes saved")
@@ -320,6 +329,7 @@ def save_settings(profile: str, overrides: dict | None = None, path: Path | None
                 os.close(directory)
         finally:
             Path(tmp_name).unlink(missing_ok=True)
+    return updated
 
 
 def guidance(provider: Provider, profile: RuntimeProfile, model: str | None, *, vision: dict | None = None) -> str:

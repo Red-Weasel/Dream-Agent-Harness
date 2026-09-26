@@ -34,7 +34,7 @@ def _main() -> None:
 
         raise SystemExit(launch(argv[1:]))
 
-    if argv and argv[0] in {"status", "profile", "extensions", "backup", "runs"}:
+    if argv and argv[0] in {"status", "profile", "settings", "extensions", "backup", "runs"}:
         from .management import main as manage
         raise SystemExit(manage(argv))
 

@@ -176,7 +176,8 @@ Commands:
   /model [name]         show or switch model
   /effort [level]       reasoning effort: med|high|xhigh|max|ultra
   /toolcalls [n|off]    tool-call budget per prompt (off = unlimited)
-  /maxtokens [n]        output-token ceiling for the rest of this session (takes effect now)
+  /maxtokens [n]        output-token ceiling for the rest of this session (takes effect now; --save keeps it)
+  /settings [verb]      every setting with its source: show · get <key> · path · set <key> <value> · unset <key> · check
   /export [path]        write this session to markdown (--json, --full, --no-tools)
   /export library       file this session into the Library instead
   /library [verb]       your Library: list · search · open · folders · trash · undelete
@@ -867,6 +868,8 @@ class App(CouncilControls):
         self.meter = InferenceMeter()
 
     async def start(self) -> None:
+        from ..core.settings import apply_saved_output
+        apply_saved_output()    # a saved output.max_tokens (/maxtokens --save), unless DREAM_MAX_TOKENS is set
         self.engine = self._boot_engine()
         await self.engine.start()
         await self._associate_project_on_start()
@@ -2132,6 +2135,58 @@ class App(CouncilControls):
 
     # --- slash commands ------------------------------------------------------
 
+    def _settings_command(self, arg: str) -> None:
+        """/settings (DREAM-142): the effective table with sources, and set/unset/check through the same
+        resolver and writer as `dream settings`. A changed vitals switch also applies to this session."""
+        from ..core import settings
+        c = self.renderer.console
+        verb, _, rest = arg.partition(" ")
+        verb, rest = verb or "show", rest.strip()
+        try:
+            if verb in ("show", "get"):
+                provider, model = self.engine.provider.key, self.engine.model
+                session = {"roles.main": {"provider": provider, "model": model}}
+                if config.MAX_OUTPUT_TOKENS_OVERRIDE is not None:
+                    session["output.max_tokens"] = config.MAX_OUTPUT_TOKENS_OVERRIDE
+                backend = self.engine.backend
+                if isinstance(getattr(backend, "_local_options", None), dict) and "max_tokens" in backend._local_options:
+                    session["output.preset_max_tokens"] = backend._local_options["max_tokens"]
+                if isinstance(getattr(backend, "_active_performance", None), dict):
+                    session["output.performance"] = backend._active_performance["output_tokens"]
+                rows = settings.effective(provider=provider, model=model, session=session)
+                c.print(f"resolved for provider {provider}, model {model or '(provider default)'}",
+                        style="dim", markup=False, highlight=False)
+                if verb == "get":
+                    if rest not in rows:
+                        c.print(f"no setting named {rest or '(none)'}   usage: /settings get <key>", markup=False)
+                        return
+                    rows = {rest: rows[rest]}
+                from rich.markup import escape
+                for key, row in rows.items():
+                    c.print(f"{escape(key):<36} {escape(str(row.value)):<40} [dim]{escape(row.source)}[/dim]",
+                            highlight=False)
+            elif verb == "path":
+                for name, where in settings.paths().items():
+                    c.print(f"{name:<14} {where}", highlight=False)
+            elif verb == "check":
+                report = settings.check(provider=self.engine.provider.key, model=self.engine.model)
+                c.print(json.dumps(report, indent=2, ensure_ascii=False), markup=False, highlight=False)
+            elif verb in ("set", "unset"):
+                key, _, value = rest.partition(" ")
+                if not key or (verb == "set" and not value.strip()):
+                    c.print(f"usage: /settings {verb} <key>" + (" <value>" if verb == "set" else ""))
+                    return
+                note = settings.set_value(key, value.strip()) if verb == "set" else settings.unset_value(key)
+                if key == "behaviour.vitals" and hasattr(self.engine.backend, "vitals"):
+                    self.engine.backend.vitals = settings.vitals_enabled()
+                c.print(f"{key}: {note}", style="green", markup=False, highlight=False)
+                for warning in settings.role_notes(self.engine.provider.key) if key.startswith("roles.") else ():
+                    c.print(warning, style="yellow", markup=False, highlight=False)
+            else:
+                c.print("usage: /settings [show | get <key> | path | set <key> <value> | unset <key> | check]")
+        except (ValueError, OSError) as exc:
+            c.print(f"settings: {exc}", style="red", markup=False, highlight=False)
+
     async def _command(self, line: str) -> bool:
         """Return True to quit."""
         parts = line[1:].split(maxsplit=1)
@@ -2353,13 +2408,14 @@ class App(CouncilControls):
             # session override the backend consults first (fix #86).
             if not arg:
                 c.print(f"max output tokens: [cyan]{config.MAX_OUTPUT_TOKENS:,}[/cyan] "
-                        "per generation   usage: /maxtokens <n>")
+                        "per generation   usage: /maxtokens <n> [--save]")
                 if getattr(self.engine.backend, "n_ctx", None):
                     c.print(f"[dim]clamped per-request to what the "
                             f"{self.engine.backend.n_ctx:,}-token window can still "
                             f"hold[/dim]")
-            elif arg.replace("_", "").replace(",", "").isdigit():
-                n = int(arg.replace("_", "").replace(",", ""))
+            elif (value := arg.removesuffix("--save").strip()).replace("_", "").replace(",", "").isdigit():
+                n = int(value.replace("_", "").replace(",", ""))
+                save = arg.endswith("--save")
                 if n < 256:
                     c.print("[red]too small — a generation needs at least 256[/red]")
                 else:
@@ -2367,8 +2423,18 @@ class App(CouncilControls):
                     config.MAX_OUTPUT_TOKENS_OVERRIDE = n
                     c.print(f"[green]max output tokens: {n:,} for the rest of this "
                             "session[/green]")
-                    c.print("[dim]persist it with DREAM_MAX_TOKENS in the "
-                            "environment[/dim]")
+                    if not save:
+                        c.print("[dim]keep it for new sessions with /maxtokens <n> --save[/dim]")
+                    else:
+                        import os
+                        from ..core.settings import set_value
+                        try:
+                            set_value("output.max_tokens", str(n))
+                            c.print("[green]saved as output.max_tokens for new sessions[/green]"
+                                    + (" [dim](DREAM_MAX_TOKENS in the environment still wins at start)[/dim]"
+                                       if "DREAM_MAX_TOKENS" in os.environ else ""))
+                        except (ValueError, OSError) as exc:
+                            c.print(f"not saved: {exc}", style="red", markup=False)
                     # The console is the window's Terminal tab. The chat pane renders
                     # bus 'system' notes, in the style of Dream's own notes (#76), so
                     # the acknowledgement appears where the command was typed.
@@ -2377,7 +2443,10 @@ class App(CouncilControls):
                         "for every following generation this session (clamped to what "
                         "the context window and the active profile still allow).")))
             else:
-                c.print("usage: /maxtokens <n>")
+                c.print("usage: /maxtokens <n> [--save]")
+
+        elif cmd == "settings":
+            self._settings_command(arg)
 
         elif cmd == "toolcalls":
             if not arg:

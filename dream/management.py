@@ -71,6 +71,13 @@ def main(argv: list[str]) -> int:
     extensions.add_argument("identifier", nargs="?", help="For example skill:dream-verification or mcp:browser")
     extensions.add_argument("--trust", action="store_true", help="Trust the reviewed current hook command and fingerprint")
     extensions.add_argument("--sha256", help="Exact source hash displayed by extensions review; required for module trust")
+    settings = commands.add_parser("settings", help="Show every setting with its source; set, unset or check one")
+    settings.add_argument("action", nargs="?", default="show", choices=["show", "get", "path", "set", "unset", "check"])
+    settings.add_argument("key", nargs="?", help="For example output.max_tokens or roles.subagents.default.model")
+    settings.add_argument("value", nargs="?")
+    settings.add_argument("--provider", choices=PROVIDERS, default="machx",
+                          help="Resolve for this provider (show, get, check); default machx")
+    settings.add_argument("--model", help="Resolve for this exact model id (show, get, check)")
     backup = commands.add_parser("backup", help="Snapshot or restore private state; stop sessions for cross-store consistency")
     backup.add_argument("action", choices=["create", "restore"])
     backup.add_argument("path", type=Path, help="Snapshot destination, or snapshot to restore")
@@ -91,6 +98,30 @@ def main(argv: list[str]) -> int:
                 save_settings(args.name or saved.get("profile", "auto"), existing)
             result = {"saved": read_settings(), "applies": "new sessions",
                       "presets": {name: asdict(p) for name, p in PROFILES.items()}}
+        elif args.command == "settings":
+            from .core import settings as dream_settings
+            if args.action in {"get", "set", "unset"} and not args.key:
+                parser.error(f"settings {args.action} requires a key")
+            if args.action == "set" and args.value is None:
+                parser.error("settings set requires a value")
+            if args.action == "path":
+                result = dream_settings.paths()
+            elif args.action == "check":
+                result = dream_settings.check(provider=args.provider, model=args.model)
+                print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+                return 0 if result["ok"] else 2
+            elif args.action == "set":
+                result = {"saved": args.key, "note": dream_settings.set_value(args.key, args.value)}
+            elif args.action == "unset":
+                result = {"note": dream_settings.unset_value(args.key)}
+            else:
+                rows = dream_settings.effective(provider=args.provider, model=args.model)
+                if args.action == "get":
+                    if args.key not in rows:
+                        raise ValueError(f"no setting named {args.key}; `dream settings show` lists them")
+                    rows = {args.key: rows[args.key]}
+                result = {"provider": args.provider, "model": args.model,
+                          "settings": {key: {"value": row.value, "source": row.source} for key, row in rows.items()}}
         elif args.command == "backup":
             from . import backup as backups, config
             if args.action == "create":
