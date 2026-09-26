@@ -125,7 +125,8 @@ def _bridges() -> list[int]:
 
 
 def _blenders() -> list[int]:
-    return [p for p in _processes(str(blender_live.RUNTIME / "startup.py")) if _first_arg_is(p, b"/usr/bin/blender")]
+    binary = str(blender_live.BLENDER.resolve()).encode()  # the configured Blender (DREAM_BLENDER), /usr/bin/blender by default
+    return [p for p in _processes(str(blender_live.RUNTIME / "startup.py")) if _first_arg_is(p, binary)]
 
 
 def _nested_servers() -> list[int]:
@@ -233,6 +234,17 @@ def test_the_display_folder_is_never_an_execution_root():
     over, the private display mount. validate() refuses it, like the other host trees."""
     with pytest.raises(ex.ExecutionRefused):
         ex.ExecutionScope(Path("/tmp/.X11-unix")).validate()
+
+
+def test_the_profile_passes_no_loader_overrides_to_blender(workspace, monkeypatch):
+    """DREAM-141: with the engine's oneAPI LD_LIBRARY_PATH, a blender.org build's bundled SYCL
+    loads an older libur_loader and Blender exits at start. The sandbox clears the environment,
+    so neither LD_LIBRARY_PATH nor LD_PRELOAD reaches Blender from the parent."""
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/opt/intel/oneapi/compiler/2026.1/lib")
+    monkeypatch.setenv("LD_PRELOAD", "/nonexistent/dream-test-preload.so")
+    argv = _profile(workspace)
+    assert "--clearenv" in argv and argv.index("--clearenv") < argv.index("--")
+    assert not any(a.startswith("LD_") or "oneapi" in a for a in argv)
 
 
 def test_run_bash_keeps_its_own_profile(workspace):
@@ -540,6 +552,21 @@ async def test_blender_python_reaches_the_workspace_and_nothing_else(workspace, 
         "-noxv", "-iglx"]
 
 
+async def test_blender_in_the_sandbox_gets_no_loader_overrides(workspace):
+    """DREAM-141, end to end: a launcher given LD_LIBRARY_PATH starts a Blender without it."""
+    _needs_live(workspace)
+    clients = McpClients()
+    try:
+        tools, _ = await clients.start([_live_config(workspace, env={"LD_LIBRARY_PATH": "/nonexistent/dream-test-lib"})])
+        text, error = await _text({t.name: t for t in tools}["blender__execute_blender_code"],
+                                  {"code": "import os, json; print('ENV' + json.dumps(sorted(os.environ)))"})
+    finally:
+        await clients.stop()
+    assert not error, text
+    names = json.loads(text.split("ENV", 1)[1].strip())
+    assert "LD_LIBRARY_PATH" not in names and "LD_PRELOAD" not in names
+
+
 async def test_saves_and_renders_land_in_the_workspace(workspace):
     _needs_live(workspace)
     code = (
@@ -836,7 +863,8 @@ async def _start_engine_until_backend(tmp_path, monkeypatch, *, disabled=False, 
     if not real_mcp:
         monkeypatch.setattr(McpClients, "start", fake_start)
     monkeypatch.setattr(engines.registry, "build", lambda **kw: {
-        "tools": [], "names": [], "warnings": [], "server": {}, "custom_names": []})
+        "tools": [], "names": [], "warnings": [], "server": {}, "custom_names": [],
+        "exempt_tool_ids": []})  # what the real build gives for no tools (engine.py reads it since DREAM-137)
     monkeypatch.setattr(Engine, "_create_backend", stop_here)
     if live is not None:
         monkeypatch.setattr(blender_live, "managed_servers", live)

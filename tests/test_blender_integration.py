@@ -102,3 +102,33 @@ def test_blender_probe_route_keeps_auth_post_and_confirmation_boundaries(tmp_pat
         assert result.status_code == 200
         assert result.json()['headless_render'] == 'unverified'
         assert calls == [True]
+
+
+def test_open_external_runs_blender_without_loader_overrides(tmp_path, monkeypatch):
+    """DREAM-141: Dream's own host launch of Blender drops LD_LIBRARY_PATH and LD_PRELOAD and
+    keeps the rest of the environment."""
+    from dream.media import service as service_module
+    started = []
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):
+            started.append((argv, kwargs))
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setenv('LD_LIBRARY_PATH', '/opt/intel/oneapi/compiler/2026.1/lib')
+    monkeypatch.setenv('LD_PRELOAD', '/nonexistent/dream-test-preload.so')
+    monkeypatch.setenv('DREAM_TEST_KEEP', 'kept')
+    monkeypatch.setattr(service_module.shutil, 'which', lambda name: '/usr/bin/blender')
+    monkeypatch.setattr(service_module.subprocess, 'Popen', FakePopen)
+    service = MediaService(tmp_path)
+    project = asyncio.run(service.execute('create', {'title': 'Car'}))
+    (tmp_path / 'car.blend').write_bytes(b'BLENDER')
+    job = asyncio.run(service.execute('open_external', {'project_id': project['id'], 'path': 'car.blend'}))
+    assert job['status'] == 'awaiting_user'
+    (argv, kwargs), = started
+    assert argv == ['/usr/bin/blender', '--disable-autoexec', str((tmp_path / 'car.blend').resolve())]
+    env = kwargs['env']
+    assert 'LD_LIBRARY_PATH' not in env and 'LD_PRELOAD' not in env
+    assert env['DREAM_TEST_KEEP'] == 'kept' and env['PATH'] == __import__('os').environ['PATH']

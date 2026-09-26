@@ -203,3 +203,17 @@ async def test_system_startup_overrides_removed(monkeypatch, tmp_path):
     body = "import os\nassert not any(k.startswith('BLENDER_SYSTEM_') for k in os.environ)\nprint(" + repr(blender_probe.MARKER + json.dumps(data)) + ')\n'
     executable(tmp_path, monkeypatch, body)
     assert (await blender.probe_blender(resource_confirmed=True))['probe_status'] == 'ok'
+
+
+async def test_library_path_overrides_removed(monkeypatch, tmp_path):
+    """DREAM-141: the engine's oneAPI LD_LIBRARY_PATH makes a blender.org build load an older
+    libur_loader and exit at start; the probe runs Blender with no loader overrides."""
+    fake_bpy(monkeypatch)
+    data = blender_probe.collect()
+    monkeypatch.setenv('LD_LIBRARY_PATH', '/nonexistent/dream-test-oneapi/lib')
+    monkeypatch.setenv('LD_PRELOAD', '/nonexistent/dream-test-preload.so')
+    monkeypatch.setenv('DREAM_TEST_KEEP', 'kept')
+    body = ("import os\nassert 'LD_LIBRARY_PATH' not in os.environ and 'LD_PRELOAD' not in os.environ\n"
+            "assert os.environ['DREAM_TEST_KEEP'] == 'kept'\nprint(" + repr(blender_probe.MARKER + json.dumps(data)) + ')\n')
+    executable(tmp_path, monkeypatch, body)
+    assert (await blender.probe_blender(resource_confirmed=True))['probe_status'] == 'ok'

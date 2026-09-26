@@ -10,7 +10,7 @@ import uuid
 from .store import MediaStore, MediaError
 from .composition import default_composition, validate_composition
 from .providers import HANDOFFS, ComfyUI, validate_workflow, validate_media
-from .blender import blender_status, probe_blender
+from .blender import blender_environment, blender_status, probe_blender
 
 
 class MediaService:
@@ -221,6 +221,7 @@ class MediaService:
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
                             start_new_session=True,
+                            env=blender_environment(),
                         )
                         import threading
                         threading.Thread(target=process.wait, daemon=True).start()

@@ -216,7 +216,8 @@ for photo, nm in (('refs/photo.png', '../escape'), ('../outside.png', 'x')):
     assert out["photo"] == pytest.approx([1, 0, 0], abs=0.02)
     assert out["model_panel_differs"] is True
     assert out["changed"] == [] and out["samples"] == 64  # every setting as it was, Eevee samples included
-    assert f"rendered with {engine}" in out["_stdout"]
+    assert f"rendered with {engine}" in out["_stdout"]  # BLENDER_EEVEE: BLENDER_EEVEE_NEXT on Blender 4.2-4.5
+    assert "fell back" not in out["_stdout"]  # DREAM-141: Eevee on 4.5 is Eevee, not Workbench
     assert out["cam_bg"] == ["photo.png"]
     assert len(out["refused"]) == 2 and "outside the workspace" in out["refused"][1]
     assert sorted(p.name for p in (tmp_path / "renders").iterdir()) == ["compare_t.png", "compare_t_model.png"]

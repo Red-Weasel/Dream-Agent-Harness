@@ -89,6 +89,7 @@ def test_the_folder_check_passes_a_root_owned_tree():
 def test_a_build_folder_is_mounted_read_only_and_the_default_mounts_nothing_more(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     workspace.mkdir()
+    monkeypatch.setattr(blender_live, "BLENDER", Path("/usr/bin/blender"))  # the default, whatever DREAM_BLENDER says
     default = blender_live._scope(workspace)
     assert all(not r.is_relative_to("/usr") for r in default.read_roots)
     binary = _fake_build(tmp_path)

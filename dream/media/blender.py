@@ -14,6 +14,14 @@ from .blender_probe import ENGINE_NAMES, MARKER
 PROBE_TIMEOUT = 30
 OUTPUT_LIMIT = 128 * 1024
 CLEANUP_GRACE = 0.25
+# DREAM-141: the engine's oneAPI LD_LIBRARY_PATH makes a blender.org build's bundled SYCL load an
+# older libur_loader, and Blender exits at start. Blender is run with its own libraries only.
+LOADER_OVERRIDES = ('LD_LIBRARY_PATH', 'LD_PRELOAD')
+
+
+def blender_environment() -> dict:
+    """This process's environment without the dynamic-loader overrides, for launching Blender."""
+    return {name: value for name, value in os.environ.items() if name not in LOADER_OVERRIDES}
 
 
 def blender_status() -> dict:
@@ -111,7 +119,7 @@ async def probe_blender(*, resource_confirmed=False) -> dict:
     if not status['available']:
         return {**status, 'probe_status': 'unavailable', 'error': 'Blender executable was not found on PATH'}
     with tempfile.TemporaryDirectory(prefix='dream-blender-probe-') as scratch:
-        env = os.environ.copy()
+        env = blender_environment()
         for name in tuple(env):
             if name.startswith(('BLENDER_USER_', 'BLENDER_SYSTEM_')) or name in ('PYTHONPATH', 'PYTHONHOME'):
                 env.pop(name)

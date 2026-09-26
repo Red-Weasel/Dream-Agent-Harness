@@ -151,6 +151,10 @@ def compare_to_reference(photo, view, name=None, height=480, overlay=False, engi
                 bg = cam.data.background_images.new()
                 bg.image, bg.alpha, bg.display_depth = ref, 0.5, "FRONT"
         scene.camera = cam
+        eevee = ("BLENDER_EEVEE", "BLENDER_EEVEE_NEXT")  # Blender 4.2-4.5 names Eevee BLENDER_EEVEE_NEXT
+        names = {e.identifier for e in r.bl_rna.properties["engine"].enum_items}
+        if engine in eevee and engine not in names:
+            engine = next((e for e in eevee if e in names), engine)
         try:
             r.engine = engine
             fell = ""
@@ -158,7 +162,7 @@ def compare_to_reference(photo, view, name=None, height=480, overlay=False, engi
             r.engine = "BLENDER_WORKBENCH"
             fell = f", fell back from {engine}"
         used = r.engine
-        if used == "BLENDER_EEVEE":
+        if used in eevee:
             scene.eevee.taa_render_samples = samples
         r.resolution_x, r.resolution_y, r.resolution_percentage = w, h, 100
         r.image_settings.file_format, r.image_settings.color_mode = "PNG", "RGBA"
