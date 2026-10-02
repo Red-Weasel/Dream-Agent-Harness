@@ -32,7 +32,7 @@ async def test_create_scene_revision_export_and_narrow_layout(tmp_path):
             await page.locator('#mc-format').select_option('html')
             await page.locator('#mc-render').click()
             await page.wait_for_function("document.querySelector('#mc-jobs [data-status=succeeded]')", timeout=15000)
-            response = await page.request.get(server.url.split('/?')[0] + '/api/media/projects', headers={'x-dream-token': server.token})
+            response = await page.request.get(server.url.split('/#')[0] + '/api/media/projects', headers={'x-dream-token': server.token})
             projects = (await response.json())['projects']
             assert projects[0]['revision'] == 2
             assert projects[0]['composition']['scenes'][0]['title'] == 'Bring your work together'

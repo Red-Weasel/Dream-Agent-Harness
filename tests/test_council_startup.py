@@ -273,3 +273,17 @@ def test_catalog_returns_saved_advanced_settings_and_advisor_metadata(monkeypatc
     assert data['saved_council'] == asdict(saved)
     assert {'codex', 'anthropic', 'gemini', 'machx'} <= {c['key'] for c in data['council_choices']}
     assert all(isinstance(c['available'], bool) and c['note'] for c in data['council_choices'])
+
+
+@pytest.mark.parametrize('fields', [{'thinking': (Mock(), {})}, {}])
+def test_native_load_screen_says_when_a_model_has_no_recommendation(onboarding_class, fields):
+    # DREAM-180: an uncarded model (or an engine `recommended: null`) keeps the snapshot's place with one muted line;
+    # the Mode/Effort row stays hidden.
+    panel = onboarding_class.__new__(onboarding_class)
+    panel.settings, panel.fields = {'modes': None}, fields
+    order = Mock()
+    panel.mode_box, panel.mode_row, panel.snapshot = order.box, order.row, order.snapshot
+    panel.fill_mode()
+    panel.snapshot.set_text.assert_called_once_with('Recommendations not available for this model')
+    names = [name for name, *_ in order.mock_calls]
+    assert names.index('box.show_all') < names.index('row.hide')

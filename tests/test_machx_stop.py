@@ -30,3 +30,11 @@ def test_stop_is_idempotent_when_nothing_runs(tmp_path, monkeypatch):
     (tmp_path / "machx.pid").write_text(str(proc.pid), encoding="utf-8")
     assert machx.stop() is False
     assert not (tmp_path / "machx.pid").exists()
+
+
+def test_stop_gives_a_plain_engine_two_minutes_before_sigkill():
+    """2026-09-30 21:55: a SIGKILL seconds after SIGTERM landed while the engine was still finishing a prefill piece,
+    and the GPU work in flight faulted card 0 (65 page faults, an engine reset). Closing Dream now waits up to 120 s
+    for the engine's own orderly stop (about half a second on the current engine) before it kills anything."""
+    import inspect
+    assert inspect.signature(machx.stop).parameters["timeout"].default == 120.0

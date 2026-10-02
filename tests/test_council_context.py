@@ -2,14 +2,17 @@
 from dataclasses import replace
 import asyncio
 import json
+import math
 import sqlite3
 
 import httpx
 import pytest
 
 from dream.core import engine as mod
+from dream.core import settings
 from dream.core.backends.base import Event
 from dream.core.backends.openai_compat import OpenAICompatBackend
+from dream.core.context_budget import estimate
 from dream.core.moe import MoeConfig
 from dream.core.profiles import PROFILES
 from test_council_handoff import engine, Backend
@@ -320,10 +323,20 @@ def test_zero_optional_room_emits_manifest_without_residual_model_marker():
     assert len(notices) == 1 and all(x in notices[0] for x in ('codex', 'gemini', 'session', '41', 'omitted'))
 
 
-async def test_near_admission_boundary_omits_advice_without_blocking_current(engine, http_handoff):
+@pytest.mark.parametrize('policy', ['compact', 'handoff', 'stop'])
+async def test_near_admission_boundary_omits_advice_without_blocking_current(engine, http_handoff, policy):
     await engine.record_council_results('q', [{'advisor': 'codex', 'answer': 'optional'}])
     backend = await http_handoff(2048)
-    current = 'X' * 4800
+    # The owner's context_overflow (DREAM-175): only compact lets admission drop the council context itself, so under
+    # handoff and stop the projection's own fit check is what keeps the current message sendable.
+    settings.set_value('behaviour.context_overflow', policy)
+    backend.apply_context_policy()
+    assert backend._context_overflow == policy
+    # 4,800 characters sat just inside the admission boundary while the fixed tools were 136 tokens (tool_schema
+    # alone). DREAM-208 pins `task` there too, so the message gives up what the tools grew by (3.5 bytes a token, the
+    # estimate): the boundary and the room left under it stay what they were.
+    grown = estimate(backend._request_tools()) - 136
+    current = 'X' * (4800 - math.ceil(grown * 3.5))
     events = await collect(engine, current)
     assert len(backend._client.payloads) == 1
     assert backend._client.payloads[0]['messages'][-1]['content'].startswith(current)

@@ -5,8 +5,9 @@ browser, and wanted one click to open one there. A file:// URL cannot do it: Chr
 module scripts from file://. So workspace files are served over http, but from a SEPARATE
 origin, never Dream's own: a page from the workspace must never be able to call Dream's API
 with the owner's credentials. Dream's API authenticates every call with its per-session token
-(the X-Dream-Token header or a ?token= query; ?token= on the websocket; no cookie); this origin
-never holds it, and being another origin it cannot read Dream's responses either.
+(the X-Dream-Token header; ?token= only on a link, a frame or the websocket, and only from
+Dream's own page; no cookie); this origin never holds it, and being another origin it cannot
+read Dream's responses either.
 
 The rules, each one a line below:
 - its own port on 127.0.0.1 (not configurable), and a request under any other host name is

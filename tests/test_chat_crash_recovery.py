@@ -53,7 +53,7 @@ asyncio.run(main())
         env[key] = str(path)
     env.update(PYTHONPATH=str(Path(__file__).resolve().parents[1]),
                DREAM_SEMANTIC_MEMORY='0', DREAM_RERANK='0', DREAM_CONSOLIDATE='0',
-               DREAM_MONITOR='0', DREAM_GUI_OPEN='0', DREAM_SEARXNG_AUTOSTART='0',
+               DREAM_MONITOR='0', DREAM_SEARXNG_AUTOSTART='0',
                CUDA_VISIBLE_DEVICES='', HIP_VISIBLE_DEVICES='', ROCR_VISIBLE_DEVICES='',
                HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1')
     child = subprocess.run([sys.executable, '-c', script, str(config.DB_PATH),

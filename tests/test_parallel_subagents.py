@@ -12,6 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from lease_isolation import isolated_lease_dir  # noqa: F401  (DREAM-205: leases under tmp_path, never the live folder)
+
 sys.path.insert(0, str(Path(__file__).parent))
 from test_schema_deferral import _FakeClient, _sse, _text_round  # noqa: E402
 from dream.core.backends.openai_compat import OpenAICompatBackend  # noqa: E402
@@ -144,10 +146,18 @@ async def test_gate13_a_tool_written_before_the_tasks_finishes_before_they_start
     """Gate 13 blocking finding: the batch started at the top of the round, so a
     tool the model wrote BEFORE its tasks ran concurrently with them — it asked
     to write a file and summarize it, and the summary read the file mid-write."""
+    from dream.core.execution import ExecutionScope, probe_sandbox
     from dream.memory.store import MemoryStore
     from dream.tools import context as tool_context
     from dream.tools.context import ToolContext, set_context
 
+    # The tool that writes the file is the real run_bash, which runs only inside verified OS
+    # containment; without it the command is refused, nothing is written and both subagents see
+    # MISSING whatever the order (GitHub's ubuntu-24.04 runner: bubblewrap may not configure its
+    # network namespace, DREAM-150).
+    capability = await probe_sandbox(ExecutionScope(tmp_path))
+    if not capability.available:
+        pytest.skip(f"run_bash needs verified OS containment, unavailable here: {capability.reason}")
     store = MemoryStore(tmp_path / "r.db")
     monkeypatch.setattr(tool_context, "_CTX", None)
     set_context(ToolContext(store=store, working=None, browser=None,  # type: ignore[arg-type]

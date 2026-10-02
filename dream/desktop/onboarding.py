@@ -8,6 +8,7 @@ from pathlib import Path
 from gi.repository import GLib, Gtk, Pango
 
 from .browser import label
+from .protocol import refill
 
 
 class Onboarding(Gtk.Box):
@@ -56,7 +57,8 @@ class Onboarding(Gtk.Box):
         self.pack_start(self.main_model, False, False, 0)
         self.main_effort = Gtk.ComboBoxText()
         self.main_effort.get_accessible().set_name('Main reasoning effort')
-        self.pack_start(label('Main reasoning effort'), False, False, 0)
+        self.main_effort_label = label('Main reasoning effort')
+        self.pack_start(self.main_effort_label, False, False, 0)
         self.pack_start(self.main_effort, False, False, 0)
         self.effort_note = label('', 'muted')
         self.effort_note.set_line_wrap(True)
@@ -81,6 +83,26 @@ class Onboarding(Gtk.Box):
         self.summary.set_line_wrap(True)
         self.summary.set_max_width_chars(48)
         self.pack_start(self.summary, False, False, 0)
+        # DREAM-179: the model's mode and effort, with the card's recommended sampling per mode. Both drive the
+        # Advanced thinking / reasoning_effort rows, which stay the launch's source of truth.
+        self.modes = self.active_mode = None
+        self.mode_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.mode_row = row = Gtk.Box(spacing=8)
+        self.mode_think = Gtk.RadioButton(label='Thinking', draw_indicator=False)
+        self.mode_instruct = Gtk.RadioButton(label='Instruct', group=self.mode_think, draw_indicator=False)
+        self.mode_think.connect('toggled', self.mode_toggled)
+        self.mode_effort = Gtk.ComboBoxText()
+        self.mode_effort.get_accessible().set_name('Model reasoning effort')
+        self.mode_effort.connect('changed', lambda f: self.mirror('reasoning_effort', f))
+        self.mode_label, self.effort_label = label('Mode'), label('Effort')
+        for widget in (self.mode_label, self.mode_think, self.mode_instruct, self.effort_label, self.mode_effort):
+            row.pack_start(widget, False, False, 0)
+        self.mode_box.pack_start(row, False, False, 0)
+        self.snapshot = label('', 'muted')
+        self.snapshot.set_line_wrap(True)
+        self.snapshot.set_max_width_chars(72)
+        self.mode_box.pack_start(self.snapshot, False, False, 0)
+        self.pack_start(self.mode_box, False, False, 0)
         self.advanced = Gtk.Expander(label='Advanced model settings')
         self.grid = Gtk.Grid(column_spacing=16, row_spacing=8)
         self.advanced.add(self.grid)
@@ -208,6 +230,7 @@ class Onboarding(Gtk.Box):
         self.settings = None
         self.advanced.hide()
         self.reset.hide()
+        self.mode_box.hide()
         self.summary.set_text('')
         index = self.engines.get_active()
         if not 0 <= index < len(self.choices):
@@ -223,6 +246,8 @@ class Onboarding(Gtk.Box):
                         if self.saved_council.get('orchestrator') == choice['provider'] else None)
         self.fill_effort(self.main_effort, metadata, saved_effort if choice['kind'] == 'provider' else None)
         self.main_effort.set_sensitive(choice['kind'] == 'provider' and bool(metadata.get('efforts') or saved_effort))
+        for widget in (self.main_effort_label, self.main_effort, self.effort_note):   # local: Mode/Effort below
+            widget.set_visible(choice['kind'] != 'local')
         self.effort_note.set_text('Choose local reasoning effort in Advanced model settings below.'
                                  if choice['kind'] == 'local' else 'Uses the running model\'s current effort.'
                                  if choice['kind'] == 'attach' else metadata.get('effort_note', ''))
@@ -238,6 +263,7 @@ class Onboarding(Gtk.Box):
     def settings_loaded(self, data):
         self.settings = data
         self.fill_settings(data['selection'])
+        self.fill_mode()
         self.summary.set_text(f"Context {data['selection']['ctx']:,} · GPUs {data['selection']['gpus'] or 'auto'}\n"
                               + data['sources']['ctx'])
         self.message.set_text('\n'.join(data['notes']))
@@ -249,13 +275,13 @@ class Onboarding(Gtk.Box):
     def fill_settings(self, selection):
         for child in self.grid.get_children():
             self.grid.remove(child)
-        self.fields = {}
+        self.fields, self.source_labels = {}, {}
         controls = [dict(name='ctx', kind='int', hint='Conversation context length'),
                     dict(name='gpus', kind='int', hint='GPU count; default = automatic'), *self.settings['controls']]
         for row, control in enumerate(controls):
             name = control['name']
             value = selection.get(name) if name in ('gpus', 'ctx') else selection['options'][name]
-            choices = control.get('choices') or (['compact', 'error'] if control['kind'] == 'overflow' else [])
+            choices = list(control.get('choices') or [])
             if control['kind'] == 'bool':
                 choices = ['on', 'off'] + (['default'] if value is None else [])
             if choices:
@@ -268,15 +294,85 @@ class Onboarding(Gtk.Box):
                 field = Gtk.Entry()
                 field.set_text('default' if value is None else json.dumps(value) if isinstance(value, list) else str(value))
             field.set_tooltip_text(control['hint'])
-            self.fields[name] = (field, control)
             self.grid.attach(label(name.replace('_', ' ')), 0, row, 1, 1)
             self.grid.attach(field, 1, row, 1, 1)
-            self.grid.attach(label(self.settings['sources'].get(name, control.get('source', '')), 'muted'), 2, row, 1, 1)
+            source = label(self.settings['sources'].get(name, control.get('source', '')), 'muted')
+            self.fields[name], self.source_labels[name] = (field, control), source
+            self.grid.attach(source, 2, row, 1, 1)
+
+    def fill_mode(self):
+        self.modes = self.settings.get('modes')
+        thinking, effort = self.fields.get('thinking'), self.fields.get('reasoning_effort')
+        if not self.modes or not thinking:
+            self.mode_box.hide()
+            if not self.modes:          # DREAM-180: say so in the snapshot's place; no Mode/Effort row
+                self.mode_box.show_all()
+                self.mode_row.hide()
+                self.snapshot.set_text('Recommendations not available for this model')
+            return
+        self.active_mode = None
+        self.mode_effort.remove_all()
+        for choice in (effort[1]['choices'] if effort else []):
+            self.mode_effort.append_text(choice)
+        thinking[0].connect('changed', self.thinking_changed)
+        if effort:
+            effort[0].connect('changed', lambda f: self.mode_effort.set_active(f.get_active()))
+            self.mode_effort.set_active(effort[0].get_active())
+        self.mode_box.show_all()
+        for widget in (self.mode_label, self.mode_think, self.mode_instruct):
+            widget.set_visible(bool(self.modes['instruct']))       # GLM: effort only; its thinking-off is unofficial
+        self.mode_instruct.set_label(self.modes['instruct']['label'] if self.modes['instruct'] else 'Instruct')
+        self.effort_label.set_visible(bool(effort))
+        self.mode_effort.set_visible(bool(effort))
+        self.thinking_changed(thinking[0])
+
+    def mirror(self, name, source):
+        if name in self.fields and source.get_active() >= 0:
+            self.fields[name][0].set_active(source.get_active())
+
+    def mode_toggled(self, button):
+        if self.modes and self.modes['instruct'] and 'thinking' in self.fields:
+            choices = self.fields['thinking'][0].get_model()
+            wanted = 'on' if button.get_active() else 'off'
+            self.fields['thinking'][0].set_active(next(i for i, row in enumerate(choices) if row[0] == wanted))
+
+    def thinking_changed(self, field):
+        mode = 'instruct' if field.get_active_text() == 'off' and self.modes['instruct'] else 'thinking'
+        if self.active_mode and mode != self.active_mode:     # re-seed the sampling rows the user has not edited
+            current = {}
+            for name in self.modes[mode]['values']:
+                try:
+                    current[name] = float(self.fields[name][0].get_text())
+                except (KeyError, ValueError):
+                    pass
+            for name, value in refill(current, self.modes[self.active_mode]['values'], self.modes[mode]['values']).items():
+                self.fields[name][0].set_text(str(value))
+                self.source_labels[name].set_text('Model card (mode switch)')
+        if self.active_mode:
+            self.source_labels['thinking'].set_text('Mode: ' + (self.modes[mode]['label'] if field.get_active_text() != 'off'
+                                                            or mode == 'instruct' else 'thinking off (unofficial)'))
+        self.active_mode = mode
+        (self.mode_instruct if mode == 'instruct' else self.mode_think).set_active(True)
+        self.mode_effort.set_sensitive(field.get_active_text() != 'off')
+        m = self.modes
+        lines = ['<b>Recommended</b> · model card']
+        for name in ('thinking', 'instruct'):
+            if m[name]:
+                line = GLib.markup_escape_text(m[name]['line'])
+                lines.append(f'<span foreground="#EBF0FA">{line}</span>' if name == mode else line)
+                if m[name]['when']:
+                    lines.append(GLib.markup_escape_text('      Use for: ' + m[name]['when']))
+        if m['effort']:
+            lines.append(GLib.markup_escape_text('Effort: ' + ' · '.join(f'{k} — {v}' for k, v in m['effort'].items())))
+        lines += [GLib.markup_escape_text(text) for text in
+                  (m['note'], m['source'] and 'Source: ' + m['source'].removeprefix('https://')) if text]
+        self.snapshot.set_markup('\n'.join(lines))
 
     def reset_settings(self, *_):
         if self.settings:
             self.settings['sources'] = self.settings['recommended_sources']
             self.fill_settings(self.settings['recommended'])
+            self.fill_mode()
             rec = self.settings['recommended']
             self.summary.set_text(f"Context {rec['ctx']:,} · GPUs {rec['gpus'] or 'auto'}\n" + self.settings['sources']['ctx'])
             self.message.set_text('Recommendations restored. Saved settings change only after a successful load.')
@@ -322,6 +418,7 @@ class Onboarding(Gtk.Box):
         self.refresh.set_sensitive(not running)
         self.folder.set_sensitive(not running)
         self.advanced.set_sensitive(not running)
+        self.mode_box.set_sensitive(not running)
         self.council.set_sensitive(not running)
         index = self.engines.get_active()
         self.main_model.set_sensitive(not running and 0 <= index < len(self.choices)

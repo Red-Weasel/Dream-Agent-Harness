@@ -233,7 +233,8 @@ async def _attack(srv, ws, prompts, seen):
     statuses = {path: status for path, status in seen if path != "/ws"}
     assert statuses.get("/api/session") == 401 and statuses.get("/api/prompt") in (401, 405), seen
     assert all(status in (401, 403, 405) for path, status in seen if path.startswith("/api/")), seen
-    assert ("/ws", "ws close 4401") in seen, seen
+    # The handshake is refused on its origin (DREAM-187), before the token is even looked at.
+    assert ("/ws", "ws close 4403") in seen, seen
 
 
 # --- gate 1 (2026-09-24): an over-long path, and a path swapped for a link after the check ------

@@ -1,0 +1,15 @@
+{
+  "format": "dream-skill/v1",
+  "name": "code-review",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "run_bash",
+    "read_file",
+    "github_get_tree",
+    "github_read_file",
+    "project_outline",
+    "grep",
+    "write_file"
+  ]
+}

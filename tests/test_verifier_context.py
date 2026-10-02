@@ -91,7 +91,9 @@ async def test_refusal_preserves_explicit_error_policy_and_current_request(repor
     b = ready(window=2048, policy=policy, report=report)
     events = [e async for e in b.ask(prompt)]
     assert b._client.payloads == []
-    assert next(e.data for e in events if e.kind == 'result')['subtype'] == 'context_overflow'
+    # `error` is stop's old name (DREAM-175): it now ends the turn at the trigger, before the refusal would.
+    assert next(e.data for e in events if e.kind == 'result')['subtype'] == (
+        'context_stop' if policy == 'error' else 'context_overflow')
     assert b.messages[-1]['content'] == prompt + '\n\n[id:m0001]'
     if policy == 'error':
         assert b.messages[-2]['content'] == report

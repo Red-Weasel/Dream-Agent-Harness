@@ -1,0 +1,12 @@
+{
+  "format": "dream-skill/v1",
+  "name": "copy-variations",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "read_file",
+    "ask_user_input",
+    "run_bash",
+    "write_file"
+  ]
+}

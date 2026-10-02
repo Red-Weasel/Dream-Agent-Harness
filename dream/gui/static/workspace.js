@@ -18,8 +18,12 @@
   const brand=el('div',null,{class:'dream-nav-brand'});
   const brandText=el('div','DREAM');brandText.append(el('small','Build · Explore · Align'));
   brand.append(el('img',null,{src:'/assets/dream-mark.svg',alt:'',width:'44',height:'44'}),brandText);nav.append(brand);
-  const views=[['home','◉','Home'],['chat','◌','Chat'],['studio','◇','Studio'],['projects','▱','Projects'],['optimizer','✎','Prompt Optimizer'],['skills','✧','Skills'],['memory','▧','Memory'],['files','▤','Files'],['understand','⌬','Understand'],['settings','⚙','Settings']];
+  const views=[['home','◉','Home'],['chat','◌','Chat'],['nested','▦','Nested Dream'],['studio','◇','Studio'],['projects','▱','Projects'],['optimizer','✎','Prompt Optimizer'],['skills','✧','Skills'],['memory','▧','Lucid Control'],['files','▤','Files'],['sleepwalk','☾','Sleepwalk'],['settings','⚙','Settings']];
+  const toggles=[['understand','⌬','Understand']];   // panels beside the chat: switches, not pages
   for(const [view,icon,label] of views){const b=button('',()=>navigate(view),'dream-nav-'+view);b.title=label;b.setAttribute('aria-label','Go to '+label);b.append(el('i',icon,{'aria-hidden':'true'}),el('span',label));nav.append(b);}
+  // Below a divider, panels that open beside the chat: switches, not places (owner, 2026-09-28).
+  nav.append(el('div',null,{class:'dream-nav-divider',role:'separator'}));
+  for(const [view,icon,label] of toggles){const b=button('',()=>navigate(view),'dream-nav-'+view);b.className='dream-nav-toggle';b.title=label+': show or hide it beside the chat';b.setAttribute('aria-label',label+' panel');b.setAttribute('aria-pressed','false');b.append(el('i',icon,{'aria-hidden':'true'}),el('span',label));nav.append(b);}
   nav.append(button('⌘',()=>palette.showModal(),'dream-command-open'));$('dream-command-open')?.setAttribute('aria-label','Command palette');
   document.body.prepend(nav);$('dream-command-open').setAttribute('aria-label','Command palette');
   const welcome=$('studio-interactions-empty');
@@ -72,7 +76,7 @@
   document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();palette.showModal();$('dream-command-search').focus();}if(e.key==='Escape'&&!inspector.hidden){inspector.hidden=true;context.focus();}});
   const destinations={chat:'studio-interactions',studio:'studio-preview',projects:'studio-project',skills:'studio-skills',settings:'dream-controls-open'};
   function navigate(view){
-    if(!views.some(v=>v[0]===view))return;
+    if(!views.some(v=>v[0]===view)&&!toggles.some(v=>v[0]===view))return;
     if(view==='understand'){window.DreamLibrary?.hide();window.PromptOptimizer?.hide(false);root.classList.remove('dream-expanded');home.hidden=true;inspector.hidden=true;root.dataset.dreamView='chat';$('studio-interactions')?.click();window.DreamUnderstand?.toggle();return;}   // a dock beside the chat, not a page (DREAM-087)
     window.DreamLibrary?.hide();
     window.PromptOptimizer?.hide(false);
@@ -101,8 +105,10 @@
   async function refresh(){if(refreshing||document.hidden)return;refreshing=true;try{const r=await read('/api/runtime');performanceSupported=r.performance?.supported===true;observed=Date.now();const value=v=>v===null||v===undefined?'Unreported':typeof v==='object'?JSON.stringify(v).slice(0,4000):String(v);const facts=[['Model',r.model],['Provider',r.provider],['Workspace',r.workspace],['Context owner',r.context_owner],['HTTP read timeout',r.transport?.available?(r.transport.read_timeout_s===null?'No cutoff':r.transport.read_timeout_s+' s'):'Unreported'],['Run state',r.run?.state],['Execution',r.execution?.checked===false?'Not checked':r.execution?.reason],['Reasoning',(r.performance?.effective?.reasoning_effort ?? window.DREAM_SESSION?.reasoning_effort)],['Context',r.context]];const list=$('dream-facts');list.replaceChildren();for(const [key,v] of facts)list.append(el('dt',key),el('dd',value(v)));effort.textContent='Effort · '+value((r.performance?.effective?.reasoning_effort ?? window.DREAM_SESSION?.reasoning_effort));$('dream-observed').textContent='Runtime API · observed '+new Date(observed).toLocaleTimeString();$('dream-memory-state').textContent=r.memory?.save?[r.memory.save.state,r.memory.save.updated_at,r.memory.save.workspace,r.memory.save.error].filter(Boolean).join(' · '):'No save status reported. Session persistence and memory consolidation are separate.';const failed=[...document.querySelectorAll('#stream .tool.err')].slice(-5);$('dream-failures').replaceChildren(...(failed.length?failed.map(n=>el('p',n.querySelector('summary')?.textContent?.slice(0,240))):[el('p','No failed tools in the loaded feed.')]));}catch(e){if(e.stale)return;$('dream-observed').textContent=(observed?'Stale · last observed '+new Date(observed).toLocaleTimeString()+' · ':'')+e.message;}finally{refreshing=false;}}
   setInterval(()=>{if(!inspector.hidden&&!document.hidden)refresh();},10000);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!inspector.hidden)refresh();});
-  // Observe existing permission delivery: an expanded output never hides approval.
-  new MutationObserver(()=>{if(document.querySelector('.permission-card')){window.DreamLibrary?.hide();window.PromptOptimizer?.hide(false);root.classList.remove('dream-expanded');home.hidden=true;inspector.hidden=true;root.dataset.dreamView='chat';}}).observe($('stream'),{childList:true,subtree:true});
+  // Observe existing permission delivery: an expanded output never hides approval. The Nested view shows every waiting
+  // request in its own Needs-you stack (DREAM-194): it clears what could cover the stack (the Context panel among it)
+  // like every view, and only the switch to Chat is skipped there.
+  new MutationObserver(()=>{if(document.querySelector('.permission-card')){window.DreamLibrary?.hide();window.PromptOptimizer?.hide(false);root.classList.remove('dream-expanded');home.hidden=true;inspector.hidden=true;if(root.dataset.dreamView!=='nested')root.dataset.dreamView='chat';}}).observe($('stream'),{childList:true,subtree:true});
   const approval=button('Approval waiting',()=>navigate('chat'),'dream-approval-return');approval.hidden=true;workbar.append(approval);
   new MutationObserver(()=>{approval.hidden=!document.querySelector('.permission-card');}).observe($('stream'),{childList:true,subtree:true});
   const output=el('div',null,{id:'dream-output-tools'});output.append(el('span','Output not selected',{id:'dream-output-evidence'}),button('Expand',()=>{root.classList.toggle('dream-expanded');},'dream-output-expand'),button('Compare',compare,'dream-output-compare'),button('History',history,'dream-output-history'));

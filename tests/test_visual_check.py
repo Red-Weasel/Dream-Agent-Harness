@@ -306,7 +306,7 @@ async def test_studio_shows_the_card_with_the_image_and_takes_a_pick(tmp_path, m
     set_studio(srv)
     try:
         # the image route the card relies on: the workspace file, as an image, behind the token; nothing outside
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://test") as c:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://127.0.0.1") as c:
             r = await c.get(f"/api/download?path=header.png&token={srv.token}")
             assert r.status_code == 200 and r.headers["content-type"] == "image/png"
             assert (await c.get(f"/api/download?path=../header.png&token={srv.token}")).status_code == 400
@@ -317,7 +317,7 @@ async def test_studio_shows_the_card_with_the_image_and_takes_a_pick(tmp_path, m
             page.set_default_timeout(8000)
             errors: list[str] = []
             page.on("pageerror", lambda e: errors.append(str(e)))
-            await page.goto(url + "&companion=1")
+            await page.goto(url.replace("/#", "/?companion=1#"))
             await expect(page.locator("#stat")).to_have_text("Ready")
 
             res = await visual_check.handler({"paths": ["header.png"], "question": QUESTION, "options": OPTIONS})

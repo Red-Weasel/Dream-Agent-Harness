@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import os
 import subprocess
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .. import config
+from ..core import engine_layout
 from ..tui.render import Renderer
 from ..web import searxng
 from . import machx
@@ -113,10 +115,23 @@ async def _run_harness(
         else:
             r.system("unloading MachX — freeing GPU memory…")
             stopped = await asyncio.to_thread(machx.stop)
-            r.system("GPU memory freed" if stopped else "MachX was already down")
+            r.system(_stop_message(stopped))
 
 
-async def _edit_options(console: Console, r: Renderer, capabilities: dict, ctx: int, gpus: int | None = None, *, initial: dict | None = None, sources: dict | None = None) -> dict | None:
+def _stop_message(stopped: bool) -> str:
+    """What machx.stop() did: freed the cards, found nothing running, or (a supervisor still stopping after its
+    wait, DREAM-144) left the engine running -- never 'already down' for a process that is still there."""
+    if stopped:
+        return "GPU memory freed"
+    pid = machx.left_running()
+    if pid is not None:
+        return (f"MachX is still stopping (pid {pid}) — left running, not killed; it frees the cards when its "
+                f"servers have stopped. Check {machx.BASE_URL.removesuffix('/v1')}/health; if it is stuck, "
+                f"POST {machx.BASE_URL.removesuffix('/v1')}/admin/shutdown")
+    return "MachX was already down"
+
+
+async def _edit_options(console: Console, r: Renderer, capabilities: dict, ctx: int, gpus: int | None = None, *, initial: dict | None = None, sources: dict | None = None, modes: dict | None = None) -> dict | None:
     from .settings import available_controls, parse_value, validate_options
     import json
 
@@ -156,10 +171,17 @@ async def _edit_options(console: Console, r: Renderer, capabilities: dict, ctx: 
         if not raw:
             continue
         try:
+            old = values.get(control.name)
             values[control.name] = parse_value(control, raw)
             sources[control.name] = control.source if raw.strip().lower() == "default" else "Your edit"
         except ValueError as exc:
             r.error(str(exc))
+            continue
+        if control.name == "thinking" and modes and modes["instruct"] and old != values["thinking"]:
+            from ..desktop.protocol import refill     # DREAM-179: re-seed the rows still at the other mode's values
+            mode = lambda on: modes["instruct" if on is False else "thinking"]["values"]
+            for key, value in refill(values, mode(old), mode(values["thinking"])).items():
+                values[key], sources[key] = value, "Model card (mode switch)"
 
 
 async def _choose_model_settings(console: Console, r: Renderer, path: Path, capabilities: dict):
@@ -180,6 +202,10 @@ async def _choose_model_settings(console: Console, r: Renderer, path: Path, capa
         values.update({k: selection[k] for k in ("gpus", "ctx")})
         values["options"].update(selection["options"])
         sources.update({k: "Saved for this model" for k in ["gpus", "ctx", *selection["options"]]})
+    if "parallel" in values["options"]:
+        from .settings import engine_parallel_source
+        sources["parallel"] = engine_parallel_source(capabilities.get("architecture"),
+                                                     sources.get("parallel", "Your edit"))
     for note in rec["notes"]:
         r.system(note)
     if rec["context_limit"]:
@@ -247,7 +273,7 @@ async def _choose_model_settings(console: Console, r: Renderer, path: Path, capa
         if 'max_tokens' in values['options'] and values['options']['max_tokens'] >= values['ctx']:
             values['options']['max_tokens']=max(1,values['ctx']//2)
             sources['max_tokens']='Adjusted for selected context'
-        edited = await _edit_options(console,r,effective_caps,values['ctx'],values['gpus'],initial=values['options'],sources=sources)
+        edited = await _edit_options(console,r,effective_caps,values['ctx'],values['gpus'],initial=values['options'],sources=sources,modes=rec.get('modes'))
         if edited is None: return None
         values['options']=edited
         try: return validated()
@@ -329,6 +355,19 @@ async def serve_and_run(
             r.system("not loading.")
             return
 
+    # DREAM-151: the owner's engine lanes (Settings engine.parallel / engine.slot_ctx) for a model that serves lanes;
+    # the preset below keeps the model's own choices. DREAM-155: after the preflight, which checks the GPU count
+    # first (a directory model's saved gpus=1 gets its "all visible GPUs" message, not the lanes one).
+    from .settings import engine_lanes, lanes_report
+    try:
+        launch, lanes, lanes_note = engine_lanes(options, capabilities.get("architecture"), ctx=ctx, gpus=gpus)
+        machx.lanes_queue(launch)       # DREAM-209: an unusable worker cap refuses a lanes launch here, not mid-load
+    except ValueError as exc:
+        r.error(str(exc))
+        return
+    if lanes_note:
+        r.system(lanes_note)
+
     # A model on an external drive loads at the drive's read speed, not the
     # bus's: ~147 GB of expert pool is ~4 min from NVMe and 20-25 min from a
     # USB HDD. Say so, so a long load doesn't look like a hang.
@@ -346,9 +385,15 @@ async def serve_and_run(
     if model_key(path) != selected_identity:
         r.error("Model files changed while selecting settings; select the model again.")
         return
-    proc = machx.serve(path, gpus=gpus, ctx=ctx, options=options, keep_hot=keep_hot)
+    mark = machx.log_mark()
+    try:
+        proc = machx.serve(path, gpus=gpus, ctx=ctx, options=launch, keep_hot=keep_hot)
+    except ValueError as exc:       # DREAM-209: e.g. a lanes launch whose worker cap cannot be read; nothing loaded
+        r.error(str(exc))
+        return
     if not await asyncio.to_thread(machx.wait_ready, proc):
-        r.error(f"MachX didn't come up — check {machx._log_file()}.")
+        said = machx.launch_error(mark)
+        r.error(f"MachX didn't come up — check {machx._log_file()}." + (f" The engine said: {said}" if said else ""))
         # A half-loaded server would squat on VRAM forever — take it down.
         await asyncio.to_thread(machx.stop)
         return
@@ -356,7 +401,9 @@ async def serve_and_run(
     if capabilities.get("architecture") == "glm5next":
         residency = await asyncio.to_thread(machx.residency_summary)
         r.system(residency or "GLM residency report unavailable; full residency has not been verified.")
-    r.system(f"MachX ready · serving {model_id} on {machx.BASE_URL}")
+    served = (" · " + lanes_report(lanes, await asyncio.to_thread(machx.served_lanes), capabilities.get("architecture"))
+              if lanes else "")
+    r.system(f"MachX ready · serving {model_id} on {machx.BASE_URL}{served}")
 
     # Only a successful load becomes the next launch's default. A failed/cancelled
     # attempt must never replace a working preset, nor overwrite a newer session.
@@ -373,11 +420,43 @@ async def serve_and_run(
         atexit.register(machx.stop)
 
     from .settings import session_options
-    with session_options(options, model_id, capabilities=capabilities):
+    with session_options(launch, model_id, capabilities=capabilities):
         await _run_harness(
             r, provider="machx", model=model_id,
             consolidate_on_exit=consolidate_on_exit, keep_hot=keep_hot,
         )
+
+
+async def serve_layout_and_run(r: Renderer, layout: Path, *, consolidate_on_exit: bool, keep_hot: bool) -> None:
+    """`ie supervise --config <layout>` instead of one `ie serve` (DREAM-144): every server of the layout on its
+    own cards behind one front. The session's main model is the layout's choice (roles.main.model, else the
+    layout's default); a sub-agent role naming another server runs there. No model preset applies: the layout
+    file holds each server's settings."""
+    r.system(f"starting MachX supervisor · {layout} … (loading every server of the layout)")
+    try:
+        proc = machx.supervise(layout, keep_hot=keep_hot)
+    except ValueError as exc:
+        r.error(str(exc))
+        return
+    if not await asyncio.to_thread(machx.wait_ready, proc, ready=machx.supervisor_ready):
+        r.error(f"The MachX supervisor didn't come up — check {machx._log_file()}.")
+        await asyncio.to_thread(machx.stop)
+        return
+    view = await asyncio.to_thread(engine_layout.layout_view)
+    for line in engine_layout.describe(view):
+        r.system(line)
+    model_id = view.get("main")
+    if not model_id:
+        r.error("No server of the layout is ready to serve.")
+        await asyncio.to_thread(machx.stop)
+        return
+    r.system(f"MachX ready · main model {model_id} on {machx.BASE_URL}")
+    if not keep_hot:
+        atexit.register(machx.stop)      # as serve_and_run: exiting unloads the cards, supervisor included
+    await _run_harness(
+        r, provider="machx", model=model_id,
+        consolidate_on_exit=consolidate_on_exit, keep_hot=keep_hot,
+    )
 
 
 async def run_local(*, consolidate_on_exit: bool = True, keep_hot: bool = False) -> None:
@@ -390,6 +469,12 @@ async def run_local(*, consolidate_on_exit: bool = True, keep_hot: bool = False)
             f"MachX binary not found at {machx.IE_BIN}.\n"
             "  Build it (see the engine's QUICKSTART) or set DREAM_MACHX_DIR."
         )
+        return
+
+    layout = os.environ.get("DREAM_MACHX_LAYOUT")
+    if layout and not machx.is_serving():
+        await serve_layout_and_run(r, Path(layout).expanduser(),
+                                   consolidate_on_exit=consolidate_on_exit, keep_hot=keep_hot)
         return
 
     if machx.is_serving():

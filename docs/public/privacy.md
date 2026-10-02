@@ -35,5 +35,14 @@ results required by a task. Hosted providers have their own retention and accoun
 policies. Local inference and local storage do not make arbitrary extensions,
 external tools, or websites private. Review integrations and their permissions.
 
+The model's web access is bounded. `browse` and the controlled computer browser
+reach only the public internet through Dream's own connection boundary: loopback,
+private, link-local and own-machine destinations, including your local services,
+the LAN and Dream's own Studio, are refused before any connection. `browse` opens
+a local address only when your latest message contains that URL on its own, and
+such a page opens sealed off from the internet. Page content comes back to the
+model marked as untrusted data. On Linux the browsing browser also runs inside
+bubblewrap with its own network namespace.
+
 Back up your own runtime data privately. Markdown memory files alone do not contain
 all session, task, and library state; preserve the relevant databases as well.

@@ -69,7 +69,7 @@ def server(root, **kwargs):
 
 
 def client(srv, token=None):
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://test',
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://127.0.0.1',
                              headers={'X-Dream-Token': token if token is not None else srv.token})
 
 
@@ -184,7 +184,7 @@ async def test_the_real_dashboard_shows_no_banner_for_a_fresh_map_without_git(tm
                                                               "files": {"src/main.ts": sha("src/main.ts")}}))
     srv = server(root)
     url = await srv.start()
-    base = url.split('?')[0].rstrip('/')
+    base = url.split('#')[0].rstrip('/')   # the token rides in the fragment (DREAM-187)
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(args=['--disable-gpu'])
@@ -340,29 +340,98 @@ async def test_recorded_hashes_win_over_git_for_a_map_that_has_them(project):
         assert dirty['status'] == 'dirty' and dirty['changedFiles'] == ['src/util.ts']
 
 
+async def _open_dock(p, url):
+    """A browser page with the Understand dock opened beside the chat: (browser, page, dock, main, page errors)."""
+    from playwright.async_api import expect
+    browser = await p.chromium.launch(args=['--disable-gpu'])
+    page = await browser.new_page(viewport={'width': 1400, 'height': 900})
+    page.set_default_timeout(6000)
+    errors = []
+    page.on('pageerror', lambda e: errors.append(str(e)))
+    await page.goto(url.replace('/#', '/?companion=1#'))
+    await page.locator('#dream-nav-understand').click()
+    dock, main = page.locator('#dream-understand'), page.locator('#main')
+    await expect(dock).to_be_visible()
+    await expect(main).to_be_visible()
+    assert (await dock.bounding_box())['x'] > (await main.bounding_box())['x']   # beside the chat, to its right
+    return browser, page, dock, main, errors
+
+
+async def _expand_keeps_the_chat(dock, main):
+    """DREAM-107: side by side by default; the expand toggle widens the dock and keeps the chat beside it."""
+    from playwright.async_api import expect
+    narrow = (await dock.bounding_box())['width']
+    toggle = dock.locator('#ua-wide')
+    await expect(toggle).to_have_attribute('aria-pressed', 'false')
+    await toggle.click()
+    await expect(toggle).to_have_attribute('aria-pressed', 'true')
+    wide = (await dock.bounding_box())['width']
+    assert wide > narrow + 200, (narrow, wide)
+    await expect(main).to_be_visible()
+    assert (await main.bounding_box())['width'] > 150                                # the chat keeps a column
+    await toggle.click()
+    await expect(toggle).to_have_attribute('aria-pressed', 'false')
+    assert abs((await dock.bounding_box())['width'] - narrow) < 2
+
+
+async def _permission_card_keeps_the_dock(page, dock, main):
+    """A permission card pulls the view back to chat; the dock must stay in sight while the owner answers."""
+    from playwright.async_api import expect
+    await page.evaluate("document.getElementById('stream').insertAdjacentHTML('beforeend','<div class=\"permission-card\">card</div>')")
+    await expect(dock).to_be_visible()
+    await expect(main).to_be_visible()
+
+
+async def _changes_side_by_side(dock):
+    """This session's changes, side by side: the Changes tab."""
+    from playwright.async_api import expect
+    await dock.locator('#ua-tab-changes').click()
+    grid = dock.locator('.ua-diff')
+    await expect(grid).to_be_visible()
+    await expect(grid.locator('.ua-old.del')).to_have_text("export const fuel = 'RP-1';")
+    await expect(grid.locator('.ua-new.add')).to_have_text("export const fuel = 'methane';")
+    assert await grid.locator('.ua-old.ctx').count() == 2 == await grid.locator('.ua-new.ctx').count()
+    old_box, new_box = await grid.locator('.ua-old.del').bounding_box(), await grid.locator('.ua-new.add').bounding_box()
+    assert abs(old_box['y'] - new_box['y']) < 1 and new_box['x'] > old_box['x']   # the same row, side by side
+    await expect(grid.locator('.ua-diff-file')).to_have_text('src/main.ts')
+
+
 async def test_the_dock_opens_beside_the_chat_and_stays_while_working(project, monkeypatch):
+    """The dock's own behaviour, which needs no Understand-Anything clone (DREAM-150: the dashboard part is the next
+    test, which needs it)."""
     from playwright.async_api import async_playwright, expect
     monkeypatch.delenv('DREAM_DESKTOP_SESSION_FILE', raising=False)
     srv = server(project, checkpoints=lambda: FakeStore())
     url = await srv.start()
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(args=['--disable-gpu'])
-            page = await browser.new_page(viewport={'width': 1400, 'height': 900})
-            page.set_default_timeout(6000)
-            errors = []
-            page.on('pageerror', lambda e: errors.append(str(e)))
-            await page.goto(url + '&companion=1')
-            await page.locator('#dream-nav-understand').click()
-            dock, main = page.locator('#dream-understand'), page.locator('#main')
-            await expect(dock).to_be_visible()
-            await expect(main).to_be_visible()
-            assert (await dock.bounding_box())['x'] > (await main.bounding_box())['x']   # beside the chat, to its right
+            browser, page, dock, main, errors = await _open_dock(p, url)
             await expect(dock.locator('#ua-empty')).to_be_visible()                       # no graph yet: says what to ask
             await dock.locator('#ua-ask').click()
             await expect(page.locator('#input')).to_have_value(re.compile('understand'))
             await expect(dock).to_be_visible()
+            await _expand_keeps_the_chat(dock, main)
+            await _permission_card_keeps_the_dock(page, dock, main)
+            await _changes_side_by_side(dock)
+            assert errors == []
+            await browser.close()
+    finally:
+        await srv.stop()
 
+
+@pytest.mark.skipif(not SAMPLE.is_file() or not understand_routes.DIST.joinpath('index.html').is_file(),
+                    reason='needs the Understand-Anything clone with a built dashboard (see understand_routes.DIST)')
+async def test_the_dock_shows_the_map_once_the_graph_is_written_and_keeps_it_in_sight(project, monkeypatch):
+    from playwright.async_api import async_playwright, expect
+    monkeypatch.delenv('DREAM_DESKTOP_SESSION_FILE', raising=False)
+    srv = server(project, checkpoints=lambda: FakeStore())
+    url = await srv.start()
+    try:
+        async with async_playwright() as p:
+            browser, page, dock, main, errors = await _open_dock(p, url)
+            await expect(dock.locator('#ua-empty')).to_be_visible()
+            await dock.locator('#ua-ask').click()                                           # the original's order:
+            await expect(page.locator('#input')).to_have_value(re.compile('understand'))    # ask, then the map
             write_graph(project, json.loads(SAMPLE.read_text()))                          # the model finished: the map appears
             frame = dock.locator('#ua-frame')
             await expect(frame).to_be_visible(timeout=12000)
@@ -370,36 +439,10 @@ async def test_the_dock_opens_beside_the_chat_and_stays_while_working(project, m
             dashboard = page.frame_locator('#ua-frame')                                     # the upstream React app, live
             await expect(dashboard.get_by_role('banner')).to_be_visible(timeout=12000)
             await expect(dashboard.locator('body')).to_contain_text('understand-anything')   # the sample's project name
-
-            # DREAM-107: side by side by default; the expand toggle widens the dock and keeps the chat beside it
-            narrow = (await dock.bounding_box())['width']
-            toggle = dock.locator('#ua-wide')
-            await expect(toggle).to_have_attribute('aria-pressed', 'false')
-            await toggle.click()
-            await expect(toggle).to_have_attribute('aria-pressed', 'true')
-            wide = (await dock.bounding_box())['width']
-            assert wide > narrow + 200, (narrow, wide)
-            await expect(main).to_be_visible()
-            assert (await main.bounding_box())['width'] > 150                                # the chat keeps a column
-            await toggle.click()
-            await expect(toggle).to_have_attribute('aria-pressed', 'false')
-            assert abs((await dock.bounding_box())['width'] - narrow) < 2
-
-            # a permission card pulls the view back to chat; the map must stay in sight while the owner answers
-            await page.evaluate("document.getElementById('stream').insertAdjacentHTML('beforeend','<div class=\"permission-card\">card</div>')")
-            await expect(dock).to_be_visible()
-            await expect(main).to_be_visible()
-
-            # this session's changes, side by side
-            await dock.locator('#ua-tab-changes').click()
-            grid = dock.locator('.ua-diff')
-            await expect(grid).to_be_visible()
-            await expect(grid.locator('.ua-old.del')).to_have_text("export const fuel = 'RP-1';")
-            await expect(grid.locator('.ua-new.add')).to_have_text("export const fuel = 'methane';")
-            assert await grid.locator('.ua-old.ctx').count() == 2 == await grid.locator('.ua-new.ctx').count()
-            old_box, new_box = await grid.locator('.ua-old.del').bounding_box(), await grid.locator('.ua-new.add').bounding_box()
-            assert abs(old_box['y'] - new_box['y']) < 1 and new_box['x'] > old_box['x']   # the same row, side by side
-            await expect(grid.locator('.ua-diff-file')).to_have_text('src/main.ts')
+            await _expand_keeps_the_chat(dock, main)                                        # with the map shown
+            await _permission_card_keeps_the_dock(page, dock, main)                         # the map stays in sight
+            await expect(frame).to_be_visible()
+            await _changes_side_by_side(dock)                                               # from the map to Changes
             assert errors == []
             await browser.close()
     finally:
@@ -421,7 +464,7 @@ async def test_the_dashboard_header_shows_every_legend_pill_in_the_dock(project,
             browser = await p.chromium.launch(args=['--disable-gpu'])
             page = await browser.new_page(viewport={'width': 2554, 'height': 1338})   # the owner's screen
             page.set_default_timeout(8000)
-            await page.goto(url + '&companion=1')
+            await page.goto(url.replace('/#', '/?companion=1#'))
             await page.locator('#dream-nav-understand').click()
             header = page.frame_locator('#ua-frame').locator('header').first
             await expect(header).to_be_visible(timeout=15000)
@@ -444,6 +487,33 @@ async def test_the_dashboard_header_shows_every_legend_pill_in_the_dock(project,
             shape = await header.evaluate("""h => ({height: h.getBoundingClientRect().height,
               stripLines: new Set([...h.children[1].querySelectorAll('button')].map(e => Math.round(e.getBoundingClientRect().top))).size})""")
             assert shape['stripLines'] <= 2 and shape['height'] < 130, shape
+            await browser.close()
+    finally:
+        await srv.stop()
+
+
+async def test_understand_is_a_switch_below_a_divider_that_follows_the_panel(project, monkeypatch):
+    """Owner, 2026-09-28: Understand opens a panel beside the chat, so it sits under Settings after a divider and shows
+    on or off; closing the panel from inside turns the switch off too."""
+    from playwright.async_api import async_playwright, expect
+    monkeypatch.delenv('DREAM_DESKTOP_SESSION_FILE', raising=False)
+    srv = server(project, checkpoints=lambda: FakeStore())
+    url = await srv.start()
+    try:
+        async with async_playwright() as p:
+            browser, page, dock, main, errors = await _open_dock(p, url)
+            switch = page.locator('#dream-nav-understand')
+            order = await page.locator('#dream-nav > *').evaluate_all('ns => ns.map(n => n.id || n.className)')
+            assert order.index('dream-nav-settings') < order.index('dream-nav-divider') < order.index('dream-nav-understand')
+            await expect(switch).to_have_attribute('aria-pressed', 'true')
+            assert await switch.evaluate("b => getComputedStyle(b).borderTopColor") != 'rgba(0, 0, 0, 0)'
+            await expect(switch).not_to_have_attribute('aria-current', 'page')          # a switch, never the current page
+            await page.locator('#ua-close').click()
+            await expect(dock).to_be_hidden()
+            await expect(switch).to_have_attribute('aria-pressed', 'false')
+            await switch.click()
+            await expect(dock).to_be_visible()
+            assert errors == []
             await browser.close()
     finally:
         await srv.stop()

@@ -1,0 +1,15 @@
+{
+  "format": "dream-skill/v1",
+  "name": "compliance-checklist",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "read_file",
+    "library_read",
+    "web_search",
+    "browse",
+    "ask_user_input",
+    "write_file",
+    "open_for_print"
+  ]
+}

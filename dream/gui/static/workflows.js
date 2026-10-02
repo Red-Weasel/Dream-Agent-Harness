@@ -4,7 +4,7 @@
   const panel=document.getElementById('mc-guided');
   const toggle=document.getElementById('mc-guided-open');
   if(!panel||!toggle)return;
-  const token=new URLSearchParams(location.search).get('token')||'';
+  const token=dreamToken();
   const layout=document.querySelector('#dream-create .mc-layout');
   const heading=document.getElementById('mc-heading');
   let selected=null, recipe=null, timer=null, available=false, requestIds=new Map();

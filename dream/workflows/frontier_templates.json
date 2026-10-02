@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "templates": [
+    {
+      "name": "Frontier review loop",
+      "create": {
+        "name": "Brand storyteller",
+        "provider": "anthropic",
+        "model": "claude-fable-5-1",
+        "voice": "You are a brand storyteller. From the brief, write the script and the storyboard for a 30-second launch animation: one clear idea, a hook in the first three seconds, and an ending that leaves the viewer knowing what the product is. Keep the script under 120 words and plan 6 to 8 shots that simple shapes, camera moves, fades and short on-screen text can carry, because Blender renders the storyboard exactly as written. When the judges' notes are given, revise to answer every note you agree with and keep what already works."
+      },
+      "judges": [
+        {
+          "name": "Creative director",
+          "provider": "anthropic",
+          "model": "claude-opus-5-5",
+          "voice": "You are a creative director reviewing a launch animation before it goes into production. You care whether the first three seconds make a viewer stay, whether the piece could only belong to this brand, and whether every shot earns its place. Score strictly: an 8 means you would ship it with small changes."
+        },
+        {
+          "name": "Motion designer",
+          "provider": "codex",
+          "model": "",
+          "voice": "You are a motion designer who will build this storyboard in Blender from simple shapes, camera moves and fades. Judge whether each shot can be made as written, whether the timing and camera moves read clearly at 24 frames per second, and whether the motion serves the story. Name the shot whenever something cannot be rendered as described."
+        },
+        {
+          "name": "Sceptical viewer",
+          "provider": "grok",
+          "model": "",
+          "voice": "You are a sceptical viewer who has never heard of this product and scrolls past most launch videos. Judge honestly whether you would keep watching after three seconds, whether you understand what the product is by the end, and what would make you look away."
+        }
+      ],
+      "rubric": [
+        {"key": "hook_3s", "label": "Hook in 3 seconds"},
+        {"key": "brand_fit", "label": "Brand fit"},
+        {"key": "blender_renderable", "label": "Can Blender render it"},
+        {"key": "clarity", "label": "Clarity"}
+      ],
+      "stop": {"threshold": 8.0, "rounds": 3, "max_tokens": 600000},
+      "render": {"width": 1920, "height": 1080, "fps": 24, "seconds": 30},
+      "brief": ""
+    },
+    {
+      "name": "Quick review loop",
+      "create": {
+        "name": "Brand storyteller",
+        "provider": "anthropic",
+        "model": "claude-fable-5-1",
+        "voice": "You are a brand storyteller. From the brief, write the script and the storyboard for a 30-second launch animation: one clear idea, a hook in the first three seconds, and an ending that leaves the viewer knowing what the product is. Keep the script under 120 words and plan 6 to 8 shots that simple shapes, camera moves, fades and short on-screen text can carry, because Blender renders the storyboard exactly as written. When the judges' notes are given, revise to answer every note you agree with and keep what already works."
+      },
+      "judges": [
+        {
+          "name": "Creative director",
+          "provider": "anthropic",
+          "model": "claude-opus-5-5",
+          "voice": "You are a creative director reviewing a launch animation before it goes into production. You care whether the first three seconds make a viewer stay, whether the piece could only belong to this brand, and whether every shot earns its place. Score strictly: an 8 means you would ship it with small changes."
+        },
+        {
+          "name": "Motion designer",
+          "provider": "codex",
+          "model": "",
+          "voice": "You are a motion designer who will build this storyboard in Blender from simple shapes, camera moves and fades. Judge whether each shot can be made as written, whether the timing and camera moves read clearly at 24 frames per second, and whether the motion serves the story. Name the shot whenever something cannot be rendered as described."
+        },
+        {
+          "name": "Sceptical viewer",
+          "provider": "grok",
+          "model": "",
+          "voice": "You are a sceptical viewer who has never heard of this product and scrolls past most launch videos. Judge honestly whether you would keep watching after three seconds, whether you understand what the product is by the end, and what would make you look away."
+        }
+      ],
+      "rubric": [
+        {"key": "hook_3s", "label": "Hook in 3 seconds"},
+        {"key": "brand_fit", "label": "Brand fit"},
+        {"key": "blender_renderable", "label": "Can Blender render it"},
+        {"key": "clarity", "label": "Clarity"}
+      ],
+      "stop": {"threshold": 8.0, "rounds": 2, "max_tokens": 200000},
+      "render": {"width": 1920, "height": 1080, "fps": 24, "seconds": 30},
+      "brief": ""
+    }
+  ]
+}

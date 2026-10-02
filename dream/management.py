@@ -8,7 +8,7 @@ from pathlib import Path
 from dataclasses import asdict
 import time
 
-from .core.profiles import PROFILES, read_settings, resolve_profile, save_settings, settings_path
+from .core.profiles import PROFILES, printable, read_settings, resolve_profile, save_settings, settings_path
 from .core.providers import PROVIDERS, get_provider
 
 
@@ -78,6 +78,16 @@ def main(argv: list[str]) -> int:
     settings.add_argument("--provider", choices=PROVIDERS, default="machx",
                           help="Resolve for this provider (show, get, check); default machx")
     settings.add_argument("--model", help="Resolve for this exact model id (show, get, check)")
+    settings.add_argument("--project", action="store_true",
+                          help="set/unset: write the workspace's project file .dream/settings.json (model names, "
+                               "output and behaviour only) instead of the global file")
+    settings.add_argument("--workspace", type=Path,
+                          help="The workspace whose .dream/settings.json is read and written (default: the current directory)")
+    engine = commands.add_parser("engine", help="Read the local engine: which model runs on which card")
+    engine.add_argument("action", nargs="?", default="layout", choices=["layout"])
+    engine.add_argument("--url", help="The engine's endpoint (default: Dream's MachX host and port)")
+    engine.add_argument("--layout", type=Path, help="The layout file, to fill in what a server not yet ready cannot report")
+    engine.add_argument("--text", action="store_true", help="One line per server instead of JSON")
     backup = commands.add_parser("backup", help="Snapshot or restore private state; stop sessions for cross-store consistency")
     backup.add_argument("action", choices=["create", "restore"])
     backup.add_argument("path", type=Path, help="Snapshot destination, or snapshot to restore")
@@ -104,16 +114,23 @@ def main(argv: list[str]) -> int:
                 parser.error(f"settings {args.action} requires a key")
             if args.action == "set" and args.value is None:
                 parser.error("settings set requires a value")
+            if args.project and args.action not in {"set", "unset"}:
+                parser.error("--project applies to set and unset; show, get, path and check read both files")
+            # The project file is the workspace's (DREAM-146): --workspace, else the directory this runs in.
+            dream_settings.set_workspace(args.workspace if args.workspace is not None else Path.cwd())
+            scope = "project" if args.project else "global"
             if args.action == "path":
                 result = dream_settings.paths()
             elif args.action == "check":
-                result = dream_settings.check(provider=args.provider, model=args.model)
-                print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+                # DREAM-148: role model names against the local engine's /v1/models when it answers.
+                result = dream_settings.check(provider=args.provider, model=args.model, ask_engine=True)
+                print(printable(json.dumps(result, indent=2, ensure_ascii=False, default=str)))
                 return 0 if result["ok"] else 2
             elif args.action == "set":
-                result = {"saved": args.key, "note": dream_settings.set_value(args.key, args.value)}
+                result = {"saved": args.key, "scope": scope,
+                          "note": dream_settings.set_value(args.key, args.value, scope=scope)}
             elif args.action == "unset":
-                result = {"note": dream_settings.unset_value(args.key)}
+                result = {"scope": scope, "note": dream_settings.unset_value(args.key, scope=scope)}
             else:
                 rows = dream_settings.effective(provider=args.provider, model=args.model)
                 if args.action == "get":
@@ -122,6 +139,12 @@ def main(argv: list[str]) -> int:
                     rows = {args.key: rows[args.key]}
                 result = {"provider": args.provider, "model": args.model,
                           "settings": {key: {"value": row.value, "source": row.source} for key, row in rows.items()}}
+        elif args.command == "engine":
+            from .core import engine_layout
+            result = engine_layout.layout_view(args.url, layout_path=args.layout)
+            if args.text:
+                print("\n".join(engine_layout.describe(result)))
+                return 0
         elif args.command == "backup":
             from . import backup as backups, config
             if args.action == "create":
@@ -150,8 +173,10 @@ def main(argv: list[str]) -> int:
                     parser.error("--trust applies only to enabling a reviewed hook")
                 ext.set_enabled(args.identifier, args.action == "enable", trusted=args.trust)
             result = ext.status(refresh=True)
-        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+        # printable (DREAM-147): a value from a settings file that reached here can never retitle or wedge the
+        # terminal -- a lone surrogate or a control character is printed as its escape.
+        print(printable(json.dumps(result, indent=2, ensure_ascii=False, default=str)))
         return 0
     except (ValueError, OSError) as exc:
-        print(f"Dream settings: {exc}")
+        print(printable(f"Dream settings: {exc}"))
         return 2

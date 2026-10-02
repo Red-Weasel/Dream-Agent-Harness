@@ -1,0 +1,12 @@
+{
+  "format": "dream-skill/v1",
+  "name": "clause-comparison",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "read_file",
+    "library_read",
+    "run_bash",
+    "write_file"
+  ]
+}

@@ -102,7 +102,7 @@ def _helper_key(value: object, label: str) -> str:
     if isinstance(value, str) and value in PROVIDERS:
         why = (" (a CLI provider cannot answer one image request)" if PROVIDERS[value].kind == "cli"
                else " (its declaration is not multimodal)")
-    raise ValueError(f"{label} must name a multimodal API provider ({', '.join(keys)}), not {value!r}{why}")
+    raise ValueError(f"{label} must name a multimodal API provider ({', '.join(keys)}), not {shown(repr(value))}{why}")
 
 
 def _validate_overrides(values: object, section: str = "overrides") -> dict:
@@ -111,7 +111,7 @@ def _validate_overrides(values: object, section: str = "overrides") -> dict:
     # Return a new flat mapping: a caller cannot change values during the save.
     values = dict(values)
     for key, value in values.items():
-        label = f"{section}.{key}"
+        label = f"{section}.{shown(key)}"
         if key not in _OVERRIDE_FIELDS:
             raise ValueError(f"Unknown profile override: {label}")
         if key == "vision_helper":
@@ -145,13 +145,40 @@ def _unique_object(pairs):
     result = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError(f"duplicate JSON key: {key}")
+            raise ValueError(f"duplicate JSON key: {shown(key)}")
         result[key] = value
     return result
 
 
 def _nonfinite(value):
     raise ValueError(f"non-finite JSON value: {value}")
+
+
+def shown(name: object, limit: int = 80) -> str:
+    """A key or name from a settings file as it may be echoed to a terminal or a page (DREAM-147): itself when it
+    is plainly printable, else its repr() -- ESC, BEL, CR and every other control or format character become
+    visible escapes -- and in either case cut to `limit` characters plus an ellipsis. Every message that names a
+    key from a file goes through this; a value already repr()-ed passes through with only the cut."""
+    text = str(name)
+    if not text.isprintable():
+        text = repr(text)
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def shown_path(path: object) -> str:
+    """A file or workspace path as it may be echoed: as it is when plainly printable (paths are long, so the cut
+    is 512 characters), else escaped like shown() -- a workspace named with an escape sequence retitles nothing."""
+    return shown(path, 512)
+
+
+def printable(text: str) -> str:
+    """Whole text (a message, a report) as it may be written to a terminal or a page: every character that is not
+    printable -- a control, a format character, a separator, a lone surrogate that no UTF-8 stream could encode --
+    becomes its escape; newlines and tabs are kept and nothing is cut. Every settings print goes through this
+    (DREAM-147), so a value that slipped past validation can never retitle, clear or wedge the console."""
+    if text.isprintable():
+        return text
+    return "".join(c if c in "\n\t" or c.isprintable() else c.encode("unicode_escape").decode("ascii") for c in text)
 
 
 def _validate_settings(raw: object) -> dict:
@@ -185,21 +212,25 @@ def _validate_settings(raw: object) -> dict:
         if (not separator or not provider or not model or key != key.strip() or len(key) > 1024
                 or any(c.isspace() for c in provider) or any(ord(c) < 32 for c in key)
                 or model != model.strip()):
-            raise ValueError(f"invalid model key {key!r}; use exact provider:model")
-        _validate_overrides(values, f"models[{key!r}]")
+            raise ValueError(f"invalid model key {shown(repr(key))}; use exact provider:model")
+        _validate_overrides(values, f"models[{shown(repr(key))}]")
     return raw
 
 
-def read_settings(path: Path | None = None) -> dict:
+def read_settings(path: Path | None = None, *, dir_fd: int | None = None) -> dict:
     """Read and validate every section without resetting or rewriting anything.
 
     Missing files mean defaults. Existing invalid, oversized, symlink or special
     files raise ValueError with their path so they can be repaired explicitly.
+    With `dir_fd` the file is opened by its name relative to that directory descriptor
+    (the project reader, DREAM-146: the directory that was checked is the one read);
+    `path` is still what errors name.
     """
     path = Path(path) if path is not None else settings_path()
     try:
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+            fd = os.open(path.name if dir_fd is not None else path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                         dir_fd=dir_fd)
         except FileNotFoundError:
             return {}
         with os.fdopen(fd, "rb") as source:
@@ -214,15 +245,17 @@ def read_settings(path: Path | None = None) -> dict:
         return _validate_settings(json.loads(data.decode("utf-8"), object_pairs_hook=_unique_object,
                                             parse_constant=_nonfinite))
     except (OSError, ValueError, RecursionError) as exc:
-        raise ValueError(f"Cannot read runtime settings {path}: {exc}; repair this file explicitly") from exc
+        raise ValueError(f"Cannot read runtime settings {shown_path(path)}: {exc}; repair this file explicitly") from exc
 
 
 @contextmanager
-def _settings_lock(path: Path):
-    """Serialize read-modify-write across processes, with a bounded lock wait."""
+def _settings_lock(path: Path, *, dir_fd: int | None = None):
+    """Serialize read-modify-write across processes, with a bounded lock wait. With `dir_fd` the lock file is
+    opened by name relative to that directory descriptor (the project writer, DREAM-146)."""
     import fcntl
 
-    fd = os.open(str(path) + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    lock = f"{path.name}.lock" if dir_fd is not None else str(path) + ".lock"
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=dir_fd)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise ValueError("runtime settings lock must be a regular file")
@@ -430,4 +463,29 @@ def _own_vision(provider: Provider, profile: RuntimeProfile | None, model: str |
         on, source = bool(provider.multimodal), "Provider default"
     if on and image_rejected:
         return {"state": "off", "enabled": False, "source": "The model server rejected an image this session"}
+    # DREAM-151: MachX refuses every image request while it serves more than one request at once (`ie serve
+    # --parallel N`, its /props total_slots): an image sent there would fail each later turn too, so none is sent --
+    # whatever the profile says. A vision helper still describes them (session_vision).
+    # DREAM-154: MiMo-V2.6's rule, not every model's: DeepSeek-V4.1's engine serves images on its lanes, so there the
+    # server's own readiness above decides, as at one lane (local/models.LANE_IMAGE_ARCHITECTURES). A model Dream cannot
+    # name keeps the rule: an older engine's MiMo reports its vision ready at --parallel 2 and still refuses images.
+    lanes = lanes_refuse_images(props, capabilities) if provider.key == "machx" else None
+    if on and lanes:
+        return {"state": "off", "enabled": False,
+                "source": f"The model server runs {lanes} requests at once (engine lanes); MachX takes images at "
+                          "parallel 1 only"}
     return {"state": "on" if on else "off", "enabled": bool(on), "source": source}
+
+
+def lanes_refuse_images(props: dict | None, capabilities: dict | None) -> int | None:
+    """The lane count when a MachX server running lanes refuses images, else None (DREAM-151/154): its /props
+    total_slots is above 1 and the architecture is not one whose engine serves images on lanes
+    (local/models.LANE_IMAGE_ARCHITECTURES: DeepSeek-V4.1). MiMo-V2.6, or a model Dream cannot name, refuses them.
+    One rule for the header's decision (_own_vision) and the backend's send switch (DREAM-155), so a profile override
+    can turn neither on there."""
+    lanes = props.get("total_slots") if isinstance(props, dict) else None
+    if type(lanes) is not int or lanes <= 1:
+        return None
+    from ..local.models import LANE_IMAGE_ARCHITECTURES
+    architecture = capabilities.get("architecture") if isinstance(capabilities, dict) else None
+    return None if architecture in LANE_IMAGE_ARCHITECTURES else lanes

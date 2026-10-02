@@ -396,6 +396,9 @@ def test_an_unusable_setup_gives_a_reason_and_no_server(workspace, monkeypatch, 
     if broken == "blender":
         monkeypatch.setattr(blender_live, "BLENDER", workspace / "no-blender")
     elif broken == "xephyr":
+        # unavailable() checks Blender first: on a host without it (the CI runner) the reason would name Blender
+        # and this case would never reach the Xephyr check (DREAM-150). A usable Blender, then no Xephyr.
+        monkeypatch.setattr(blender_live, "_checked_blender", lambda: (Path("/usr/bin/blender"), None))
         monkeypatch.setattr(blender_live, "XEPHYR", workspace / "no-xephyr")
     elif broken == "bwrap":
         monkeypatch.setattr(blender_live, "_bubblewrap_executable", lambda: None)

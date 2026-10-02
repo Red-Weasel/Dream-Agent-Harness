@@ -186,9 +186,25 @@ def _find_ggufs(
     return found
 
 
-# MachX's safetensors-directory checkpoints: one resident two-card runtime each, parallel = 1, host-RAM streaming
-# (engine: Engine::ds41_dir / Engine::mimo26_dir).
+# MachX's safetensors-directory checkpoints: one resident two-card runtime each, host-RAM streaming (engine:
+# Engine::ds41_dir / Engine::mimo26_dir); parallel = 1 unless the architecture serves lanes (below).
 DIRECTORY_ARCHITECTURES = ("deepseek_v41", "mimo_v2")
+# DREAM-151: the architectures Dream's engine.parallel applies to (engine P4 B4: MiMo-V2.6; DREAM-154: P4 B6b,
+# DeepSeek-V4.1, on two cards). `ie capabilities` cannot tell: it lists "parallel" among the load controls of every
+# architecture. DREAM-207: since engine v0.2.0 (kMaxParallel 16) Qwen3.8-Flash (qwen4exp), the 35B-A3B class
+# (qwen35moe) and the 27B (qwen35) serve lanes too, with row batching, and the setting reaches them with their own
+# rails in local/settings.engine_lanes (their lanes need two cards; IE_P2P on qwen4exp; --spec and the 65,536-token
+# slot default on the 27B; int8_kv on every lanes model). GLM-5.3 and DeepSeek-V4-Flash run --parallel as turns and
+# are not in the table: their own `parallel` (1-16, local/settings.CONTROLS) reaches the command as before.
+LANE_ARCHITECTURES = ("mimo_v2", "deepseek_v41", "qwen4exp", "qwen35moe", "qwen35")
+# How Dream names them to the owner: the refusals and notes at launch, the lists in the help and the docs.
+LANE_MODEL_NAMES = {"mimo_v2": "MiMo-V2.6", "deepseek_v41": "DeepSeek-V4.1", "qwen4exp": "Qwen3.8-Flash",
+                    "qwen35moe": "the 35B-A3B class", "qwen35": "Qwen3.8-27B"}
+LANE_MODELS_LISTED = ", ".join(list(LANE_MODEL_NAMES.values())[:-1]) + " and " + list(LANE_MODEL_NAMES.values())[-1]
+# DREAM-154: of those, the ones whose engine also takes images at --parallel > 1 (V4.1: an image prompt prefills in a
+# serial turn while the other lanes wait, B6b). MiMo-V2.6 takes images at --parallel 1 only (B4), and a model Dream
+# cannot name on lanes is treated like it (core/profiles._own_vision).
+LANE_IMAGE_ARCHITECTURES = ("deepseek_v41",)
 
 
 def read_checkpoint_json(path: Path) -> dict:

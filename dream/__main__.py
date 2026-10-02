@@ -34,7 +34,7 @@ def _main() -> None:
 
         raise SystemExit(launch(argv[1:]))
 
-    if argv and argv[0] in {"status", "profile", "settings", "extensions", "backup", "runs"}:
+    if argv and argv[0] in {"status", "profile", "settings", "engine", "extensions", "backup", "runs"}:
         from .management import main as manage
         raise SystemExit(manage(argv))
 
@@ -82,6 +82,12 @@ def _main() -> None:
             pass
         return
 
+    # `dream sleepwalk run-due`: the background timer's one tick (DREAM-161).
+    if argv[:2] == ["sleepwalk", "run-due"]:
+        from .sleepwalk.scheduler import run_due
+
+        raise SystemExit(asyncio.run(run_due()))
+
     parser = argparse.ArgumentParser(
         prog="dream", description="Dream — a personal multi-model agent harness. Use --profile auto|lean|balanced|frontier."
     )
@@ -102,8 +108,8 @@ def _main() -> None:
     )
     parser.add_argument(
         "--gui", action="store_true",
-        help="Open Dream Studio — a browser pane showing this session live, "
-             "alongside the terminal. Loopback only, token-guarded.",
+        help="Start Dream Studio — a browser pane showing this session live, "
+             "alongside the terminal; its address is printed once. Loopback only, token-guarded.",
     )
     parser.add_argument(
         "--loop", metavar="GOAL", default=None, help="Run autonomously toward GOAL, then exit."

@@ -555,7 +555,7 @@ async def test_the_chat_pane_labels_the_guards_notes_as_dreams(studio, tmp_path,
                                  vision_status=lambda: {"state": "unreported", "enabled": False})
     app.provider_label, app.workspace = "test", tmp_path
     srv._session_source = app._studio_session_info
-    await page.goto(url if layout == "companion" else url.replace("&companion=1", ""))
+    await page.goto(url if layout == "companion" else url.replace("?companion=1", ""))
     notes = page.locator("#stream .sys.dream-note")
     owner = page.locator("#stream .sys:not(.dream-note)", has_text="Correction")
     await expect(notes).to_have_count(1)

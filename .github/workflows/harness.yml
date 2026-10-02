@@ -47,9 +47,11 @@ jobs:
       - name: Install locked runtime
         run: uv sync --locked --extra dev
       - name: Install local verification dependencies
+        # poppler-utils: read_file's PDF tests. fonts-dejavu-core: the browser tests measure layout, and the page's
+        # own fonts are not installed here, so their fallback is pinned to DejaVu Sans (DREAM-150).
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap libseccomp2 ffmpeg
+          sudo apt-get install -y bubblewrap libseccomp2 ffmpeg poppler-utils fonts-dejavu-core
           uv run --locked playwright install --with-deps chromium
       - name: Run model-free regression suite
         run: uv run --locked pytest -q --junitxml=artifacts/harness-validation/regressions.xml

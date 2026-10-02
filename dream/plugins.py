@@ -244,10 +244,12 @@ def tool_dirs() -> list[Path]:
 def agent_specs() -> list[dict[str, Any]]:
     """Every enabled plugin's agents. Two plugins claiming one name: the first
     wins and the second is named in a warning (Gate 12)."""
-    out, taken = [], set()
+    from . import presets
+
+    out, taken, preset = [], set(), presets.session()
     for p in _LOADED:
-        if not p.enabled:
-            continue
+        if not p.enabled or (preset is not None and p.name.casefold() not in preset["plugins"]):
+            continue   # DREAM-171: a plugin outside the session's skill preset offers no agents either
         for a in p.agents:
             if a["name"] in taken:
                 w = (f"plugin {p.name}: agent {a['name']!r} is already provided by another "

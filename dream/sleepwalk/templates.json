@@ -1,0 +1,25 @@
+[
+  {
+    "title": "Daily Briefing",
+    "icon": "sun",
+    "summary": "The day's most important headlines, each in one line with its source.",
+    "triggers": [{"every": "day", "at": "07:00"}],
+    "connectors": ["gmail", "gcal"],
+    "instructions": "Put together a short morning briefing. Start with anything in my unread email and today's calendar that needs attention, if that context is given. Then search the web for the most important world, technology and business news of the last 24 hours and list up to eight headlines, each with a one-line summary and its source. End with one story worth reading in depth and why. Keep it scannable, and never state a date or figure you did not find in a source."
+  },
+  {
+    "title": "Learn Something New Every Day",
+    "icon": "bulb",
+    "summary": "A short lesson on a topic you choose, and an evening quiz on it.",
+    "triggers": [{"every": "day", "at": "08:00", "label": "lesson"}, {"every": "day", "at": "21:00", "label": "quiz"}],
+    "notify": ["telegram"],
+    "instructions": "Topic: (write the topic you want to learn here).\n\nFor a lesson run, teach one new, self-contained idea about the topic in under 300 words, with one concrete example. For a quiz run, ask three short questions about the most recent lesson and put the answers at the end."
+  },
+  {
+    "title": "Tip of the Day",
+    "icon": "spark",
+    "summary": "One practical, lesser-known tip with an example to try.",
+    "triggers": [{"every": "day", "at": "09:00"}],
+    "instructions": "Give one practical, lesser-known tip about using a computer, the command line or everyday software. One short paragraph, with a small example to try. Do not repeat a well-known basic."
+  }
+]

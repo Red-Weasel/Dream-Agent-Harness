@@ -16,7 +16,8 @@ def session_address(path: Path, child_pid: int | None = None) -> tuple[str, str]
         if not isinstance(data, dict) or (child_pid and data.get('pid') != child_pid):
             return None
         url = urlsplit(data['url'])
-        token = parse_qs(url.query).get('token', [''])[0]
+        # The token rides in the fragment (DREAM-187).
+        token = (parse_qs(url.fragment).get('token') or [''])[0]
         if (url.scheme != 'http' or url.hostname != '127.0.0.1' or not url.port
                 or url.username or url.password or not token or len(token) > 256):
             return None
@@ -61,3 +62,8 @@ def browser_address(value: str) -> str:
     except ValueError:
         raise ValueError('The address contains an invalid port.') from None
     return value
+
+
+def refill(current, old, new):
+    """DREAM-179: the fields a mode switch re-seeds: those still at the old mode's recommended value (never a user's edit)."""
+    return {key: value for key, value in new.items() if key in current and current[key] == old.get(key)}

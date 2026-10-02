@@ -4,8 +4,11 @@ import hashlib
 import io
 import json
 import zipfile
+from pathlib import Path
 
 import pytest
+
+STATIC = Path(__file__).resolve().parents[1] / 'dream' / 'gui' / 'static'
 
 
 def test_missing_and_incompatible_dependencies_are_actionable():
@@ -51,12 +54,10 @@ def test_export_strips_unknown_fields_paths_and_error_text_and_refuses_overwrite
 
 
 def _wheel(path, *, missing=False, corrupted=False, traversal=False, additions=None, omitted=()):
-    # Hand-built wheel fixture includes the release-required assets and RECORD.
-    static = ('index.html', 'controls.js', 'controls.css', 'attachments.js', 'attachments.css',
-              'media.js', 'media.css', 'companion.js', 'companion.css', 'turn-timing.js', 'turn-timing.css',
-              'workflows.js', 'workflows.css', 'projects.js', 'projects.css', 'feed.js', 'feed.css',
-              'council.js', 'council.css', 'theme.css', 'workspace.css', 'workspace.js', 'library.css', 'library.js',
-              'prompt_optimizer.js', 'prompt_optimizer.css')
+    # Hand-built wheel fixture includes the release-required assets and RECORD. Its static files are
+    # the ones the real wheel ships, every file under dream/gui/static: a hand-kept list here missed
+    # branding.css, dream-app-icon.png, understand.css and understand.js once the page used them (DREAM-150).
+    static = sorted(p.relative_to(STATIC).as_posix() for p in STATIC.rglob('*') if p.is_file())
     files = {f'dream/gui/static/{name}': b'fixture' for name in static}
     files.update({f'dream/{name}': b'fixture' for name in ('__init__.py', '__main__.py', 'diagnostics.py', 'environment.py', 'agent_activity.py', 'core/capabilities.py')})
     files.update({f'dream/{name}': b'fixture' for name in (

@@ -19,12 +19,12 @@ def worker(events, replies, handler=None):
 def activities(events):return [e.data for e in events if e.kind=='agent_activity']
 
 
-async def test_actual_request_reasoning_and_tool_pair_are_attributed_without_duplicate_answer():
+async def test_actual_request_reasoning_and_tool_pair_are_attributed_and_the_answer_is_shown():
     events=[]
     response=_sub_toolcall('web_search',{'query':'observations'})
     response['choices'][0]['message']['reasoning_content']='I will inspect the reported source.'
     response['usage']={'prompt_tokens':11,'completion_tokens':4}
-    backend=worker(events,[response,_sub_final('FINAL ANSWER MUST STAY WITH LEAD')])
+    backend=worker(events,[response,_sub_final('FINAL ANSWER SHOWN TO THE OWNER TOO')])
     answer,failed=await backend._run_subagent('researcher','inspect')
     rows=activities(events)
     assert rows, 'Actual subagent activity is invisible'
@@ -37,7 +37,9 @@ async def test_actual_request_reasoning_and_tool_pair_are_attributed_without_dup
     assert use['data']['input']=={'query':'observations'}
     assert result['data']['content']=='source observed' and not result['data']['is_error']
     assert rows[-1]['status']=='completed' and not failed
-    assert answer=='FINAL ANSWER MUST STAY WITH LEAD' and answer not in json.dumps(rows)
+    # ADR-068 (DREAM-189): the reply is shown to the owner as the last response row's text; the lead still gets it.
+    assert answer=='FINAL ANSWER SHOWN TO THE OWNER TOO'
+    assert [r.get('text') for r in rows if r['kind']=='response']==[None,answer]
     assert backend._delegated_usage=={'prompt_tokens':11,'completion_tokens':4}
     assert all(e.kind=='agent_activity' for e in events)
 

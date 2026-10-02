@@ -4,12 +4,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 import fcntl
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import shutil
 import stat
 import tempfile
+import time
 
 from .. import config
 from . import loader
@@ -20,6 +22,7 @@ MAX_FILE = 1_000_000
 MAX_BUNDLE = 8_000_000
 MAX_FILES = 128
 _NAME = re.compile(r'[a-z0-9][a-z0-9-]{0,79}\Z')
+_TRASH = '.trash'   # removed private skills; the loader never looks inside (DREAM-171)
 
 
 class Conflict(ValueError):
@@ -56,18 +59,33 @@ def _managed(skill):
     return skill.root.absolute() == (_root() / _target(skill.name)).absolute()
 
 
-def _info(skill):
+def _originals():
+    """Names of the skills outside the private library: a private skill of the same name is the owner's version."""
+    from .. import plugins
+    roots = [r for r in config.skill_dirs() if r.absolute() != _root().absolute()]
+    roots += [p.skill_dir for p in plugins.loaded() if p.skill_dir and p.skill_dir not in roots]
+    return {s.name.casefold() for s in loader.discover(roots)[0]}
+
+
+def _info(skill, originals=None):
     managed = _managed(skill)
-    return {'name': skill.name, 'description': skill.description, 'source': skill.source,
+    originals = _originals() if originals is None else originals
+    # DREAM-171: what the Skills workspace may do with it -- edit a copy, delete, restore the original, or none.
+    origin = (('copy' if skill.name.casefold() in originals else 'yours') if managed
+              else 'plugin' if skill.provenance == 'dream-plugin' else 'builtin' if skill.provenance == 'dream-owned'
+              else 'installed')
+    plugin = skill.parent_extension.split(':', 1)[1] if skill.parent_extension else None
+    return {'name': skill.name, 'description': skill.description, 'source': skill.source, 'origin': origin,
+            'plugin': plugin, 'copy_of': f'{plugin}:{skill.name}' if managed and plugin else None,
             'provenance': 'private-managed' if managed else skill.provenance,
             'managed': managed, 'enabled': loader.enabled(skill), 'path': str(skill.manifest),
             'edit_target': str(_root() / _target(skill.name) / 'SKILL.md')}
 
 
 def listing():
-    from ..tools.installed_skill_tools import warnings
-    skills = _catalog()
-    return {'skills': [_info(skill) for skill in skills], 'warnings': warnings()}
+    from ..tools.installed_skill_tools import notes, warnings
+    skills, originals = _catalog(), _originals()
+    return {'skills': [_info(skill, originals) for skill in skills], 'warnings': warnings(), 'notes': notes()}
 
 
 def _bytes_at(fd, name, limit):
@@ -234,6 +252,8 @@ def _publish(rootfd, name, content, source=None):
         stage = Path(tempfile.mkdtemp(prefix='skill-draft-', dir=f'/proc/self/fd/{datafd}'))
         if source is not None:
             _copy_bundle(source, stage)
+            if source.parent_extension:   # DREAM-174: a copy of a plugin's skill stays tied to that plugin
+                _write(stage / loader.COPY_MARKER, json.dumps({'plugin': source.parent_extension.split(':', 1)[1]}).encode())
         _write(stage / 'SKILL.md', content.encode())
         _check_relative_references(content, stage)
         for directory, _, _ in os.walk(stage, topdown=False):
@@ -284,3 +304,26 @@ def save(name, content, expected_sha256):
                     pass
                 os.close(fd)
     return read(skill.name)
+
+
+def remove(name, expected_sha256):
+    """DREAM-171: delete the owner's own skill, or remove their version of an installed one (the original returns).
+    The folder moves to DATA_DIR/skills/.trash/<name>-<time>, outside discovery; shipped and plugin files are never
+    touched."""
+    if not isinstance(expected_sha256, str) or not re.fullmatch('[0-9a-f]{64}', expected_sha256):
+        raise ValueError('A current SHA-256 revision is required. Reopen this skill.')
+    with _locked_root() as rootfd:
+        skill = _find(name)
+        if not _managed(skill):
+            raise ValueError('Built-in, installed and plugin skills cannot be deleted. Turn them off instead.')
+        if hashlib.sha256(_content(skill).encode()).hexdigest() != expected_sha256:
+            raise Conflict('Skill changed since it was opened. Reload before removing it; nothing was moved.')
+        try:
+            os.mkdir(_TRASH, 0o700, dir_fd=rootfd)
+        except FileExistsError:
+            pass
+        stamp = time.strftime('%Y%m%dT%H%M%S') + '-' + os.urandom(3).hex()
+        os.rename(_target(skill.name), f'{_TRASH}/{_target(skill.name)}-{stamp}', src_dir_fd=rootfd, dst_dir_fd=rootfd)
+        os.fsync(rootfd)
+    restored = skill.name.casefold() in _originals()
+    return {'removed': skill.name, 'restored': restored, 'trash': str(_root() / _TRASH / f'{_target(skill.name)}-{stamp}')}

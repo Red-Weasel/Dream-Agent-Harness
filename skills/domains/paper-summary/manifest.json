@@ -1,0 +1,14 @@
+{
+  "format": "dream-skill/v1",
+  "name": "paper-summary",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "read_file",
+    "browse",
+    "media_read",
+    "see",
+    "web_search",
+    "write_file"
+  ]
+}

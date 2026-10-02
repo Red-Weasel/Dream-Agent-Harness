@@ -1,0 +1,15 @@
+{
+  "format": "dream-skill/v1",
+  "name": "literature-review",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "note",
+    "web_search",
+    "browse",
+    "library_search",
+    "read_file",
+    "write_file",
+    "library_create"
+  ]
+}

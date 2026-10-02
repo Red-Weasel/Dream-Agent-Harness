@@ -3,7 +3,7 @@
   'use strict';
   window.ProjectPanel = {
     mount(container, options = {}) {
-      const token = options.token || new URLSearchParams(location.search).get('token') || '';
+      const token = options.token || dreamToken();
       const root = document.createElement('section'); root.className = 'project-panel';
       root.innerHTML = `<div class="project-top"><div><h2>Project</h2><p data-workspace></p></div><button data-refresh>Refresh</button></div>
         <p role="status" data-status></p>

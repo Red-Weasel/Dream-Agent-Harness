@@ -16,10 +16,12 @@ import asyncio
 import subprocess
 import sys
 import types
+from urllib.parse import urlsplit
 
 import pytest
 
 # Cheap to import in-process — that is the whole point of this module.
+from dream.core import sandbox_net
 from dream.web import browser as browser_mod
 
 _PROBE = """
@@ -90,13 +92,16 @@ class _FakeCamoufox:
 
 
 class _FakeBrowser:
-    async def new_context(self, **kw):
-        return _FakeContext()
+    async def new_context(self, proxy, **kw):
+        return _FakeContext(urlsplit(proxy["server"]))
 
 
 class _FakeContext:
+    def __init__(self, boundary):
+        self.boundary = boundary
+
     async def new_page(self):
-        return _FakePage()
+        return _FakePage(self.boundary)
 
     async def close(self):
         pass
@@ -105,8 +110,24 @@ class _FakeContext:
 class _FakePage:
     url = "https://example.com/final"
 
+    def __init__(self, boundary):
+        self._listeners, self._boundary = [], boundary
+
+    def on(self, event, listener):
+        self._listeners.append(listener)
+
     async def goto(self, url, **kw):
-        return types.SimpleNamespace(status=200)
+        # fetch checks every document received by the address the browser connected to, which must be
+        # Dream's network boundary, the proxy the context was given (DREAM-187): the response goes to the
+        # listener as Playwright's would.
+        async def server_addr():
+            return {"ipAddress": self._boundary.hostname, "port": self._boundary.port}
+
+        response = types.SimpleNamespace(status=200, url=url, server_addr=server_addr,
+                                         request=types.SimpleNamespace(is_navigation_request=lambda: True))
+        for listener in self._listeners:
+            listener(response)
+        return response
 
     async def title(self):
         return "Fake"
@@ -141,6 +162,12 @@ def test_load_camoufox_raises_when_missing(monkeypatch):
 async def test_fetch_launches_through_the_lazy_loader(monkeypatch):
     monkeypatch.setattr(browser_mod, "_load_camoufox", lambda: _FakeCamoufox)
     monkeypatch.setattr(browser_mod.config, "BROWSER_IDLE_SHUTDOWN_S", 0)
+    monkeypatch.setattr(browser_mod.netns, "supported", lambda: False)  # a faked launcher never enters the sandbox
+
+    async def public(host):  # the address check must not need DNS here
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(sandbox_net, "_resolve", public)
 
     b = browser_mod.Browser()
     res = await b.fetch("example.com")

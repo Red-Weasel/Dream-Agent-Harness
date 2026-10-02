@@ -7,7 +7,7 @@ the engine lives in its own session (start_new_session), where no terminal hangu
 The engine is now tied to the process that spawned it and owns its lifecycle: the desktop's
 `python -m dream.desktop.startup run` session process, or the terminal `dream local` process.
 PR_SET_PDEATHSIG delivers SIGTERM (the engine's orderly stop) when that process dies by any means,
-and a small watchdog SIGKILLs the engine if it is still alive after a grace period (default 10 s).
+and a small watchdog SIGKILLs the engine if it is still alive after a grace period (default 120 s).
 `--keep-hot` stays untied.
 
 Every test uses real processes and a stand-in engine (`python -c "time.sleep(600)"`); no engine,
@@ -25,6 +25,8 @@ import textwrap
 from pathlib import Path
 
 import pytest
+
+from lease_isolation import isolated_load_lock_dir  # noqa: F401  (DREAM-206: the owners' launch locks under tmp_path)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -57,8 +59,10 @@ OWNER = textwrap.dedent(r'''
     if mode == "exit":
         sys.exit(0)                              # a normal interpreter exit that never stops the engine
     if mode == "crash":
-        import ctypes
-        ctypes.string_at(0)                      # SIGSEGV, like the 2026-09-23 session crash
+        import ctypes, signal
+        sys.stdin.readline()                     # the test's go, sent once it holds pidfds of the engine and watchdog
+        ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)   # PR_SET_DUMPABLE 0: this deliberate crash leaves no core dump or crash report
+        os.kill(os.getpid(), signal.SIGSEGV)     # SIGSEGV, like the 2026-09-23 session crash (sent: no kernel segfault line)
     if mode == "stop":
         sys.stdin.readline()
         proc.terminate()
@@ -197,9 +201,28 @@ def test_owner_exiting_normally_without_stopping_the_engine_takes_it_down(tmp_pa
 
 
 def test_crashing_owner_takes_the_engine_down(tmp_path, owners):
-    owner = owners(helper_owner(tmp_path, "crash"))
+    owner = owners(helper_owner(tmp_path, "crash"), stdin=subprocess.PIPE)
+    assert not gone_within(owner.engine, 0.3)            # alive while its owner lives
+    owner.proc.stdin.write("\n")                         # crash now
+    owner.proc.stdin.flush()
     assert owner.proc.wait(10) == -signal.SIGSEGV
     assert gone_within(owner.engine, 5.0)
+
+
+def test_the_deliberate_crash_leaves_no_core_dump(tmp_path, owners):
+    """DREAM-152: the crash above is the test's, and nothing outside the test may keep it. A dumped core goes to the
+    machine's crash handler; apport keeps one report per executable, so on the owner's machine this crash filled
+    /var/crash/_usr_bin_python3.12.1000.crash and real python3.12 crashes after it got no report."""
+    owner = owners(helper_owner(tmp_path, "crash"), stdin=subprocess.PIPE)
+    helper = os.pidfd_open(owner.proc.pid)
+    try:
+        owner.proc.stdin.write("\n")                     # crash now
+        owner.proc.stdin.flush()
+        assert gone_within(helper, 10.0)
+    finally:
+        os.close(helper)
+    death = os.waitid(os.P_PID, owner.proc.pid, os.WEXITED | os.WNOWAIT)   # WNOWAIT: the fixture still reaps it
+    assert (death.si_status, death.si_code) == (signal.SIGSEGV, os.CLD_KILLED)   # CLD_DUMPED: a core was dumped
 
 
 def test_engine_ignoring_sigterm_is_killed_after_the_grace(tmp_path, owners):
@@ -211,12 +234,14 @@ def test_engine_ignoring_sigterm_is_killed_after_the_grace(tmp_path, owners):
     assert "SIGKILL" in (tmp_path / "machx.log").read_text()
 
 
-def test_default_grace_is_ten_seconds(tmp_path, owners):
-    owner = owners(helper_owner(tmp_path, child=STUBBORN))
-    assert ignores_sigterm(owner.engine_pid)
-    owner.proc.send_signal(signal.SIGKILL)
-    assert not gone_within(owner.engine, 8.5)
-    assert gone_within(owner.engine, 5.0)
+def test_default_grace_is_two_minutes(monkeypatch):
+    """2026-09-30 21:55: the 10 s default SIGKILLed an engine still finishing a prefill piece, and the GPU work in
+    flight faulted card 0 (65 page faults, an engine reset). The default grace is 120 s; the engine's own orderly stop
+    takes about half a second, so the wait only matters when it is stuck."""
+    import dream.local.engine_guard as guard
+    monkeypatch.delenv(guard.GRACE_ENV, raising=False)
+    assert guard.DEFAULT_GRACE_S == 120.0
+    assert guard._grace_s(None) == 120.0
 
 
 def test_spawning_thread_ending_does_not_stop_the_engine(tmp_path, owners):

@@ -63,7 +63,7 @@ LOOP_DIR = VAR_DIR / "loops"  # per-run autonomous-loop workspaces (state on dis
 CUSTOM_TOOLS_DIR = PKG_DIR / "tools" / "custom"
 # Plugins: one directory each under here, a plugin.yaml plus any of skills/,
 # tools/, agents/, mcp.json (dream/plugins.py).
-PLUGINS_DIR = Path(os.environ.get("DREAM_PLUGINS_DIR", str(ROOT / "plugins")))
+PLUGINS_DIR = Path(os.environ.get("DREAM_PLUGINS_DIR", str(ROOT / "plugins"))).expanduser()
 
 # The Library: durable, versioned, id-addressed files. Separate from the memory
 # database because it holds user-facing deliverables rather than Dream's own
@@ -82,7 +82,8 @@ MCP_CONFIG_PATH = Path(os.environ.get("DREAM_MCP_CONFIG", str(ROOT / "mcp.json")
 CURATED_SKILLS = ('coding', 'research', 'writing', 'documents', 'data-analysis',
                   'media', 'library', 'verifying', 'computer-use', 'blender-animation',
                   'brainstorming', 'debugging', 'gated-build', 'frontend-design',
-                  'grill-me', 'handoff', 'understand', 'understand-dashboard', 'understand-domain')
+                  'grill-me', 'handoff', 'understand', 'understand-dashboard', 'understand-domain',
+                  'thinking-out-loud')
 
 
 def bundled_skill_dirs() -> list[Path]:
@@ -91,7 +92,12 @@ def bundled_skill_dirs() -> list[Path]:
     return [root / name for root in roots for name in CURATED_SKILLS]
 
 
-SKILL_DIR_PATTERNS = [str(path) for path in bundled_skill_dirs()]
+# DREAM-172: Dream's domain skills (skills/domains/<name>). Discovered like any Dream-owned skill but not curated:
+# searchable everywhere, listed in the wake index only by a skill preset that names them.
+DOMAIN_SKILL_DIRS = [root / 'domains' for root in dict.fromkeys((ROOT / 'skills', PKG_DIR.parent / 'skills',
+                                                                   PKG_DIR / 'resources' / 'skills'))]
+
+SKILL_DIR_PATTERNS = [str(path) for path in bundled_skill_dirs() + DOMAIN_SKILL_DIRS]
 
 
 def skill_dirs() -> list[Path]:
@@ -228,7 +234,6 @@ MONITOR = os.environ.get("DREAM_MONITOR", "1") == "1"
 # not configurable, because the session behind it can run shell commands.
 GUI = os.environ.get("DREAM_GUI", "0") == "1"
 GUI_PORT = read_numeric("DREAM_GUI_PORT")
-GUI_OPEN = os.environ.get("DREAM_GUI_OPEN", "1") == "1"
 
 # A self-built tool unused for this many days gets a STALE tag in its description —
 # a nudge to rebuild-or-retire instead of reaching for it out of convenience.

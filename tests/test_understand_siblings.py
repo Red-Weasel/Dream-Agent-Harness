@@ -563,7 +563,7 @@ def test_the_curated_skills_win_the_bare_names_and_the_plugin_copies_stay_reacha
         alias = by_name[f"understand-anything:{name}"]
         assert not alias.curated and alias.provenance == "dream-plugin"
         assert alias.root.resolve() == (UA_SKILLS / name).resolve()
-        assert any(f"reachable as 'understand-anything:{name}'" in w for w in installed_skill_tools.warnings())
+        assert any(f"reachable as 'understand-anything:{name}'" in n for n in installed_skill_tools.notes())
         # the qualified name selects only the plugin's copy; the bare name only ours
         assert select_for_task(f"$understand-anything:{name}", with_plugin).names == (f"understand-anything:{name}",)
         assert select_for_task(f"${name}", with_plugin).names == (name,)
@@ -904,6 +904,10 @@ def test_each_upstream_sibling_selects_when_named_and_fits_whole_at_32k(with_plu
 
 @pytest.mark.parametrize("name", READ_ONLY_FOUR)
 def test_the_read_only_four_name_no_plugin_path(name):
+    # These are the upstream clone's own files (~/.understand-anything or UA_DIR), which a fresh checkout and the CI
+    # runner do not have (DREAM-150).
+    if not (UA_SKILLS / name / "SKILL.md").is_file():
+        pytest.skip("the Understand-Anything clone is not installed")
     text = (UA_SKILLS / name / "SKILL.md").read_text(encoding="utf-8")
     # no plugin path, no bundled script and no runtime invocation ("node" alone is a graph word in these texts)
     assert not re.search(r"PLUGIN_ROOT|SKILL_DIR|understand-anything-plugin|packages/|\bagents/|\bpnpm\b|\bnpx\b|"

@@ -35,6 +35,8 @@ _CODEX = [
 _CATALOG = {
     'anthropic': [
         _choice('claude-fable-5-1', 'Claude Fable 5.1', _NATIVE[:-1]),
+        # The Frontier loop's default judge (plan section 5 question 12, DREAM-218); account access is not checked.
+        _choice('claude-opus-5-5', 'Claude Opus 5.5', _NATIVE[:-1]),
         _choice('claude-opus-5', 'Claude Opus 5', _NATIVE[:-1]),
         _choice('claude-sonnet-5', 'Claude Sonnet 5', _NATIVE[:-1]),
         _choice('claude-haiku-4-5-20251001', 'Claude Haiku 4.5', []),

@@ -45,6 +45,22 @@ def _isolate_runtime_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "SESSIONS_DIR", data / "sessions")
     monkeypatch.setattr(config, "DB_PATH", data / "dream.db")
     monkeypatch.setenv("DREAM_EXTENSION_SETTINGS", str(tmp_path / "extensions.json"))
+    # The project settings file is the registered workspace's (DREAM-146): no test inherits another's App.
+    from dream.core import settings as runtime_settings
+    monkeypatch.setattr(runtime_settings, "_WORKSPACE", None)
+    # The saved Council file is read at every session start and by `dream settings check` (DREAM-148): never the
+    # owner's var/moe.json from a test.
+    from dream.core import moe
+    monkeypatch.setattr(moe, "CONFIG_PATH", tmp_path / "var" / "moe.json")
+    # Sleepwalk's store (DREAM-158): a test's Dream session never schedules or runs the owner's automations.
+    from dream.sleepwalk import store as sleepwalk_store
+    monkeypatch.setattr(sleepwalk_store, "ROOT", data / "sleepwalk")
+    # Sleepwalk's run folders (DREAM-202): made under a private root of this test's own, never the owner's runtime
+    # directory or cache directory (the trust rules on those have their own tests, which put the real selection back).
+    from dream.sleepwalk import runner as sleepwalk_runner
+    run_root = tmp_path / "private-run-root"
+    run_root.mkdir(mode=0o700)
+    monkeypatch.setattr(sleepwalk_runner, "_ROOTS", (lambda: (run_root, ""),))
 
 
 @pytest.fixture(autouse=True)
@@ -102,3 +118,18 @@ def _guard_hardware_telemetry(tmp_path):
 
     with guard_telemetry(tmp_path) as guard:
         yield guard
+
+
+@pytest.fixture
+def pre_dream176_line(monkeypatch):
+    """The compaction line these landing tests were calibrated on before DREAM-176: 0.75 of the window, 0.85 from 64k
+    up. DREAM-176 made it one line for every window (behaviour.context_trigger, 80 by default; test_context_management
+    covers that). These tests measure how precisely a compaction fires before its line and lands on its target, which
+    does not depend on where the line is, so they keep the line their fixtures' sizes were chosen for."""
+    from dream.core.backends import openai_compat
+
+    def line(window: int, trigger: int | None = None) -> float:
+        if openai_compat._COMPACT_AT is not None:
+            return openai_compat._COMPACT_AT
+        return 0.85 if window >= 65536 else 0.75
+    monkeypatch.setattr(openai_compat, "compact_at", line)

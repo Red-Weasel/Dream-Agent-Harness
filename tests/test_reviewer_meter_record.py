@@ -10,6 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from lease_isolation import isolated_lease_dir  # noqa: F401  (DREAM-205: leases under tmp_path, never the live folder)
+
 from dream.core.evaluator import review_backend, ReviewSettings
 from dream.core.profiles import resolve_profile
 from dream.core.providers import get_provider

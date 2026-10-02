@@ -9,7 +9,7 @@
   const opener = document.createElement('button');
   opener.id = 'dream-controls-open'; opener.innerHTML = icon + '<span>Controls</span>';
   opener.setAttribute('aria-haspopup', 'dialog'); opener.setAttribute('aria-controls', 'dream-controls');
-  opener.title = 'Runtime, extensions and learning';
+  opener.title = 'Runtime, extensions, learning and settings';
   document.querySelector('header .status').before(opener);
   const recording = document.createElement('button');
   recording.id = 'dream-recording'; recording.hidden = true;
@@ -19,11 +19,12 @@
   dialog.id = 'dream-controls'; dialog.className = 'dc-dialog';
   dialog.setAttribute('aria-labelledby', 'dc-title');
   dialog.innerHTML = `
-    <div class="dc-top"><span class="dc-mark">${icon}</span><div class="dc-heading"><h2 id="dc-title">Studio controls</h2><span class="dc-subtitle">Runtime · capabilities · learning</span></div><button id="dc-close" class="dc-quiet" aria-label="Close controls">×</button></div>
+    <div class="dc-top"><span class="dc-mark">${icon}</span><div class="dc-heading"><h2 id="dc-title">Studio controls</h2><span class="dc-subtitle">Runtime · capabilities · learning · settings</span></div><button id="dc-close" class="dc-quiet" aria-label="Close controls">×</button></div>
     <div class="dc-tabs" role="tablist" aria-label="Studio controls">
       <button id="dc-tab-runtime" role="tab" aria-controls="dc-runtime" aria-selected="true">Runtime</button>
       <button id="dc-tab-extensions" role="tab" aria-controls="dc-extensions" aria-selected="false" tabindex="-1">Extensions</button>
       <button id="dc-tab-learn" role="tab" aria-controls="dc-learn" aria-selected="false" tabindex="-1">Learn</button>
+      <button id="dc-tab-settings" role="tab" aria-controls="dc-settings" aria-selected="false" tabindex="-1">Settings</button>
       <button id="dc-refresh" class="dc-refresh dc-quiet" aria-label="Refresh controls" title="Refresh current panel">↻</button>
     </div>
     <div id="dc-feedback" class="dc-feedback dc-notice" role="status" hidden><span></span><button id="dc-dismiss" class="dc-quiet" aria-label="Dismiss control message">×</button></div>
@@ -112,6 +113,10 @@
           <div id="dc-demos"></div><section id="dc-draft" class="dc-draft" hidden aria-label="Skill draft review"></section>
         </section>
       </div>
+      <div id="dc-settings" role="tabpanel" aria-labelledby="dc-tab-settings" hidden>
+        <div id="dc-settings-state" class="dc-notice" role="status"><span>Loading settings…</span></div>
+        <div id="dc-settings-content" hidden></div>
+      </div>
     </div><div id="dc-pending" class="dc-pending" role="status" hidden></div>`;
   document.body.appendChild(dialog);
   // Recording controls stay visible while scrolling or visiting another tab.
@@ -119,11 +124,14 @@
   byId('dc-feedback').after(byId('dc-active'));
 
   let tab = 'runtime', returnFocus = opener, busy = false, runtime = null, extensions = null;
-  let learning = null, learningKnown = false, profileEdited = false, profileSaved = false;
+  let learning = null, learningKnown = false, profileEdited = false, profileSaved = false, settingsView = null;
+  // Where the Settings tab saves (DREAM-146): the global file, or this workspace's .dream/settings.json.
+  let settingsScope = 'global';
   let performanceEdited = false;
   let draftId = null, queued = new Set(), installed = new Map(), demoSignature = '', loading = {};
   let pollTimer, wasRecording = false, scopeDeadline = null, revision = 0, stopping = false;
   const overrideKeys = ['context_limit','output_tokens','max_parallel','idle_timeout_s'];
+  const tabs = ['runtime','extensions','learn','settings'];
   const isRecording = () => learning?.active?.status === 'recording';
 
   async function api(path, payload) {
@@ -191,12 +199,13 @@
     byId('dc-scope-stop').disabled = busy;
     byId('dc-record-stop').disabled = stopping;
     dialog.querySelectorAll('[data-mutate]').forEach(button => { button.disabled = busy || button.dataset.blocked === 'true'; });
+    dialog.querySelectorAll('#dc-settings-content :is(input,select,button)').forEach(control => { control.disabled = busy || control.dataset.keepDisabled === 'true'; });
     const install = byId('dc-draft-install');
     if(install) install.disabled = busy || !byId('dc-draft-agree').checked || installed.has(draftId);
   }
   function selectTab(name, focus = false) {
     tab = name;
-    for(const key of ['runtime','extensions','learn']) {
+    for(const key of tabs) {
       byId('dc-' + key).hidden = key !== name;
       byId('dc-tab-' + key).setAttribute('aria-selected', String(key === name));
       byId('dc-tab-' + key).tabIndex = key === name ? 0 : -1;
@@ -212,7 +221,7 @@
     if(name !== 'runtime' && !runtime) loadRuntime();
     schedulePoll();
   }
-  function refresh() { return tab === 'runtime' ? loadRuntime() : tab === 'extensions' ? loadExtensions() : loadLearning(); }
+  function refresh() { return tab === 'runtime' ? loadRuntime() : tab === 'extensions' ? loadExtensions() : tab === 'settings' ? loadSettings() : loadLearning(); }
   opener.onclick = () => open(); recording.onclick = () => open('learn', recording);
   byId('dc-close').onclick = () => dialog.close();
   dialog.addEventListener('close', () => { (returnFocus.hidden ? opener : returnFocus).focus(); schedulePoll(); });
@@ -223,12 +232,12 @@
   });
   byId('dc-dismiss').onclick = () => { byId('dc-feedback').hidden = true; byId('dc-tab-' + tab).focus(); };
   byId('dc-refresh').onclick = () => refresh();
-  for(const name of ['runtime','extensions','learn']) byId('dc-tab-' + name).onclick = () => selectTab(name);
+  for(const name of tabs) byId('dc-tab-' + name).onclick = () => selectTab(name);
   dialog.querySelector('[role=tablist]').addEventListener('keydown', event => {
     if(event.target.getAttribute('role') !== 'tab') return;
-    const names = ['runtime','extensions','learn'], at = names.indexOf(tab);
-    const next = {ArrowRight:(at+1)%3,ArrowLeft:(at+2)%3,Home:0,End:2}[event.key];
-    if(next !== undefined) { event.preventDefault(); selectTab(names[next], true); }
+    const at = tabs.indexOf(tab), n = tabs.length;
+    const next = {ArrowRight:(at+1)%n,ArrowLeft:(at+n-1)%n,Home:0,End:n-1}[event.key];
+    if(next !== undefined) { event.preventDefault(); selectTab(tabs[next], true); }
   });
 
   async function loadRuntime() {
@@ -310,8 +319,10 @@
     if(form.dataset.requestId !== current || coordination.can_reconcile !== true) byId('dc-reconcile-confirm').checked = false;
     form.dataset.requestId = current;
     form.hidden = coordination.can_reconcile !== true || !current;
+    // DREAM-151: an engine with lanes has several slots; say how many run and how many a cut-off request left.
+    const lanes = Number.isInteger(coordination.slots) && coordination.slots > 1 ? ` · lanes: ${coordination.running ?? 0} of ${coordination.slots} running${coordination.left_over ? ', ' + coordination.left_over + ' left over' : ''}` : '';
     byId('dc-coordination-status').textContent = coordination.enabled === true ?
-      `State: ${coordination.state || 'unknown'}${current ? ' · request ' + current : ''}${coordination.waiting ? ' · waiting requests ' + coordination.waiting : ''}. ${coordination.reason || ''}` :
+      `State: ${coordination.state || 'unknown'}${current ? ' · request ' + current : ''}${coordination.waiting ? ' · waiting requests ' + coordination.waiting : ''}${lanes}. ${coordination.reason || ''}` :
       coordination.reason || 'Local coordination is unavailable for this adapter.';
     syncDisabled();
   }
@@ -727,6 +738,137 @@
     event.preventDefault();
     change({action:'learn_import',path:byId('dc-import-path').value.trim(),name:byId('dc-import-name').value.trim()}, 'Importing video', async () => { await loadLearning(); feedback('Video imported. Extract frames when ready.'); });
   };
+  // Settings (DREAM-143): every setting with its value and where it came from. Only what the settings
+  // writer can change has a control; the server validates every value and names the key it refused.
+  const sourceBadge = {session:'Session', env:'Environment', project:'Project', global:'Saved', default:'Default', 'not-applied':'Not applied'};
+  // A saved value has a reset button; it removes the value where it is saved (the project file's over the global one).
+  const resettable = row => row.origin === 'global' || row.origin === 'project';
+  // In the project scope a role takes a model name only: the provider select is shown but not changeable.
+  const projectOnly = ' disabled data-keep-disabled="true" title="Providers are saved on this computer (global scope); a project file names models only."';
+  const providerSelect = (label, options) => `<select aria-label="${esc(label)} provider" data-setting-provider${settingsScope === 'project' ? projectOnly : ''}>${options}</select>`;
+  async function loadSettings() {
+    if(loading.settings) return loading.settings;
+    loading.settings = (async () => {
+      const readRevision = revision;
+      try {
+        const data = await api('/api/control', {action:'settings_get'});
+        if(readRevision !== revision) return;
+        if(!data || !Array.isArray(data.sections)) throw new Error('Studio returned unreadable settings.');
+        settingsView = data; renderSettings();
+      } catch(error) { if(readRevision === revision) state('dc-settings-state', error.message, loadSettings); }
+      finally { delete loading.settings; }
+    })();
+    return loading.settings;
+  }
+  function settingEditor(row, id) {
+    const edit = row.edit, describe = `aria-describedby="${id}-help"`;
+    if(!edit) return `<p class="dc-setting-value"><span class="dc-value">${esc(row.display)}</span></p><p class="dc-help dc-locked" id="${id}-locked">${esc(row.locked || 'Read-only here.')}</p>`;
+    if(edit.kind === 'switch') return `<div class="dc-row"><button type="button" class="dc-switch" role="switch" aria-checked="${row.value === true}" aria-label="${esc(row.label)}" ${describe} data-setting-switch><i aria-hidden="true"></i><span>${row.value === true ? 'On' : 'Off'}</span></button>${resettable(row) ? '<button type="button" data-setting-reset>Use default</button>' : ''}</div>`;
+    if(edit.kind === 'number') return `<form class="dc-setting-edit" novalidate data-setting-form><input type="number" inputmode="numeric" step="1" min="${esc(edit.min)}" max="${esc(edit.max)}" value="${esc(edit.value ?? '')}" aria-label="${esc(row.label)}" ${describe} data-setting-input><button type="submit" class="dc-primary">Save</button>${resettable(row) ? '<button type="button" data-setting-reset>Use default</button>' : ''}</form>`;
+    if(edit.kind === 'choice') return `<form class="dc-setting-edit" novalidate data-setting-form><select aria-label="${esc(row.label)}" ${describe} data-setting-input>${edit.choices.map(c => `<option value="${esc(c)}"${c === edit.value ? ' selected' : ''}>${esc((edit.labels || {})[c] || c)}</option>`).join('')}</select><button type="submit" class="dc-primary">Save</button>${resettable(row) ? '<button type="button" data-setting-reset>Use default</button>' : ''}${edit.texts ? `<p class="dc-help dc-choice-text" data-choice-text style="white-space:pre-line;flex-basis:100%">${esc(edit.texts[edit.value] || '')}</p>` : ''}</form>`;
+    if(edit.kind === 'council') {
+      // A Council advisor (DREAM-145): the model is free text with the Council panel's suggestions; the effort is one of the listed ones or the provider's default.
+      const list = `${id}-models`;
+      const efforts = ['<option value="">Provider default</option>', ...(edit.efforts || []).map(e => `<option value="${esc(e)}"${e === edit.effort ? ' selected' : ''}>${esc(e)}</option>`)].join('');
+      return `<form class="dc-setting-edit dc-role-edit" novalidate data-setting-form><input type="text" list="${list}" value="${esc(edit.model)}" placeholder="Provider's default model" autocomplete="off" spellcheck="false" aria-label="${esc(row.label)} model" ${describe} data-setting-input><datalist id="${list}">${(edit.models || []).map(m => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('')}</datalist><select aria-label="${esc(row.label)} effort" data-setting-effort>${efforts}</select><button type="submit" class="dc-primary">Save</button>${edit.removable ? '<button type="button" data-setting-reset>Use provider defaults</button>' : ''}</form>`;
+    }
+    // A role: the provider list, the meaning of "unset" and the placeholder come from the role's own rule (DREAM-145).
+    const unset = edit.provider_unset == null ? [] : [`<option value="">${esc(edit.provider_unset)}</option>`];
+    const options = [...unset, ...edit.providers.map(key => `<option value="${esc(key)}"${key === edit.provider ? ' selected' : ''}>${esc(key)}</option>`)].join('');
+    return `<form class="dc-setting-edit dc-role-edit" novalidate data-setting-form><input type="text" value="${esc(edit.model)}" placeholder="${esc(edit.model_placeholder || 'Same as main')}" autocomplete="off" spellcheck="false" aria-label="${esc(row.label)} model" ${describe} data-setting-input>${providerSelect(row.label, options)}<button type="submit" class="dc-primary">Save</button>${edit.removable ? `<button type="button" data-setting-reset>${esc(edit.reset)}</button>` : ''}</form>`;
+  }
+  function renderSettings() {
+    const view = settingsView, box = byId('dc-settings-content');
+    if(view.ok === false) {
+      box.hidden = true;
+      state('dc-settings-state', String(view.error || 'The settings file cannot be used.'), loadSettings);
+      return;
+    }
+    state('dc-settings-state', ''); box.hidden = false;
+    let index = 0;
+    const warnings = view.warnings?.length ? `<section class="dc-notice dc-warning dc-settings-warnings" aria-labelledby="dc-settings-warnings"><h4 id="dc-settings-warnings">${view.warnings.length === 1 ? 'One setting to check' : view.warnings.length + ' settings to check'}</h4><ul>${view.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul></section>` : '';
+    // The scope choice (DREAM-146): every Save and every switch writes where it points; a reset removes the value where it is saved.
+    const scopeChoice = view.project_file ? `<fieldset class="dc-settings-scope"><legend>Save changes to</legend>
+        <label><input type="radio" name="dc-settings-scope" value="global" data-settings-scope${settingsScope === 'global' ? ' checked' : ''}> This computer <span class="dc-path">${esc(view.file)}</span></label>
+        <label><input type="radio" name="dc-settings-scope" value="project" data-settings-scope${settingsScope === 'project' ? ' checked' : ''}> This workspace <span class="dc-path">${esc(view.project_file)}</span></label>
+        <p class="dc-help">A workspace file holds model names, output and behaviour only; providers, the profile, permissions and privacy stay on this computer. A workspace value is used over the saved one and shows the Project badge.</p></fieldset>` : '';
+    box.innerHTML = `<p class="dc-help">Every setting Dream uses, its value, and where the value comes from. Saved settings live in <span class="dc-path">${esc(view.file)}</span>, shared with the terminal's <code>/settings</code>. Resolved for ${esc(view.provider)}${view.model ? ' · ' + esc(view.model) : ''}.</p>${scopeChoice}${warnings}` +
+      view.sections.map(section => {
+        const rows = section.rows.map(row => {
+          const id = 'dc-set-' + (index++);
+          return `<article class="dc-setting" data-key="${esc(row.key)}"><div class="dc-row dc-wrap"><h4 class="dc-grow" id="${id}-label">${esc(row.label)}</h4><span class="dc-source dc-src-${esc(row.origin)}" title="${esc(row.source_text)}">${esc(sourceBadge[row.origin] || row.origin)}</span>${row.restart_label ? `<span class="dc-pill dc-restart" title="${esc(row.applies)}">${esc(row.restart_label)}</span>` : ''}</div>
+            <p class="dc-help" id="${id}-help">${esc(row.help)} <span class="dc-setting-meta">${esc(row.source_text)} · applies: ${esc(row.applies)} · <code>${esc(row.key)}</code></span></p>${settingEditor(row, id)}</article>`;
+        }).join('');
+        const extra = section.id === 'models' ? `<h4 class="dc-subhead">Providers</h4><dl class="dc-meta dc-providers">${(view.providers || []).map(p => `<dt>${esc(p.label)}</dt><dd>${esc(p.kind)}${p.endpoint ? ' · ' + esc(p.endpoint) : ''} · key: ${esc(p.credential)}</dd>`).join('')}</dl>` :
+          section.id === 'roles' ? `<form class="dc-setting-add" novalidate data-agent-form><h4 class="dc-subhead">Give one sub-agent type its own model</h4><div class="dc-setting-edit dc-role-edit"><select aria-label="Sub-agent type" data-agent-name>${(view.agents || []).map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('')}</select><input type="text" placeholder="Model name" autocomplete="off" spellcheck="false" aria-label="Sub-agent model" data-agent-model><select aria-label="Sub-agent provider" data-agent-provider${settingsScope === 'project' ? projectOnly : ''}><option value="">Not set · local MachX only</option>${(view.role_providers || []).map(k => `<option value="${esc(k)}">${esc(k)}</option>`).join('')}</select><button type="submit">Add</button></div><p class="dc-row-error dc-notice dc-error" role="alert" hidden></p></form>` :
+          section.id === 'profile' ? '<div class="dc-actions"><button type="button" data-open-runtime>Open Runtime · Next session</button></div>' : '';
+        return `<section class="dc-section dc-settings-section" aria-labelledby="dc-settings-${esc(section.id)}"><h3 id="dc-settings-${esc(section.id)}">${esc(section.title)}</h3><p class="dc-help">${esc(section.intro)}</p>${rows}${extra}</section>`;
+      }).join('');
+    box.querySelectorAll('[data-key]').forEach(node => {
+      const row = view.sections.flatMap(section => section.rows).find(item => item.key === node.dataset.key);
+      const form = node.querySelector('[data-setting-form]');
+      if(form) form.onsubmit = event => {
+        event.preventDefault();
+        const input = form.querySelector('[data-setting-input]');
+        // The Council is one file for every workspace: always the global scope. A project-scope role sends its model only.
+        const council = row.edit.kind === 'council';
+        const value = row.edit.kind === 'number' || row.edit.kind === 'choice' ? input.value.trim()
+          : council ? {model:input.value.trim(), effort:form.querySelector('[data-setting-effort]').value}
+          : settingsScope === 'project' ? {model:input.value.trim()}
+          : {model:input.value.trim(), provider:form.querySelector('[data-setting-provider]').value};
+        saveSetting(row, value, node, council ? 'global' : settingsScope);
+      };
+      const choice = node.querySelector('select[data-setting-input]');
+      if(choice && row.edit?.texts) choice.onchange = () => { const t = node.querySelector('[data-choice-text]'); if(t) t.textContent = row.edit.texts[choice.value] || ''; };
+      const toggle = node.querySelector('[data-setting-switch]');
+      if(toggle) toggle.onclick = () => saveSetting(row, row.value !== true, node, settingsScope);
+      // A reset removes the value where it is saved: the project file's, else the global file's (a Council row is global).
+      const reset = node.querySelector('[data-setting-reset]');
+      if(reset) reset.onclick = () => saveSetting(row, null, node, row.origin === 'project' ? 'project' : 'global');
+    });
+    box.querySelectorAll('[data-settings-scope]').forEach(radio => radio.onchange = () => { if(radio.checked) { settingsScope = radio.value; renderSettings(); } });
+    const add = box.querySelector('[data-agent-form]');
+    if(add) add.onsubmit = event => {
+      event.preventDefault();
+      const agent = add.querySelector('[data-agent-name]').value;
+      const model = add.querySelector('[data-agent-model]').value.trim();
+      saveSetting({key:'roles.subagents.' + agent, label:'Sub-agent: ' + agent}, settingsScope === 'project' ? {model} : {model, provider:add.querySelector('[data-agent-provider]').value}, add, settingsScope);
+    };
+    const runtimeLink = box.querySelector('[data-open-runtime]');
+    if(runtimeLink) runtimeLink.onclick = () => selectTab('runtime', true);
+    syncDisabled();
+  }
+  function rowError(node, message) {
+    let error = node.querySelector('.dc-row-error');
+    if(!error) { error = document.createElement('p'); error.className = 'dc-row-error dc-notice dc-error'; error.setAttribute('role', 'alert'); node.appendChild(error); }
+    error.id = error.id || 'dc-set-error-' + Math.random().toString(36).slice(2);
+    error.hidden = !message; error.textContent = message || '';
+    node.querySelectorAll('input,select').forEach(control => {
+      const described = (control.getAttribute('aria-describedby') || '').split(' ').filter(id => id && id !== error.id);
+      if(message) { control.setAttribute('aria-invalid', 'true'); described.push(error.id); } else control.removeAttribute('aria-invalid');
+      control.setAttribute('aria-describedby', described.join(' '));
+    });
+  }
+  async function saveSetting(row, value, node, scope) {
+    if(busy) return;
+    busy = true; revision++; byId('dc-pending').hidden = false; byId('dc-pending').textContent = 'Saving ' + row.label + '…';
+    byId('dc-feedback').hidden = true; rowError(node, ''); syncDisabled();
+    let saved = false;
+    try {
+      const result = await api('/api/control', {action:'settings_save', key:row.key, value, scope: scope || settingsScope});
+      if(result?.key !== row.key || !Array.isArray(result.settings?.sections)) throw new Error('Studio did not confirm this setting. Refresh to check the current state.');
+      revision++; settingsView = result.settings; saved = true;
+      feedback(`${row.label} (${row.key}): ${result.applies}`);
+    } catch(error) { rowError(node, error.message); }
+    finally {
+      busy = false; byId('dc-pending').hidden = true;
+      if(saved) renderSettings();
+      syncDisabled();
+      // Controls were disabled while saving; return focus to the row (the invalid field after a refusal).
+      const target = saved ? [...byId('dc-settings-content').querySelectorAll('[data-key]')].find(item => item.dataset.key === row.key) : node;
+      (target?.querySelector('[aria-invalid=true],input,button') || byId('dc-tab-settings')).focus();
+    }
+  }
   function schedulePoll() {
     clearTimeout(pollTimer);
     // Keep a visible recording indicator even while controls are closed. These

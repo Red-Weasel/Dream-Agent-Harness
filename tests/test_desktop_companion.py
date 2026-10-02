@@ -40,7 +40,7 @@ async def studio(tmp_path, monkeypatch):
             page.set_default_timeout(5000)
             errors = []
             page.on("pageerror", lambda err: errors.append(str(err)))
-            yield srv, page, url + "&companion=1", prompts, errors
+            yield srv, page, url.replace("/#", "/?companion=1#"), prompts, errors
             await browser.close()
     finally:
         await srv.stop()
@@ -117,7 +117,7 @@ async def test_chat_is_primary_and_preview_and_external_mode_are_preserved(studi
     await show(srv, page, PAGE, "second.html")
     await expect(page.frame_locator("#artbody iframe").locator("#cta")).to_be_visible()
     await page.set_viewport_size({"width": 1600, "height": 900})
-    await page.goto(url.replace("&companion=1", ""))
+    await page.goto(url.replace("?companion=1", ""))
     await expect(page.locator("#stat")).to_have_text("live")
     await expect(page.locator("#input")).to_be_visible()
     srv.bus.publish(Event("text_delta", "External conversation stays visible"))

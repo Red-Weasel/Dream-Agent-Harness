@@ -77,12 +77,14 @@ async def test_props_are_reused_without_extra_requests_and_switch_clears_facts()
     for _ in range(3):
         assert b.capability_status()['context_tokens']['value'] == 8192
         assert b.performance_status()['reasoning_supported']
-    assert requests == ['http://fixture.invalid/props']
+    # DREAM-144: the probe first asks /v1/models (several listed models = the session's own /props?model=); this
+    # endpoint lists none, so the /props call stays bare. Still one probe, no request per capability_status.
+    assert requests == ['http://fixture.invalid/v1/models', 'http://fixture.invalid/props']
     await b.set_model('different')
     assert b.n_ctx is None
     assert not b.capability_status()['context_tokens']['known']
     assert not b.performance_status()['reasoning_supported']
-    assert len(requests) == 1
+    assert len(requests) == 2
 
 
 @pytest.mark.asyncio

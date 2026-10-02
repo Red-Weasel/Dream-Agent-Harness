@@ -36,15 +36,15 @@ async def test_compaction_is_recorded_on_the_runtime_meter():
     assert len(recs) == 1
     r = recs[0]
     assert r["before"] > r["after"] > 0 and r["elided"] > 0
-    assert r["window"] == 8192 and r["threshold"] == 0.75
+    assert r["window"] == 8192 and r["threshold"] == 0.80       # behaviour.context_trigger's default (DREAM-176)
 
 
-def test_compact_at_is_later_on_a_large_window(monkeypatch):
+def test_compact_at_is_one_line_for_every_window(monkeypatch):
+    """DREAM-176: the owner's one trigger (behaviour.context_trigger, 80 by default) for every window size; it was
+    0.75, and 0.85 from 64k up."""
     monkeypatch.setattr(openai_compat, "_COMPACT_AT", None)
-    assert openai_compat.compact_at(8192) == 0.75
-    assert openai_compat.compact_at(32768) == 0.75
-    assert openai_compat.compact_at(65536) == 0.85
-    assert openai_compat.compact_at(75000) == 0.85
+    assert openai_compat.compact_at(8192) == 0.80 and openai_compat.compact_at(75000) == 0.80
+    assert openai_compat.compact_at(8192, 70) == 0.70 and openai_compat.compact_at(75000, 90) == 0.90
 
 
 def test_the_env_knob_still_wins_everywhere(monkeypatch):

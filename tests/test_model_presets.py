@@ -41,8 +41,8 @@ def test_metadata_reads_model_limits_not_filename(tmp_path,model_name):
     assert rec['gpus']==2
     assert 8192<rec['ctx']<=1048576
     assert rec['options']['temperature']==1.0
-    assert rec['options']['top_p']==1.0
-    assert 'publisher' in rec['sources']['temperature'].lower()
+    assert rec['options']['top_p']==0.95    # DREAM-179: the card's generation_config (owner's pick), not the coding 1.0
+    assert 'model card' in rec['sources']['temperature'].lower()
     assert rec['context_limit']==1048576
 
 def test_unknown_models_and_small_limits_are_conservative(tmp_path):

@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock
 import anyio
 import httpx
 import pytest
+
+from lease_isolation import isolated_lease_dir  # noqa: F401  (DREAM-205: leases under tmp_path, never the live folder)
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -35,7 +37,7 @@ def isolated_studio(monkeypatch):
 def test_desktop_state_requires_auth_and_counts_only_live_websockets():
     session = {"session_id": "s1", "provider": "scripted", "model": "none", "workspace": "/tmp"}
     srv = StudioServer(EventBus(), session=session)
-    with srv.bus.subscribe(), TestClient(srv.app) as client:
+    with srv.bus.subscribe(), TestClient(srv.app, base_url="http://127.0.0.1") as client:
         assert client.get("/api/desktop").status_code == 401
         assert client.get("/api/desktop?token=wrong").status_code == 401
         headers = {"X-Dream-Token": srv.token}
@@ -43,9 +45,9 @@ def test_desktop_state_requires_auth_and_counts_only_live_websockets():
         assert state.json()["session"] == session
         assert state.json()["clients"] == 0  # internal listener is not a browser
         assert state.headers["cache-control"] == "no-store"
-        with client.websocket_connect(f"/ws?token={srv.token}") as ws:
+        with client.websocket_connect(f"ws://127.0.0.1/ws?token={srv.token}") as ws:
             assert ws.receive_json() == {"kind": "hello", "data": session}
-            assert client.get(f"/api/desktop?token={srv.token}").json()["clients"] == 1
+            assert client.get("/api/desktop", headers={"X-Dream-Token": srv.token}).json()["clients"] == 1
         deadline = time.monotonic() + 1
         while client.get("/api/desktop", headers=headers).json()["clients"] and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -61,9 +63,9 @@ def test_latest_explicit_show_replays_after_hello_on_each_connection():
     srv.retain_show(Event("studio", {"op": "eval", "id": "expired", "code": "1"}))
     srv.retain_show(Event("tool_result", {"content": "private history"}))
     latest["content"] = "mutated by caller"
-    with TestClient(srv.app) as client:
+    with TestClient(srv.app, base_url="http://127.0.0.1") as client:
         for _ in range(2):
-            with client.websocket_connect(f"/ws?token={srv.token}") as ws:
+            with client.websocket_connect(f"ws://127.0.0.1/ws?token={srv.token}") as ws:
                 assert ws.receive_json()["kind"] == "hello"
                 replay = ws.receive_json()
                 assert replay == {"kind": "studio", "data": {
@@ -79,8 +81,8 @@ def test_reconnect_replays_history_permission_and_show_in_order():
     srv.bus.publish(event)
     show = {"op": "show", "path": "latest.html", "content": "<p>preview</p>"}
     srv.retain_show(Event("studio", show))
-    with TestClient(srv.app) as client:
-        with client.websocket_connect(f"/ws?token={srv.token}") as ws:
+    with TestClient(srv.app, base_url="http://127.0.0.1") as client:
+        with client.websocket_connect(f"ws://127.0.0.1/ws?token={srv.token}") as ws:
             assert ws.receive_json() == {"kind": "hello", "data": {}}
             assert ws.receive_json() == {"kind": "studio", "data": show}
             pending = client.portal.start_task_soon(
@@ -91,7 +93,7 @@ def test_reconnect_replays_history_permission_and_show_in_order():
             assert permission["kind"] == "permission"
         assert srv.client_count == srv.bus.subscriber_count == 0
         assert not pending.done()
-        with client.websocket_connect(f"/ws?token={srv.token}&history=1") as ws:
+        with client.websocket_connect(f"ws://127.0.0.1/ws?token={srv.token}&history=1") as ws:
             assert ws.receive_json() == {"kind": "hello", "data": {}}
             assert ws.receive_json() == {"kind": "history", "data": {
                 "events": [{"kind": "text_delta", "data": "retained answer"}], "trimmed": False,
@@ -113,9 +115,9 @@ def test_reconnect_replays_history_permission_and_show_in_order():
 
 def test_show_sequence_counts_explicit_handoffs_only_and_never_replay():
     srv = StudioServer(EventBus())
-    with TestClient(srv.app) as client:
+    with TestClient(srv.app, base_url="http://127.0.0.1") as client:
         def sequence():
-            response = client.get(f"/api/desktop?token={srv.token}").json()
+            response = client.get("/api/desktop", headers={"X-Dream-Token": srv.token}).json()
             assert type(response["show_sequence"]) is int
             return response["show_sequence"]
 
@@ -130,7 +132,7 @@ def test_show_sequence_counts_explicit_handoffs_only_and_never_replay():
             srv.retain_show(other)
         assert sequence() == 1
         for _ in range(2):
-            with client.websocket_connect(f"/ws?token={srv.token}") as ws:
+            with client.websocket_connect(f"ws://127.0.0.1/ws?token={srv.token}") as ws:
                 ws.receive_json()
                 assert ws.receive_json()["data"]["op"] == "show"
                 assert sequence() == 1
@@ -140,7 +142,7 @@ def test_show_sequence_counts_explicit_handoffs_only_and_never_replay():
         # not a handoff, or the desktop would navigate to Studio on every model edit.
         srv.retain_show(Event("studio", {"op": "show", "path": "same.html", "content": "three", "source": "mirror"}))
         assert sequence() == 2
-        with client.websocket_connect(f"/ws?token={srv.token}") as ws:
+        with client.websocket_connect(f"ws://127.0.0.1/ws?token={srv.token}") as ws:
             ws.receive_json()
             assert ws.receive_json()["data"]["content"] == "three"
             assert sequence() == 2
@@ -497,9 +499,9 @@ async def test_delivery_uses_browser_connections_and_preserves_tool_results(page
     srv._ready = True
     srv._task = SimpleNamespace(done=lambda: False)
     context.set_studio(srv)
-    with TestClient(srv.app) as client:
+    with TestClient(srv.app, base_url="http://127.0.0.1") as client:
         if clients:
-            with client.websocket_connect(f"/ws?token={srv.token}") as ws:
+            with client.websocket_connect(f"ws://127.0.0.1/ws?token={srv.token}") as ws:
                 ws.receive_json()
                 result = await tool.handler({"path": target.name})
                 assert "1 connected Studio browser" in _text(result)
@@ -513,7 +515,7 @@ async def test_delivery_uses_browser_connections_and_preserves_tool_results(page
         assert "opened in Studio" not in _text(result)
         assert len(emitted) == 1 and emitted[0].data["op"] == "show"
         # The captured emit hook need not itself be a real App for replay to work.
-        with client.websocket_connect(f"/ws?token={srv.token}") as ws:
+        with client.websocket_connect(f"ws://127.0.0.1/ws?token={srv.token}") as ws:
             ws.receive_json()
             assert ws.receive_json()["data"]["content"] == "<p>preview</p>"
 
@@ -569,7 +571,7 @@ async def test_real_idle_disconnect_reconnect_and_connected_shutdown(page):
             assert json.loads(await asyncio.wait_for(ws.recv(), 1))["kind"] == "hello"
             assert json.loads(await asyncio.wait_for(ws.recv(), 1))["data"]["content"] == "<p>preview</p>"
             async with httpx.AsyncClient(trust_env=False) as client:
-                state = await client.get(f"http://127.0.0.1:{srv.port}/api/desktop?token={srv.token}")
+                state = await client.get(f"http://127.0.0.1:{srv.port}/api/desktop", headers={"X-Dream-Token": srv.token})
             assert state.json()["clients"] == 1
             await asyncio.wait_for(srv.stop(), 4)
             await asyncio.wait_for(ws.wait_closed(), 1)

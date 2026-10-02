@@ -95,6 +95,9 @@ def capability_report(*, provider_metadata=None, machx_capabilities=None,
     generation = mapping(props.get('default_generation_settings'), 'machx.props.default_generation_settings')
     if 'n_ctx' in generation:
         fact('context_tokens', generation['n_ctx'], 'machx.props.default_generation_settings.n_ctx')
+    if 'total_slots' in props:
+        # DREAM-151: how many requests the running server takes at once (MachX: `ie serve --parallel N`).
+        fact('concurrency', props['total_slots'], 'machx.props.total_slots')
     if 'vision' in props:
         readiness = mapping(props['vision'], 'machx.props.vision')
         if isinstance(props['vision'], dict):

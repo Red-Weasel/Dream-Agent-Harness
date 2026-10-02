@@ -28,7 +28,7 @@ from .protocol import session_address, session_status
 from .onboarding import Onboarding
 
 HERE = Path(__file__).resolve().parent
-WEB_VIEWS = frozenset(('home', 'chat', 'studio', 'projects', 'optimizer', 'skills', 'memory', 'understand', 'settings'))
+WEB_VIEWS = frozenset(('home', 'chat', 'nested', 'studio', 'projects', 'optimizer', 'skills', 'memory', 'sleepwalk', 'understand', 'settings'))
 # The fatal signals faulthandler records (DREAM-086); the window itself stops a session only with /quit, SIGINT or Ctrl+D.
 CRASH_SIGNALS = frozenset((signal.SIGSEGV, signal.SIGBUS, signal.SIGILL, signal.SIGFPE, signal.SIGABRT))
 # "Open in browser" (DREAM-111): the session's page server, a loopback origin with a token path.
@@ -201,12 +201,13 @@ class DreamWindow(Gtk.Window):
         for view, title, icon_name in (
                 ('home', 'Home', 'go-home-symbolic'),
                 ('chat', 'Chat', 'user-available-symbolic'),
+                ('nested', 'Nested Dream', 'view-grid-symbolic'),
                 ('optimizer', 'Prompt Optimizer', 'document-edit-symbolic'),
                 ('studio', 'Studio', 'applications-graphics-symbolic'),
                 ('projects', 'Projects', 'folder-symbolic'),
                 ('skills', 'Skills', 'applications-system-symbolic'),
-                ('memory', 'Memory', 'document-open-recent-symbolic'),
-                ('understand', 'Understand', 'view-grid-symbolic'),
+                ('memory', 'Lucid Control', 'document-open-recent-symbolic'),
+                ('sleepwalk', 'Sleepwalk', 'weather-clear-night-symbolic'),
                 ('terminal', 'Terminal', 'utilities-terminal-symbolic'),
                 ('browser', 'Browser', 'web-browser-symbolic'),
                 ('settings', 'Settings', 'emblem-system-symbolic')):
@@ -224,6 +225,32 @@ class DreamWindow(Gtk.Window):
             item.connect('clicked', lambda _, target=view: self.navigate(target))
             self.sidebar.pack_start(item, False, False, 0)
             self.nav_buttons[view] = item
+        # Below a divider, panels that open beside the chat: switches, not places (owner, 2026-09-28).
+        divider = Gtk.Box()
+        divider.get_style_context().add_class('nav-divider')
+        self.sidebar.pack_start(divider, False, False, 0)
+        self.understand_toggle = Gtk.ToggleButton()
+        for name in ('nav-item', 'nav-toggle'):
+            self.understand_toggle.get_style_context().add_class(name)
+        self.understand_toggle.set_tooltip_text('Understand: show or hide the code map beside the chat')
+        self.understand_toggle.get_accessible().set_name('Understand panel')
+        row = Gtk.Box(spacing=12)
+        row.pack_start(Gtk.Image.new_from_icon_name('view-grid-symbolic', Gtk.IconSize.BUTTON), False, False, 0)
+        caption = label('Understand')
+        caption.set_xalign(0)
+        row.pack_start(caption, True, True, 0)
+        self.nav_labels.append(caption)
+        self.understand_switch = Gtk.Box(valign=Gtk.Align.CENTER)
+        self.understand_switch.get_style_context().add_class('nav-switch')
+        self.understand_knob = Gtk.Box(halign=Gtk.Align.START, valign=Gtk.Align.CENTER)
+        self.understand_knob.get_style_context().add_class('nav-knob')
+        self.understand_switch.pack_start(self.understand_knob, True, True, 0)
+        row.pack_end(self.understand_switch, False, False, 0)
+        self.nav_labels.append(self.understand_switch)
+        self.understand_toggle.add(row)
+        self.syncing_understand = False
+        self.understand_toggle.connect('toggled', self._understand_toggled)
+        self.sidebar.pack_start(self.understand_toggle, False, False, 0)
         body.pack_start(self.sidebar, False, False, 0)
         body.pack_start(right, True, True, 0)
         root.pack_start(body, True, True, 0)
@@ -247,6 +274,7 @@ class DreamWindow(Gtk.Window):
         self.show_all()
         self.onboarding.advanced.hide()
         self.onboarding.reset.hide()
+        self.onboarding.mode_box.hide()
         self.studio_stack.set_visible_child_name('welcome')
         self.workspace.set_visible_child_name('studio')
         self._highlight_navigation('chat')
@@ -285,6 +313,19 @@ class DreamWindow(Gtk.Window):
         popover.show_all()
         popover.popup()
 
+    def _understand_toggled(self, button):
+        on = button.get_active()
+        self.understand_knob.set_halign(Gtk.Align.END if on else Gtk.Align.START)
+        if not self.syncing_understand:
+            self.navigate('understand')
+
+    def _show_understand_state(self, is_open):
+        """The page says whether the panel is open (it can also be closed from inside); the switch follows it."""
+        if self.understand_toggle.get_active() != is_open:
+            self.syncing_understand = True
+            self.understand_toggle.set_active(is_open)
+            self.syncing_understand = False
+
     def navigate(self, view):
         """Select a known surface without launching a task or changing its workspace."""
         if view not in WEB_VIEWS and view not in ('terminal', 'browser'):
@@ -292,6 +333,10 @@ class DreamWindow(Gtk.Window):
         if view in ('terminal', 'browser'):
             self.workspace.set_visible_child_name(view)
             (self.terminal if view == 'terminal' else self.browser.view).grab_focus()
+        elif view == 'understand':
+            # A switch, not a page: the page opens or closes the panel beside the chat and keeps its own view.
+            self.workspace.set_visible_child_name('studio')
+            self._dispatch_view('understand')
         else:
             self.native_view = view
             self.workspace.set_visible_child_name('studio')
@@ -305,13 +350,14 @@ class DreamWindow(Gtk.Window):
         base, token = self.address_info
         uri = urlsplit(self.studio.get_uri() or '')
         trusted = urlsplit(base)
-        return (uri.scheme == trusted.scheme and uri.netloc == trusted.netloc
-                and uri.path == '/' and parse_qs(uri.query).get('token') == [token])
+        return (uri.scheme == trusted.scheme and uri.netloc == trusted.netloc and uri.path == '/'
+                and parse_qs(uri.fragment).get('token') == [token])
 
-    def _dispatch_view(self):
-        if not self._trusted_studio_document() or self.native_view not in WEB_VIEWS:
+    def _dispatch_view(self, view=None):
+        view = view or self.native_view
+        if not self._trusted_studio_document() or view not in WEB_VIEWS:
             return False
-        payload = json.dumps({'view': self.native_view, 'session_id': self.session_id})
+        payload = json.dumps({'view': view, 'session_id': self.session_id})
         self.studio.run_javascript(
             "document.documentElement.classList.add('dream-native');"
             "document.documentElement.dataset.nativeSession = " + json.dumps(self.session_id) + ";"
@@ -324,16 +370,19 @@ class DreamWindow(Gtk.Window):
                 or not self._trusted_studio_document()):
             return
         self.reading_web_view = True
-        self.studio.run_javascript("document.documentElement.dataset.dreamView || ''",
+        self.studio.run_javascript("(document.documentElement.dataset.dreamView || '') + '|' + "
+                                   "(window.DreamUnderstand && window.DreamUnderstand.isOpen() ? '1' : '0')",
                                    None, self._web_view_read, (self.address_info, self.native_view))
 
     def _web_view_read(self, view, result, _data):
         self.reading_web_view = False
         try:
-            name = view.run_javascript_finish(result).get_js_value().to_string()
+            name, _, understand = view.run_javascript_finish(result).get_js_value().to_string().partition('|')
         except GLib.Error:
             # A page replaced during a reconnect has no selection to synchronize.
             return
+        if _data[0] == self.address_info and self._trusted_studio_document():
+            self._show_understand_state(understand == '1')
         if (_data == (self.address_info, self.native_view)
                 and self._trusted_studio_document() and name in WEB_VIEWS):
             self.native_view = name
@@ -363,7 +412,11 @@ class DreamWindow(Gtk.Window):
 
     def child_env(self):
         env = dict(os.environ)
-        env.update(DREAM_GUI='1', DREAM_GUI_OPEN='0', DREAM_DESKTOP_SESSION_FILE=str(self.discovery),
+        # browser.sandbox_environment() set these for this process's own web views (DREAM-187); a session
+        # and whatever it starts are not WebKit and do not inherit them.
+        env.pop('WEBKIT_FORCE_SANDBOX', None)
+        env.pop('GST_REGISTRY', None)
+        env.update(DREAM_GUI='1', DREAM_DESKTOP_SESSION_FILE=str(self.discovery),
                    TERM='xterm-256color', COLORTERM='truecolor', PYTHONUNBUFFERED='1')
         env['PYTHONPATH'] = os.pathsep.join(filter(None, [str(HERE.parents[1]), env.get('PYTHONPATH')]))
         return env
@@ -577,7 +630,9 @@ class DreamWindow(Gtk.Window):
         self.last_connect = time.monotonic()
         self.studio_failed = False
         self.studio_stack.set_visible_child_name('web')
-        self.studio.load_uri(f'{base}/?token={quote(token)}&companion=1')
+        # The token rides in the fragment (DREAM-187); this view has no address bar, and the
+        # page keeps it there so _trusted_studio_document can recognise its own document.
+        self.studio.load_uri(f'{base}/?companion=1#token={quote(token)}')
 
     def _studio_policy(self, _view, decision, kind):
         if kind in (WebKit2.PolicyDecisionType.NAVIGATION_ACTION, WebKit2.PolicyDecisionType.NEW_WINDOW_ACTION):
@@ -724,13 +779,26 @@ class DreamWindow(Gtk.Window):
         dialog.format_secondary_text('Dream will finish its current turn and save the conversation before this window '
                                      'closes. Saving to long-term memory also writes a summary and the memories worth '
                                      'keeping; that model pass can take several minutes.')
+        # DREAM-185: the owner can label the memory this session saves ("09.28.26 - rocket animation - day 2").
+        box = dialog.get_content_area()
+        prompt = Gtk.Label(label='Label this memory (optional)', xalign=0)
+        prompt.get_style_context().add_class('muted')
+        label_entry = Gtk.Entry(placeholder_text='e.g. 09.28.26 - rocket animation - day 2', max_length=120,
+                                activates_default=True)
+        box.pack_start(prompt, False, False, 0)
+        box.pack_start(label_entry, False, False, 0)
+        prompt.show()
+        label_entry.show()
         dialog.add_buttons('Keep working', Gtk.ResponseType.CANCEL,
                            'Close without saving to memory', Gtk.ResponseType.REJECT,
                            'Save to memory and close', Gtk.ResponseType.ACCEPT)
+        dialog.set_default_response(Gtk.ResponseType.ACCEPT)
         response = dialog.run()
+        memory_label = ' '.join(label_entry.get_text().split())
         dialog.destroy()
         if response in (Gtk.ResponseType.ACCEPT, Gtk.ResponseType.REJECT):
-            quit_line = '/quit save' if response == Gtk.ResponseType.ACCEPT else '/quit nosave'
+            quit_line = (('/quit save ' + memory_label).strip() if response == Gtk.ResponseType.ACCEPT
+                         else '/quit nosave')
             self.closing = True
             if self.address_info:
                 base, token = self.address_info
@@ -777,6 +845,7 @@ def main():
     args = parser.parse_args()
     if not Gtk.init_check([])[0]:
         parser.exit(1, 'Dream Desktop cannot connect to the graphical display. Run it from your desktop terminal.\n')
+    Gdk.set_program_class('Dream')   # dialogs too carry the WM_CLASS that dream/computer.py refuses to drive
     cli_args = args.cli_args[1:] if args.cli_args[:1] == ['--'] else args.cli_args
     crash_log_arm_window()   # the window's own exit leaves its stacks on stderr (the journal, from the desktop menu)
     DreamWindow(args.python, args.cwd, cli_args)

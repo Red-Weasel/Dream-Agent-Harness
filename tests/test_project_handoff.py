@@ -70,7 +70,7 @@ async def test_handoff_route_requires_auth_and_does_not_save(archive):
     library, project, store = archive
     server = StudioServer(EventBus())
     url = f"/api/projects/{project['id']}/sessions/session-a/handoff"
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url='http://test') as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url='http://127.0.0.1') as client:
         assert (await client.get(url)).status_code == 401
         client.headers['X-Dream-Token'] = server.token
         response = await client.get(url)

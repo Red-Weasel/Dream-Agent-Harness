@@ -1,0 +1,12 @@
+{
+  "format": "dream-skill/v1",
+  "name": "contract-review",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "ask_user_input",
+    "library_search",
+    "read_file",
+    "write_file"
+  ]
+}

@@ -37,6 +37,10 @@ def _clean(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(config, "MAX_OUTPUT_TOKENS_OVERRIDE", None, raising=False)
     monkeypatch.setattr(config, "MAX_OUTPUT_TOKENS", 131072)
+    # `dream settings check` and /settings check ask the local engine for role model names (DREAM-148): never the
+    # owner's engine port from a test.
+    from dream.local import machx
+    monkeypatch.setattr(machx, "BASE_URL", "http://127.0.0.1:1/v1")
 
 
 def _write(data):
@@ -302,7 +306,8 @@ def test_set_writes_through_the_runtime_settings_writer_and_keeps_other_sections
 @pytest.mark.parametrize("argv,needle", [
     (("set", "roles.verifier.provider", "machx"), "roles.verifier.model"),     # a model first
     (("set", "roles.critic.model", "x"), "roles.critic"),                      # not wired in S1
-    (("set", "roles.main.model", "x"), "roles.main"),
+    (("set", "roles.main.model", "x"), None),                                  # wired in S3 (DREAM-144)
+    (("set", "roles.main.provider", "openai"), "roles.main.provider"),         # main is the local endpoint's
     (("set", "roles.subagents.researcher.provider", "nosuch"), "nosuch"),
     (("set", "roles.subagents.researcher.model", "m"), None),                  # fine: control case
     (("set", "roles.verifier.provider", "codex"), "codex"),                   # a CLI cannot take the request
@@ -359,13 +364,14 @@ def test_check(capsys, monkeypatch):
 
 
 def test_check_warns_about_unwired_roles_and_roles_this_backend_ignores(capsys):
-    _write({"roles": {"critic": {"model": "x"}, "main": {"provider": "machx", "model": "m"},
+    _write({"roles": {"summarizer": {"model": "x"}, "main": {"provider": "machx", "model": "m"},
                       "subagents": {"default": {"model": "small-model"}}}})
     code, out = _cli(capsys, "check", "--provider", "xai")
     report = json.loads(out)
     assert code == 0 and report["ok"] is True
     said = " | ".join(report["warnings"])
-    assert "roles.critic" in said and "roles.main (in file)" in said
+    assert "roles.summarizer" in said and "roles.main (in file)" not in said   # main is applied since S3 (DREAM-144)
+    assert "roles.main: not applied on this backend (xai)" in said
     assert "roles.subagents.default: not applied on this backend (xai)" in said
     code, out = _cli(capsys, "check")
     assert "roles.subagents.default" not in " | ".join(json.loads(out)["warnings"])     # machx applies it
@@ -507,8 +513,12 @@ async def test_the_connect_note_reaches_the_owner_at_the_first_request(monkeypat
 def test_roles_are_marked_not_applied_on_backends_that_do_not_read_them(provider):
     _write({"roles": {"verifier": {"model": "checker-model"}, "subagents": {"default": {"model": "small-model"}}}})
     rows = settings.effective(provider=provider)
-    for key in ("roles.verifier", "roles.subagents.default"):
-        assert rows[key].source == f"not applied on this backend ({provider})", key
+    assert rows["roles.verifier"].source == f"not applied on this backend ({provider})"
+    # S4 (DREAM-145): the Claude SDK applies a sub-agent role that names anthropic, so on anthropic a provider-less
+    # one says why it is not applied; the CLI backends still apply none.
+    expected = (f"not applied on this backend ({provider})" + (
+        ": a role without a provider applies to machx only" if provider == "anthropic" else ""))
+    assert rows["roles.subagents.default"].source == expected
     assert settings.effective(provider="machx")["roles.verifier"].source == "global"
 
 
@@ -527,7 +537,8 @@ def test_tui_settings_marks_roles_on_a_backend_that_does_not_apply_them():
 # --- gate round 1, finding 6: an unwired role in the file is a warning, not a failed start ---------------
 
 async def test_an_unwired_role_does_not_stop_connect_and_is_said(monkeypatch):
-    _write({"roles": {"main": {"provider": "machx", "model": "mimo"}, "verifier": {"model": "checker-model"}},
+    _write({"roles": {"summarizer": {"provider": "machx", "model": "mimo"}, "main": {"model": "mimo"},
+                      "verifier": {"model": "checker-model"}},
             "behaviour": {"vitals": False}})
     b = backend(FakeEngine(lead=[{"text": "ok"}]), model=LEAD)
     engine = b._client.engine
@@ -541,11 +552,12 @@ async def test_an_unwired_role_does_not_stop_connect_and_is_said(monkeypatch):
     assert b.vitals is False                                  # the rest of the file still applies
     assert b._role_model("verifier") == "checker-model"
     events = await turn(b, "hello")
-    assert any("roles.main is not a role this version applies; it is ignored" in str(e.data)
+    assert any("roles.summarizer is not a role this version applies; it is ignored" in str(e.data)
                for e in events if e.kind == "system")
+    assert not any("roles.main" in str(e.data) for e in events if e.kind == "system")   # applied since S3
     rows = settings.effective()
-    assert rows["roles.main (in file)"].source.startswith("not applied on this backend")
-    assert rows["roles.main"].source == "default"
+    assert rows["roles.summarizer"].source.startswith("not applied on this backend")
+    assert rows["roles.main"] == ({"model": "mimo"}, "global")
 
 
 async def test_a_malformed_role_is_a_note_at_connect_and_fails_only_that_run(monkeypatch):

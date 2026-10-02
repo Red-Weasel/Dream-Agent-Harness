@@ -3,6 +3,7 @@ import asyncio
 import os
 import shlex
 import socket
+import subprocess
 import sys
 import time
 import uuid
@@ -375,6 +376,23 @@ async def real_capability(scope):
     if not capability.available:
         pytest.skip("actual bubblewrap unavailable: " + capability.reason)
     return capability
+
+
+@pytest.mark.asyncio
+async def test_dream_verifies_its_sandbox_wherever_plain_bubblewrap_works(tmp_path):
+    """The real-sandbox tests, here and in other files, skip when Dream's probe reports its sandbox unavailable. That is
+    right on a host whose bubblewrap cannot make namespaces (GitHub's ubuntu-24.04 runner: AppArmor), but a broken
+    probe would skip them all as well. This skip depends on a plain bubblewrap run with no Dream code: where that
+    works, Dream's probe must verify its sandbox (DREAM-150)."""
+    bwrap = next((p for p in ("/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap") if Path(p).is_file()), None)
+    if bwrap is None:
+        pytest.skip("bubblewrap is not installed")
+    plain = subprocess.run([bwrap, "--unshare-user", "--unshare-pid", "--unshare-net", "--ro-bind", "/", "/",
+                            "/bin/true"], capture_output=True, text=True, timeout=10)
+    if plain.returncode != 0:
+        pytest.skip("bubblewrap cannot make namespaces on this host: " + plain.stderr.strip()[:300])
+    capability = await ex.probe_sandbox(ex.ExecutionScope(tmp_path))
+    assert capability.available, f"plain bubblewrap works here, Dream's sandbox probe does not: {capability.reason}"
 
 
 @pytest.mark.asyncio

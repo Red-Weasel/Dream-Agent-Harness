@@ -1,0 +1,14 @@
+{
+  "format": "dream-skill/v1",
+  "name": "legal-research-memo",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "ask_user_input",
+    "web_search",
+    "browse",
+    "note",
+    "write_file",
+    "library_create"
+  ]
+}

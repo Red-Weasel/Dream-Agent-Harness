@@ -48,7 +48,7 @@ def _plan(updated_at):
 
 
 def _url(url, layout):
-    return url if layout == "companion" else url.replace("&companion=1", "")
+    return url if layout == "companion" else url.replace("?companion=1", "")
 
 
 # --- #88: a strip left of the prompt box, the phases on click, replayed after a reload -----------------

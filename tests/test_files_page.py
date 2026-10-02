@@ -28,7 +28,7 @@ def ws(tmp_path):
 
 async def test_the_tree_lists_reads_and_refuses_to_leave_the_folder(ws):
     srv, root = ws
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://test',
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://127.0.0.1',
                                  headers={'X-Dream-Token': srv.token}) as client:
         top = (await client.get('/api/files?root=workspace')).json()
         names = {e['name']: e['type'] for e in top['entries']}
@@ -59,7 +59,7 @@ async def test_the_files_page_opens_a_folder_and_shows_a_file(ws, monkeypatch):
             page.set_default_timeout(4000)
             errors = []
             page.on('pageerror', lambda e: errors.append(str(e)))
-            await page.goto(url + '&companion=1')
+            await page.goto(url.replace('/#', '/?companion=1#'))
             await page.locator('#dream-nav-files').click()
             await expect(page.locator('#dream-files-page')).to_be_visible()
             await expect(page.locator('#dream-files-page .file-folder summary')).to_have_text('src')

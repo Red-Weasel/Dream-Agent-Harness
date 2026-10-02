@@ -1,5 +1,6 @@
 """MiMo-V2.6 (model_type mimo_v2) is a MachX directory checkpoint like DeepSeek-V4.1: offered in the picker, flat config
-metadata, one request at a time, and the disk-backed streaming preflight (engine docs/mimo26/00_PORT_PLAN.md P3b)."""
+metadata, lanes since the engine's P4 B4 (DREAM-151; it was one request at a time), and the disk-backed streaming
+preflight (engine docs/mimo26/00_PORT_PLAN.md P3b)."""
 import json
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -82,10 +83,14 @@ def test_mimo_uses_every_card(hardware):
         startup.launch_preflight(178, 1, CAPS)
 
 
-def test_mimo_parallel_is_one():
+def test_mimo_parallel_takes_lanes():
+    """DREAM-151: the engine serves MiMo in lanes (P4 B4, `ie serve --parallel N`), so Dream no longer caps it at 1;
+    DeepSeek-V4.1 keeps the cap (test_v41_loading)."""
     caps = {'architecture': 'mimo_v2', 'memory_planner': 'streaming',
             'load': ['parallel'], 'defaults': {'parallel': 1}, 'features': {}}
     parallel = [c for c in settings.available_controls(caps) if c.name == 'parallel']
-    assert parallel and parallel[0].maximum == 1
-    with pytest.raises(ValueError, match='parallel = 1'):
-        settings.validate_options({'parallel': 2}, architecture='mimo_v2')
+    assert parallel and parallel[0].maximum == 16 and parallel[0].default == 1     # DREAM-201: 16, was 4
+    assert settings.validate_options({'parallel': 2}, architecture='mimo_v2') == {'parallel': 2}
+    assert settings.validate_options({'parallel': 16}, architecture='mimo_v2') == {'parallel': 16}
+    with pytest.raises(ValueError):
+        settings.validate_options({'parallel': 17}, architecture='mimo_v2')

@@ -1,0 +1,12 @@
+{
+  "format": "dream-skill/v1",
+  "name": "api-design",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "read_file",
+    "grep",
+    "run_bash",
+    "write_file"
+  ]
+}

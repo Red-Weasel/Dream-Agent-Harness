@@ -119,9 +119,8 @@ def routes(server):
             return JSONResponse({'error': str(exc)}, status_code=400)
 
     async def asset(request):
-        refused = guard(request)
-        if refused is not None:
-            return refused
+        if not server._authorized(request, query=True):   # a link carries no header
+            return JSONResponse({'error': 'unauthorized'}, status_code=401)
         try:
             svc = service(); record = svc.store.get_asset(request.path_params['asset_id'])
             # SVG/HTML remain downloads, never executable on the Studio origin.

@@ -46,7 +46,7 @@ async def test_the_report_route_needs_the_token_and_the_origin_and_validates(tmp
     srv = StudioServer(EventBus(), session={"workspace": str(tmp_path)})
     good = {"path": "page.html", "digest": "0123abcd", "status": "loaded", "phase": "load",
             "errors": ["error: boom"] + ["x" * 900] * 30, "webgl_lost": 0}
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://test") as c:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://127.0.0.1") as c:
         assert (await c.post("/api/studio_report", json=good)).status_code == 401
         head = {"X-Dream-Token": srv.token}
         r = await c.post("/api/studio_report", json=good, headers={**head, "Origin": "http://evil.example"})
@@ -59,7 +59,7 @@ async def test_the_report_route_needs_the_token_and_the_origin_and_validates(tmp
         huge = b'{"path": "page.html", "pad": "' + b"x" * 70_000 + b'"}'
         assert (await c.post("/api/studio_report", content=huge, headers=head)).status_code == 413
         assert srv.report_mark() == 0
-        r = await c.post("/api/studio_report", json=good, headers={**head, "Origin": "http://test"})
+        r = await c.post("/api/studio_report", json=good, headers={**head, "Origin": "http://127.0.0.1"})
         assert r.status_code == 200 and r.json() == {"ok": True}
     (rep,) = srv.reports_since(0)
     assert rep["seq"] == 1 and rep["path"] == "page.html" and rep["digest"] == "0123abcd"
@@ -295,7 +295,7 @@ async def test_the_owners_real_pane_reports_what_only_it_shows(tmp_path, monkeyp
             browser = await p.chromium.launch(headless=True, args=["--disable-gpu"])
             page = await browser.new_page(viewport={"width": 2554, "height": 1338})
             page.set_default_timeout(8000)
-            await page.goto(url + "&companion=1", wait_until="load")
+            await page.goto(url.replace("/#", "/?companion=1#"), wait_until="load")
             await page.wait_for_function("document.getElementById('stat').textContent !== 'connecting'")
             for _ in range(50):
                 if srv.client_count:

@@ -28,7 +28,7 @@ def test_the_route_serves_files_and_zips_folders_inside_the_workspace(tmp_path):
     (tmp_path / "site" / "node_modules" / "big.js").write_text("nope")
     (tmp_path.parent / "secret.txt").write_text("no")
     srv = StudioServer(EventBus(), session={"workspace": str(tmp_path)})
-    with TestClient(srv.app) as c:
+    with TestClient(srv.app, base_url="http://127.0.0.1") as c:
         assert c.get("/api/download?path=report.pdf").status_code == 401
         r = c.get(f"/api/download?path=report.pdf&token={srv.token}")
         assert r.status_code == 200 and r.content == b"%PDF-fake"
@@ -51,7 +51,7 @@ def test_a_name_too_long_for_the_filesystem_is_a_400_like_any_bad_path(tmp_path)
     srv = StudioServer(EventBus(), session={"workspace": str(tmp_path)})
     long_name, long_path = "a" * 296 + ".pdf", "/".join(["d" * 249] * 20) + "x"
     assert len(long_name.encode()) == 300 and len(long_path.encode()) == 5000
-    with TestClient(srv.app, raise_server_exceptions=False) as c:
+    with TestClient(srv.app, base_url="http://127.0.0.1", raise_server_exceptions=False) as c:
         usual = c.get("/api/download", params={"path": "missing.txt", "token": srv.token})
         assert usual.status_code == 400
         for bad in (long_name, long_path):

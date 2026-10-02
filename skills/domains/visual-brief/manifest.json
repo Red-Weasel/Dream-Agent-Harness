@@ -1,0 +1,15 @@
+{
+  "format": "dream-skill/v1",
+  "name": "visual-brief",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "see",
+    "media_read",
+    "media_create",
+    "show_html",
+    "visual_check",
+    "measure_image",
+    "write_file"
+  ]
+}

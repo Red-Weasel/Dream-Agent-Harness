@@ -3,6 +3,8 @@
 A skill that ships scripts -- the Understand-Anything plugin's node/python helpers -- runs them with the shell like any
 other command, the way Claude Code runs them with Bash. run_bash's sandbox holds only the workspace, so these folders are
 added to it READ-ONLY: a script can read its own code and its runtime, and can still write only inside the workspace.
+Dream's own skills folder is one of them (`$DREAM_SKILLS`, the owner's decision of 2026-10-01): a skill copies or runs
+its bundled files (understand's glue.py) with the shell, whole.
 """
 
 from __future__ import annotations
@@ -60,12 +62,20 @@ def _usable(root: Path) -> bool:
     return not (root in _NEVER or root == home or any(root == t or root.is_relative_to(t) for t in _SYSTEM_TREES))
 
 
+def _dream_skill_roots() -> tuple[Path, ...]:
+    """Dream's own skills folders that exist: the checkout's skills/ (or the installed package's)."""
+    from dream import config
+    found = (config.ROOT / "skills", config.PKG_DIR.parent / "skills", config.PKG_DIR / "resources" / "skills")
+    return tuple(dict.fromkeys(p.resolve() for p in found if p.is_dir()))
+
+
 def script_roots() -> tuple[Path, ...]:
     """The read-only folders run_bash's sandbox adds: the Understand-Anything clone (its skills import
-    ../../packages/core) and node's install prefix. A root the sandbox would refuse is dropped rather than passed on."""
+    ../../packages/core), Dream's own skills folder and node's install prefix. A root the sandbox would refuse is dropped rather than passed on."""
     roots: list[Path] = []
     if UA_SKILLS.is_dir():
         roots.append(UA_ROOT.resolve())
+    roots.extend(_dream_skill_roots())
     prefix = _node_prefix()
     if prefix is not None:
         roots.append(prefix)
@@ -79,6 +89,9 @@ def script_env() -> dict[str, str]:
     roots = script_roots()
     if UA_SKILLS.is_dir() and UA_ROOT.resolve() in roots:
         env["UA_SKILLS"] = str(UA_SKILLS.resolve())
+    dream_skills = [r for r in _dream_skill_roots() if r in roots]
+    if dream_skills:
+        env["DREAM_SKILLS"] = str(dream_skills[0])
     prefix = _node_prefix()
     if prefix is not None and prefix in roots:
         env["PATH"] = f"{prefix / 'bin'}:{os.environ.get('PATH') or '/usr/local/bin:/usr/bin:/bin'}"

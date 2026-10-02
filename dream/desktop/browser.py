@@ -1,7 +1,9 @@
 """Native browser controls. Web content never receives a Python bridge."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import platform
 from urllib.parse import urlsplit
 
 import gi
@@ -27,7 +29,26 @@ def label(text: str, style: str = '', xalign: float = 0) -> Gtk.Label:
     return widget
 
 
+def sandbox_environment():
+    # WebKit honours this over set_sandbox_enabled and WEBKIT_FORCE_SANDBOX, silently: the web process would
+    # run unconfined. Rather than that, no web view opens.
+    if 'WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS' in os.environ:
+        raise RuntimeError('WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS is set, which would run web content outside '
+                           'its sandbox; Dream opens no web view. Unset it and start Dream again.')
+    # WebKit reads both as it launches a web process. WEBKIT_FORCE_SANDBOX also reaches the pools Dream
+    # never creates itself (the Web Inspector's), which set_sandbox_enabled on Dream's contexts does not.
+    # bubblewrap binds the PARENT of GST_REGISTRY read-write; the default is the gstreamer-1.0 directory,
+    # whose parent is all of ~/.cache (sign-in tokens, caches other programs later execute). Naming the
+    # registry file itself keeps the bind to that one directory; the name is GStreamer's own default. An
+    # inherited value is not kept: one straight under a broad directory would bind that directory instead.
+    os.environ['WEBKIT_FORCE_SANDBOX'] = '1'
+    registry_dir = Path(GLib.get_user_cache_dir()) / 'gstreamer-1.0'
+    registry_dir.mkdir(parents=True, exist_ok=True)
+    os.environ['GST_REGISTRY'] = str(registry_dir / f'registry.{platform.machine()}.bin')
+
+
 def webview(*, local_only: bool = False, profile: Path | None = None) -> WebKit2.WebView:
+    sandbox_environment()
     # Separate ephemeral context per view. In particular, browsing sites cannot
     # inherit the Studio origin's state or script-message capabilities.
     if profile is not None and not local_only:
@@ -39,11 +60,15 @@ def webview(*, local_only: bool = False, profile: Path | None = None) -> WebKit2
             str(profile / 'cookies.sqlite'), WebKit2.CookiePersistentStorage.SQLITE)
     else:
         context = WebKit2.WebContext.new_ephemeral()
+    # Web processes run under bubblewrap. The 4.1 API leaves this off, and it must be set
+    # before the first web process exists.
+    context.set_sandbox_enabled(True)
     if local_only:
         context.get_website_data_manager().set_network_proxy_settings(WebKit2.NetworkProxyMode.NO_PROXY, None)
     view = WebKit2.WebView.new_with_context(context)
     settings = view.get_settings()
-    settings.set_enable_developer_extras(True)
+    # DevTools for the Studio view only; a browsing view has no use for the surface.
+    settings.set_enable_developer_extras(local_only)
     settings.set_allow_file_access_from_file_urls(False)
     settings.set_allow_universal_access_from_file_urls(False)
     view.connect('permission-request', lambda _view, request: (request.deny(), True)[1])
@@ -212,9 +237,10 @@ class Browser(Gtk.Box):
         return False
 
     def _popup(self, _view, action):
-        # Keep requested links inside this workspace; no privileged popup view.
-        uri = action.get_request().get_uri()
-        GLib.idle_add(self.navigate, uri)
+        # Keep requested links inside this workspace; no privileged popup view, and a page
+        # cannot steer the tab on its own.
+        if action.is_user_gesture():
+            GLib.idle_add(self.navigate, action.get_request().get_uri())
         return None
 
     def _progress(self, *_):

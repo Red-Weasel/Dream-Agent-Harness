@@ -1,0 +1,11 @@
+{
+  "format": "dream-skill/v1",
+  "name": "story-development",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "ask_user_input",
+    "write_file",
+    "remember"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "format": "dream-skill/v1",
+  "name": "pipeline-review",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "read_file",
+    "run_bash",
+    "chart_display_v0",
+    "write_file"
+  ]
+}

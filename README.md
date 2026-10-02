@@ -54,6 +54,82 @@ terminal, streaming chat, browser, Studio previews, tools, and optional memory.
   custom tools. Vision requires an image-capable model and a compatible adapter;
   an image path alone is not visual evidence.
 
+## What's new in v0.2.0
+
+- **Nested Dream.** A new sidebar tab shows one session as the main agent and its
+  sub-agents: the main agent's conversation, goal and plan on one side, and one
+  card per worker on the other, with its model, context use, tool calls and text
+  as it streams. Pause, resume, stop or message a single worker; **Pause all**
+  holds every worker Dream runs. Permission requests collect in a **Needs you**
+  list, and **All agents** opens every worker's retained transcript.
+  **Agents 4 / 8 / 12 / 16** sets how many agents one reply may run, the main
+  agent included (8 by default). The tab runs nothing of its own: it is rebuilt
+  from the session's events, so a reload shows the same page.
+- **Sub-agents decode together on a local engine.** When MachX serves a model in
+  lanes, the `task` calls of one reply run at the same time, up to the lane
+  count, and the rest queue. `engine.parallel` (1 to 16) and `engine.slot_ctx`
+  set the lanes for MiMo-V2.6, DeepSeek-V4.1, Qwen3.8-Flash, the 35B-A3B class
+  and Qwen3.8-27B. The default stays one lane. Each extra lane reserves VRAM,
+  and a load that does not fit is refused before anything runs.
+- **Claude-led sessions in Nested.** The sub-agents a Claude session runs appear
+  as read-only cards. With a local engine running, Claude can also hand sub-tasks
+  to the local model through `delegate_local`: those helpers are full cards with
+  Stop, Pause and Message, and their usage is metered separately.
+- **Settings in one view.** `dream settings`, `/settings` and **Controls →
+  Settings** list every setting with its value and its source (environment,
+  session, project, saved or default). Roles choose the model for sub-agents, the
+  verifier, the filer, the critic, the evaluator and the reviewer. A project may
+  carry `.dream/settings.json`. A refused value names its key and writes nothing;
+  an unusable settings file is reported and never rewritten.
+- **Context management.** Four settings decide what happens as a context fills.
+  The main agent compacts, writes a Handoff and carries on, or stops with a
+  summary. A sub-agent returns its report so far, continues in a fresh context,
+  or compacts. One trigger (80% by default) applies to every window size, and
+  the model is warned before it. Fresh start is now called **Handoff**.
+- **Understand.** The Understand panel is a sidebar switch that sits beside Chat
+  or Nested Dream. The skill maps a project once, then re-analyses only the files
+  that changed, and runs its scripts in Dream's sandbox like any other skill.
+- **Security hardening.** The model's `browse` tool and the controlled browser
+  reach only the public internet: loopback, private and link-local destinations
+  are refused before any connection, and page content returns marked as untrusted
+  data. `browse` opens a local address only when you typed that URL yourself, and
+  then sealed off from the internet. On Linux the browsing browser runs under
+  bubblewrap in its own network namespace, with no unsandboxed fallback. The
+  computer tool refuses Dream's own windows, treats terminals as view-only and
+  re-checks its target before every input. The Studio server checks each
+  request's host and origin, and desktop web content runs sandboxed.
+- **Sleepwalk automations.** Written instructions run on a schedule with a
+  read-only, isolated runner and keep every result. Optional connectors read
+  Gmail and Google Calendar and notify through email or Telegram; background runs
+  use a systemd user timer. See the [Sleepwalk guide](dream/sleepwalk/README.md).
+- **Skill presets and domain skills.** The Skills page is a three-column
+  workspace. A preset chooses which skills, plugins, MCP servers and tool groups
+  a new session loads. Seven built-in presets draw on 34 new domain skills.
+- **Lucid Control and response styles.** Lucid Control replaces the Memory tab:
+  your instructions, the project's `DREAM.md` and `PLAN.md`, the memories and the
+  response style, edited in place with version-checked saves.
+- **Local model loading.** The load screen offers each model's recommended
+  sampling per mode. Dream can front several models on one endpoint through the
+  engine's supervisor, and gives the engine 120 seconds to stop in order.
+- **Install.** `uv sync --locked --extra dev` works in a fresh clone again, and
+  every place Dream reports its version reads one value.
+
+Known limits of this release:
+
+- On a local engine each sub-agent has its own, smaller context: the engine's
+  lane size, 32,768 tokens by default (`engine.slot_ctx` changes it). Its card
+  shows the main agent's window instead, so the card understates how full the
+  worker is.
+- A worker that uses its whole reply budget while thinking returns no output.
+  Its card ends as **Outcome unknown**; ask the main agent to run it again.
+- **Stop** on a worker is not instant on a local engine: the engine is asked to
+  stop that worker at its next round boundary.
+- The Understand skill maps with one agent in this release. It does not spread
+  the analysis over sub-agents.
+- Workers share the session's one workspace, so parallel coders need disjoint
+  files. The coding CLIs report no worker activity, and the **Workflows** tab in
+  Nested Dream is an empty state.
+
 ## Get started
 
 The source installation uses **Python 3.12+** and **uv**. The native desktop targets
@@ -104,6 +180,10 @@ uv run --locked dream local        # or pick MachX in `dream desktop`
 Dream starts and stops `ie serve` itself (model picker, GPUs, context). For an engine
 checkout elsewhere, set `DREAM_MACHX_DIR=/path/to/machx-inference-engine`. Model files
 are not included; see the engine's README for supported models and their memory needs.
+
+The matching engine release for Dream v0.2.0 is **MachX v0.2.6**. Sub-agents
+decode together through the engine's lanes: `dream settings set engine.parallel 4`
+asks for four, from the next time Dream starts the engine.
 
 ## The workspace
 
@@ -179,12 +259,13 @@ extension choices. Keep runtime backups private and inspect outgoing Git content
   their own installation and capability checks. Missing NVIDIA tooling does not
   establish that no GPU is available.
 
-The latest local CPU qualification passed **5,179 tests**, with **45 skipped**,
-one owner-memory-dependent test deselected, and **7 warnings**. A clean locked
-installation and wheel privacy/layout checks also passed. Separate software
-GTK/WebKit fixtures checked video playback, reconnect, Stop and Prompt Optimizer
-drafts. These are scoped engineering checks, not a claim of universal model
-compatibility or benchmark superiority.
+The latest local CPU qualification of this tree (October 2, 2026, without the
+Blender files) passed **9,296 tests**, with **164 skipped** and **24 warnings**,
+in 25 minutes; three more tests passed only on a re-run (a Chromium crash at
+launch, a timing race under load, and a temp-folder check), and the three
+benchmark tests that name files outside this tree are skipped. These are scoped
+engineering checks, not a claim of universal model compatibility or benchmark
+superiority.
 [Development and validation](docs/public/development.md).
 
 ## Support

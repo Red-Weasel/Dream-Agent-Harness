@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server
 
-from .. import config, extensions
+from .. import __version__, config, extensions, presets
 from ..core import policy
 from . import (
     checkpoint_tools,
@@ -231,7 +231,9 @@ def build(
     # Provenance, not the name string, decides a custom tool's capability — declare
     # this boot's set before anything (the exempt list below included) classifies it.
     policy.declare_custom_tools(t.name for t in custom)
-    tools = [extensions.guard_tool(t) for t in extensions.filter_tools(_BASE_TOOLS + custom + list(extra_tools or []))]
+    catalog = extensions.filter_tools(_BASE_TOOLS + custom + list(extra_tools or []))
+    preset = presets.session()      # DREAM-170: the session's skill preset narrows the set; Default keeps it whole
+    tools = [extensions.guard_tool(t) for t in catalog if presets.keeps_tool(t, preset)]
     if wrap_tool is not None:
         from functools import update_wrapper
 
@@ -245,7 +247,7 @@ def build(
                     setattr(wrapped, attr, getattr(tool, attr))
             wrapped_tools.append(wrapped)
         tools = wrapped_tools
-    server = create_sdk_mcp_server(config.MCP_SERVER_NAME, config.__dict__.get("VERSION", "0.1.0"), tools)
+    server = create_sdk_mcp_server(config.MCP_SERVER_NAME, config.__dict__.get("VERSION", __version__), tools)
     # Tools the Claude backend may pre-approve (skip the permission callback):
     # only read-only + own-mind memory tools. Mutating tools and every self-built
     # custom tool are deliberately excluded so the mode policy still gates them.
@@ -263,4 +265,5 @@ def build(
         "custom_names": [t.name for t in custom],
         "custom_count": len(custom),
         "warnings": warnings,
+        "catalog": catalog,  # before the preset: what the Studio's preset cost line counts from
     }

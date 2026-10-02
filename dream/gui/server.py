@@ -8,7 +8,11 @@ the GUI is a second VIEW, never a second Dream.
 Security first, because this is not an ordinary web app: the session on the
 other end of it can run shell commands. So the socket binds loopback only (not
 configurable), and every entry point demands a per-session token. Loopback
-alone would still leave it open to any other process on the machine.
+alone would still leave it open to any other process on the machine. The
+browser-side boundary (DREAM-187) then keeps a leaked token unusable from a web
+page: Host must name this server, a write or a WebSocket must come from this
+page's origin, a write never takes the token from the URL, a link's token counts
+only from this page, and no HTML this origin serves may be framed.
 """
 
 from __future__ import annotations
@@ -27,11 +31,13 @@ from typing import Any, Callable
 from anyio import CancelScope
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware import Middleware
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from ..core import sandbox_net
 from ..core.backends.base import Event
 from .bus import EventBus
 from .desktop_bridge import DesktopDiscovery
@@ -65,6 +71,93 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_jsonable(v) for v in value]
     return repr(value)
+
+
+# The browser-side boundary (DREAM-187). Every request must name this server itself
+# in Host: a DNS-rebinding page arrives under its own name. A state-changing request
+# or a WebSocket handshake must come from this page's origin when the browser says
+# where it came from (Origin, Sec-Fetch-Site). A request with neither is a
+# non-browser client -- a browser always sends Origin on a POST and on a WebSocket --
+# which the token alone already gates.
+LOOPBACK_NAMES = ("127.0.0.1", "localhost", "[::1]")
+READ_METHODS = frozenset(("GET", "HEAD", "OPTIONS"))
+
+
+def _this_server(scope: dict) -> set[str]:
+    """The Host values that name this server: the loopback names with the port the
+    connection arrived on, which is the bound port. A client leaves the default port
+    out of Host, and a test transport leaves it out of the scope."""
+    _, port = scope.get("server") or ("", None)
+    port = port or 80
+    names = {f"{name}:{port}" for name in LOOPBACK_NAMES}
+    return names | set(LOOPBACK_NAMES) if port == 80 else names
+
+
+def from_another_page(headers: Any, here: set[str]) -> str | None:
+    """Why the browser's own account of where a request came from (Origin,
+    Sec-Fetch-Site) rules it out, or None. A request with neither is a non-browser
+    client, which the token alone gates."""
+    origin = headers.get("origin")
+    if origin is not None and not (origin.startswith("http://") and origin[len("http://"):] in here):
+        return "origin does not match this Studio session"
+    if headers.get("sec-fetch-site", "same-origin") not in ("same-origin", "none"):
+        return "a cross-site request cannot drive this Studio session"
+    return None
+
+
+def boundary_refusal(scope: dict) -> str | None:
+    """Why a request may not reach a route, or None."""
+    headers: dict[str, str] = {}
+    for key, value in scope.get("headers", ()):
+        headers.setdefault(key.decode("latin-1").lower(), value.decode("latin-1"))
+    here = _this_server(scope)
+    if headers.get("host", "") not in here:
+        return "this Studio answers only at its own loopback address"
+    if scope["type"] == "websocket" or scope.get("method", "GET") not in READ_METHODS:
+        return from_another_page(headers, here)
+    return None
+
+
+def page_headers(scope: dict) -> list[tuple[bytes, bytes]]:
+    """For every HTML document this origin serves, wherever it is served from (/, the
+    same file under /assets, the Understand dashboard): no link from it says where it
+    came from, and no other page may frame it -- a framed page's own requests are
+    same-origin, so the Origin check cannot stop a click inside it. The dashboard
+    (/ua/) is framed by this page itself, and by nothing else."""
+    ancestors = "'self'" if scope["path"].startswith("/ua/") else "'none'"
+    return [(b"referrer-policy", b"no-referrer"),
+            (b"content-security-policy", f"frame-ancestors {ancestors}".encode())]
+
+
+class _Boundary:
+    """Pure ASGI, so the WebSocket handshake is covered too (a handshake refused before
+    accept answers HTTP 403)."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope["type"] in ("http", "websocket"):
+            why = boundary_refusal(scope)
+            if why is not None:
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 4403})
+                else:
+                    await JSONResponse({"error": why}, status_code=403)(scope, receive, send)
+                return
+        if scope["type"] == "http":
+            send = self._with_page_headers(scope, send)
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    def _with_page_headers(scope: dict, send: Any) -> Any:
+        async def sending(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers") or [])
+                if any(k.lower() == b"content-type" and v.lower().startswith(b"text/html") for k, v in headers):
+                    message = {**message, "headers": headers + page_headers(scope)}
+            await send(message)
+        return sending
 
 
 def follow_default() -> bool:
@@ -104,9 +197,12 @@ class StudioServer:
         on_control: Callable[[dict], Any] | None = None,
         on_workflow: Callable[[str, dict], Any] | None = None,
         follow_model_view: bool = True,
+        sleepwalk: bool = False,
     ) -> None:
         self.bus = bus
         self.port = port
+        self._sleepwalk = None
+        self._sleepwalk_on = sleepwalk     # Dream's own session fires Sleepwalk schedules (DREAM-158); tests do not
         self.token = secrets.token_urlsafe(32)
         # "Follow the model's view" (DREAM-104): while on, the model's hidden-frame
         # loads, edits to the shown file and saved screenshots go to the pane too.
@@ -150,20 +246,25 @@ class StudioServer:
         source = self._session_source
         return source() if callable(source) else source
 
-    def _authorized(self, request: Any) -> bool:
-        supplied = (
-            request.headers.get("x-dream-token")
-            or request.query_params.get("token")
-            or ""
-        )
-        return secrets.compare_digest(supplied, self.token)
+    def _authorized(self, request: Any, *, query: bool = False) -> bool:
+        """The X-Dream-Token header. ``query`` admits ``?token=`` too, only for the GET
+        routes a link or a frame reaches (neither carries a header), and only from this
+        page or from no page: a page on another origin holding a leaked token could
+        otherwise load a workspace file as a <script>. A write never takes the token
+        from a URL, which sits in history and referrers."""
+        supplied = request.headers.get("x-dream-token")
+        if not supplied and query and from_another_page(request.headers, _this_server(request.scope)) is None:
+            supplied = request.query_params.get("token")
+        return secrets.compare_digest(supplied or "", self.token)
 
     def _build_app(self) -> Starlette:
         from .media_routes import routes as media_routes
         from .workflow_routes import routes as workflow_routes
+        from .sleepwalk_routes import routes as sleepwalk_routes
         from .project_routes import routes as project_routes
         from .skill_routes import routes as skill_routes
         from .memory_routes import routes as memory_routes
+        from .lucid_routes import routes as lucid_routes
         from .files_routes import routes as files_routes
         from .understand_routes import routes as understand_routes
         from .project_library_routes import routes as project_library_routes
@@ -200,21 +301,25 @@ class StudioServer:
         ]
         routes.extend(media_routes(self))
         routes.extend(workflow_routes(self))
+        routes.extend(sleepwalk_routes(self))
         routes.extend(project_routes(self, recovery_provider=list_recoveries))
         routes.extend(skill_routes(self))
         routes.extend(memory_routes(self))
+        routes.extend(lucid_routes(self))   # DREAM-183: Lucid Control
         routes.extend(files_routes(self))
         routes.extend(understand_routes(self))
         routes.extend(project_document_routes(self))
         routes.extend(project_library_routes(self))
         if STATIC_DIR.is_dir():
             routes.append(Mount("/assets", StaticFiles(directory=STATIC_DIR)))
-        return Starlette(routes=routes)
+        return Starlette(routes=routes, middleware=[Middleware(_Boundary)])
 
     async def _index(self, request):
         index = STATIC_DIR / "index.html"
         if not index.is_file():
             return Response("Dream Studio UI is not installed.", status_code=404)
+        # The page headers (no referrer, no framing) come from the boundary middleware,
+        # which puts them on every HTML document this origin serves.
         return FileResponse(index, media_type="text/html")
 
     async def _runtime_info(self, request):
@@ -675,10 +780,9 @@ class StudioServer:
 
     async def _download(self, request):
         """A file from the workspace, or a folder as a zip, as an attachment. The
-        token rides in the query because a download link cannot carry a header;
-        the page already holds it in its own URL. Whole-workspace when path is
-        empty."""
-        if not self._authorized(request):
+        token rides in the query because a download link cannot carry a header.
+        Whole-workspace when path is empty."""
+        if not self._authorized(request, query=True):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         ws = self._workspace()
         if ws is None:
@@ -829,6 +933,10 @@ class StudioServer:
         identifier = secrets.token_urlsafe(16)
         payload = {"id": identifier, "tool": tool, "input": arguments,
                    "reason": reason, "choices": choices}
+        # DREAM-194: asked inside a worker's tool call, the request names that worker (run_id, agent) for the
+        # Needs-you stack; the lead's own requests carry neither key.
+        from ..core.backends.openai_compat import active_worker
+        payload.update(active_worker() or {})
         future = asyncio.get_running_loop().create_future()
         self._permissions[identifier] = (payload, future)
         self.bus.publish(Event("permission", payload))
@@ -943,7 +1051,8 @@ class StudioServer:
 
     @property
     def url(self) -> str:
-        return f"http://{self.host}:{self.port}/?token={self.token}"
+        # The token travels in the fragment: never sent to a server, never in a Referer.
+        return f"http://{self.host}:{self.port}/#token={self.token}"
 
     async def start(self, *, timeout: float = 3.0) -> str:
         """Bring the server up on the current event loop and return its URL."""
@@ -988,8 +1097,14 @@ class StudioServer:
                     if socks:
                         self.port = socks[0].getsockname()[1]
                         self._ready = True
+                        # Studio is one of Dream's own listeners: the controlled browser refuses it by name (DREAM-187)
+                        sandbox_net.OWN_SERVICES[self.port] = "Studio"
                         self._discovery.publish(self.url)
                         await self._start_pages()
+                        if self._sleepwalk_on:
+                            from ..sleepwalk.scheduler import Scheduler
+                            self._sleepwalk = Scheduler()
+                            self._sleepwalk.start()
                         return self.url
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
@@ -1013,6 +1128,8 @@ class StudioServer:
     def _server_finished(self, task: asyncio.Task) -> None:
         self._ready = False
         self._discovery.clear()
+        if sandbox_net.OWN_SERVICES.get(self.port) == "Studio":
+            del sandbox_net.OWN_SERVICES[self.port]
         if not task.cancelled():
             exc = task.exception()  # never leave an unobserved task failure
             if exc is not None:
@@ -1028,6 +1145,11 @@ class StudioServer:
             if not future.done():
                 future.set_result("n")
         self._discovery.clear()
+        if sandbox_net.OWN_SERVICES.get(self.port) == "Studio":
+            del sandbox_net.OWN_SERVICES[self.port]
+        if self._sleepwalk is not None:
+            await self._sleepwalk.stop()
+            self._sleepwalk = None
         await self.pages.stop()
         if self._server is not None:
             self._server.should_exit = True

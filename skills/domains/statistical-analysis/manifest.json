@@ -1,0 +1,12 @@
+{
+  "format": "dream-skill/v1",
+  "name": "statistical-analysis",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "run_bash",
+    "chart_display_v0",
+    "see",
+    "write_file"
+  ]
+}

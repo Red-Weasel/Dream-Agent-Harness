@@ -416,7 +416,7 @@ async def test_a_garbled_tool_name_cannot_grow_the_history():
     assert len(stored["tool_calls"][0]["function"]["name"]) == 128
 
 
-async def test_an_elided_user_message_keeps_its_id_so_it_can_still_be_snipped():
+async def test_an_elided_user_message_keeps_its_id_so_it_can_still_be_snipped(pre_dream176_line):
     """Gate 7 observation: stubbing a user message dropped its [id:mNNNN] tag, so
     a stubbed exchange could never be named to `snip` afterwards."""
     b = _backend(n_ctx=4096)

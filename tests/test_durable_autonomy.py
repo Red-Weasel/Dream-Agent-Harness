@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from lease_isolation import isolated_lease_dir  # noqa: F401  (DREAM-205: leases under tmp_path, never the live folder)
+
 from dream.core import loop as loop_module
 from dream.core.backends.base import Event
 from dream.core.evaluator import IsolatedOpenAIBackend, ReviewSettings, ScopedReader, collect_review, review_backend

@@ -1,0 +1,14 @@
+{
+  "format": "dream-skill/v1",
+  "name": "reproducibility-check",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "github_get_tree",
+    "github_read_file",
+    "run_bash",
+    "note",
+    "see",
+    "write_file"
+  ]
+}

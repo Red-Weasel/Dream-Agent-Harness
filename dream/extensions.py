@@ -12,6 +12,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import stat
 import tempfile
 import threading
@@ -269,12 +270,15 @@ def register_runtime(identifier: str, **metadata: Any) -> None:
 
 
 def tool_module_id(path: Path, plugin: str | None = None) -> str:
-    return extension_id("tool", f"plugin/{plugin}/{path.stem}" if plugin else f"custom/{path.stem}")
+    # A Sleepwalk connector (DREAM-160) is tool:plugin/<p>/sleepwalk/<name>: a file name holds no "/", so it can never
+    # equal a tool's id, and it keeps the "tool" kind every older Dream accepts in its settings file.
+    sleepwalk = "sleepwalk/" if plugin and Path(path).parent.name == "sleepwalk" else ""
+    return extension_id("tool", f"plugin/{plugin}/{sleepwalk}{path.stem}" if plugin else f"custom/{path.stem}")
 
 
 def _module_id(identifier: str) -> bool:
     return (isinstance(identifier, str) and identifier == _id(identifier)
-            and (identifier.startswith("tool:custom/") or identifier.startswith("tool:plugin/")))
+            and identifier.startswith(("tool:custom/", "tool:plugin/")))
 
 
 def _sha256(value: Any) -> bool:
@@ -305,11 +309,12 @@ def _configured_module(identifier: str) -> tuple[Path, str | None]:
 
     identifier = _id(identifier)
     if not _module_id(identifier):
-        raise SettingsError("Use a module id: tool:custom/name or tool:plugin/owner/name")
+        raise SettingsError("Use a module id: tool:custom/name, tool:plugin/owner/name or tool:plugin/owner/sleepwalk/name")
     # Disabled modules/plugins can be reviewed without enabling or importing them.
     if not plugins.loaded():
         plugins.load()
     roots = [(config.CUSTOM_TOOLS_DIR, None)] + [(p.tool_dir, p.name) for p in plugins.loaded() if p.tool_dir]
+    roots += [(p.path / "sleepwalk", p.name) for p in plugins.loaded()]    # Sleepwalk connectors (DREAM-160)
     matches = [(path, owner) for root, owner in roots for path in root.glob("*.py")
                if not path.name.startswith("_") and tool_module_id(path, owner) == identifier]
     if len(matches) != 1:
@@ -518,6 +523,7 @@ def catalog(*, refresh: bool = False) -> dict[str, Any]:
     warnings.extend(plugins.warnings())
     warnings.extend(installed_skill_tools.warnings())
     roots = [(config.CUSTOM_TOOLS_DIR, None)] + [(p.tool_dir, p.name) for p in plugins.loaded() if p.tool_dir]
+    roots += [(p.path / "sleepwalk", p.name) for p in plugins.loaded()]    # Sleepwalk connectors (DREAM-160)
     for root, parent_name in roots:
         for path in sorted(root.glob("*.py")):
             if path.name.startswith("_"):
@@ -557,6 +563,8 @@ def catalog(*, refresh: bool = False) -> dict[str, Any]:
             except ValueError as e:
                 warnings.append(f"{identifier}: {e}")
         for identifier, enabled in data["overrides"].items():
+            if re.match(r"tool:plugin/[^/]+/sleepwalk\.", identifier):
+                continue                # a connector id from an unreleased test build, never an extension
             if identifier not in rows and identifier not in _RUNTIME:
                 rows[identifier] = _row(identifier, identifier.split(":", 1)[1], installed=False,
                                         provenance="saved-override", source=str(settings_path()))

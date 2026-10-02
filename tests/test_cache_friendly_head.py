@@ -469,7 +469,7 @@ async def test_a_change_between_building_the_head_and_the_first_turn_is_noted(bu
 
 
 @pytest.mark.parametrize("name", ["lean", "balanced", "frontier"])
-async def test_three_compactions_with_nothing_changed_add_no_note(busy, name):
+async def test_three_compactions_with_nothing_changed_add_no_note(busy, name, pre_dream176_line):
     engine = FakeEngine(lead=[{"text": f"reply {i}"} for i in range(4)])
     b, _ = profiled(busy, name, engine, n_ctx=32_768)
     await bound_turn(busy, b, "first")
@@ -510,7 +510,7 @@ async def test_an_edited_top_memory_is_not_announced_as_new(busy):
     assert notes(b) == []
 
 
-async def test_after_a_compaction_the_state_it_was_built_from_is_the_new_baseline(busy):
+async def test_after_a_compaction_the_state_it_was_built_from_is_the_new_baseline(busy, pre_dream176_line):
     """A change noted before a compaction is not noted again after it, under the profile that hides it."""
     engine = FakeEngine(lead=[{"text": f"reply {i}"} for i in range(4)])
     b, _ = profiled(busy, "lean", engine, n_ctx=32_768)

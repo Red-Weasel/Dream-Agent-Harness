@@ -1,0 +1,13 @@
+{
+  "format": "dream-skill/v1",
+  "name": "variance-analysis",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "read_file",
+    "run_bash",
+    "ask_user_input",
+    "chart_display_v0",
+    "write_file"
+  ]
+}

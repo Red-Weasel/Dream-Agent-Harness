@@ -17,6 +17,8 @@ import pytest
 from dream.core.backends import openai_compat
 from test_cache_friendly_head import FakeEngine, Meter, backend, tool, turn
 
+pytestmark = pytest.mark.usefixtures("pre_dream176_line")   # the line these landings were calibrated on
+
 WINDOW = 40_000
 LINE = int(WINDOW * 0.75)          # compact_at below 64k
 TARGET = LINE // 2                 # one big step to half the line

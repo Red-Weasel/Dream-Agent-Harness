@@ -1,0 +1,12 @@
+{
+  "format": "dream-skill/v1",
+  "name": "outreach-draft",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "read_file",
+    "library_read",
+    "ask_user_input",
+    "write_file"
+  ]
+}

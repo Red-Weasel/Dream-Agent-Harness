@@ -19,7 +19,7 @@ def _server(tmp_path, prompts):
 def test_answers_become_the_next_prompt(tmp_path):
     prompts = []
     srv = _server(tmp_path, prompts)
-    with TestClient(srv.app) as c:
+    with TestClient(srv.app, base_url="http://127.0.0.1") as c:
         h = {"X-Dream-Token": srv.token}
         assert c.post("/api/answer", json={"answers": {"a": 1}}).status_code == 401
         assert c.post("/api/answer", json={"answers": {}}, headers=h).status_code == 400
@@ -34,7 +34,7 @@ def test_tweaks_persist_into_the_file_and_refuse_what_they_should(tmp_path):
     outside = tmp_path.parent / "outside.html"
     outside.write_text(PAGE)
     srv = _server(tmp_path, [])
-    with TestClient(srv.app) as c:
+    with TestClient(srv.app, base_url="http://127.0.0.1") as c:
         h = {"X-Dream-Token": srv.token}
         assert c.post("/api/tweak", json={"path": "page.html", "edits": {"fontSize": 18}}).status_code == 401
         r = c.post("/api/tweak", json={"path": "page.html", "edits": {"fontSize": 18, "dark": True}}, headers=h)
@@ -56,7 +56,7 @@ def test_tweaks_persist_into_the_file_and_refuse_what_they_should(tmp_path):
 
 def test_uploads_land_in_the_workspace_with_safe_names(tmp_path):
     srv = _server(tmp_path, [])
-    with TestClient(srv.app) as c:
+    with TestClient(srv.app, base_url="http://127.0.0.1") as c:
         h = {"X-Dream-Token": srv.token}
         assert c.post("/api/upload", files={"file": ("x.png", b"\x89PNG", "image/png")}).status_code == 401
         r = c.post("/api/upload", files={"file": ("../../evil name?.png", b"\x89PNG", "image/png")}, headers=h)

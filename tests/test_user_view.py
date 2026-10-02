@@ -66,7 +66,7 @@ def test_the_reply_route_needs_the_token_and_a_live_id():
     loop = asyncio.new_event_loop()
     fut = loop.create_future()
     srv._pending["abc"] = fut
-    with TestClient(srv.app) as client:
+    with TestClient(srv.app, base_url="http://127.0.0.1") as client:
         assert client.post("/api/frame_reply", json={"id": "abc", "ok": True, "value": 1}).status_code == 401
         h = {"X-Dream-Token": srv.token}
         assert client.post("/api/frame_reply", json={"id": "nope", "ok": True}, headers=h).status_code == 404

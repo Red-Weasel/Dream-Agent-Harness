@@ -1,0 +1,12 @@
+{
+  "format": "dream-skill/v1",
+  "name": "cash-flow-forecast",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "run_bash",
+    "write_file",
+    "note",
+    "chart_display_v0"
+  ]
+}

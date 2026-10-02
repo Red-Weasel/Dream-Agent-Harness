@@ -9,6 +9,8 @@ import pytest
 from PIL import Image
 
 from dream import config
+from dream.core import script_execution
+from dream.core.execution import ExecutionRefused, ExecutionScope, probe_sandbox
 from dream.gui import preview as preview_mod
 from dream.tools import context as tool_context
 from dream.tools.context import ToolContext, set_context
@@ -39,8 +41,23 @@ def _failed(res):
     return bool(res.get("is_error"))
 
 
+async def _require_contained_scripts(workspace):
+    """run_script runs only inside verified OS containment, with Playwright's headless shell as its
+    runtime; without either Dream refuses with ExecutionUnavailable and runs nothing (that refusal is
+    tests/test_contained_studio_script.py's). Such a host cannot run these scripts at all -- GitHub's
+    ubuntu-24.04 runner, where bubblewrap may not configure its network namespace (DREAM-150)."""
+    capability = await probe_sandbox(ExecutionScope(workspace))
+    if not capability.available:
+        pytest.skip(f"run_script needs verified OS containment, unavailable here: {capability.reason}")
+    try:
+        script_execution._runtime()
+    except ExecutionRefused as exc:
+        pytest.skip(f"run_script needs its contained JavaScript runtime: {exc}")
+
+
 @pytest.mark.asyncio
 async def test_run_script_reads_transforms_and_saves_files_and_images(ws):
+    await _require_contained_scripts(ws)
     (ws / "parts").mkdir()
     (ws / "parts" / "a.txt").write_text("alpha\n")
     (ws / "parts" / "b.txt").write_text("beta\n")
@@ -66,6 +83,7 @@ async def test_run_script_reads_transforms_and_saves_files_and_images(ws):
 
 @pytest.mark.asyncio
 async def test_run_script_stays_inside_the_workspace_and_reports_errors(ws):
+    await _require_contained_scripts(ws)
     (ws.parent / "secret.txt").write_text("nope")
     res = await run_script.handler({"code": "log(await readFile('../secret.txt'))"})
     assert _failed(res) and "outside the workspace" in _text(res)
@@ -81,6 +99,7 @@ async def test_run_script_stays_inside_the_workspace_and_reports_errors(ws):
 
 @pytest.mark.asyncio
 async def test_run_script_gets_the_captures_save_screenshot_stashed(ws):
+    await _require_contained_scripts(ws)
     (ws / "p.html").write_text("<!doctype html><body style='background:#0a0'><h1>hi</h1></body>")
     await show_html.handler({"path": "p.html"})
     assert not _failed(await save_screenshot.handler({"path": "p.html", "steps": [{}, {}], "in_memory_png_key": "shots"}))
@@ -117,6 +136,7 @@ async def test_open_for_print_writes_a_pdf_one_page_per_slide(ws):
 @pytest.mark.asyncio
 async def test_a_timed_out_script_still_returns_the_log_lines_it_printed(ws, monkeypatch):
     """Gate 7 observation: the timeout threw away everything logged before it."""
+    await _require_contained_scripts(ws)
     orig = preview_mod.Preview.run_script
 
     async def fast(self, code, workspace, *, timeout_s=30.0):

@@ -87,12 +87,9 @@ def pt_gradient_rule(width: int, f: float = 0.55) -> str:
 
 
 def _version() -> str:
-    try:
-        from importlib.metadata import version
+    from .. import __version__
 
-        return version("dream")
-    except Exception:
-        return "0.1"
+    return __version__
 
 
 def _fmt_k(n: float) -> str:

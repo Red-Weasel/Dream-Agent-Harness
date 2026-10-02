@@ -20,7 +20,7 @@ def server(tmp_path):
 
 async def test_uploaded_file_reaches_agent_and_retained_chat(server):
     srv, prompts, ws = server
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://test',
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://127.0.0.1',
                                  headers={'X-Dream-Token': srv.token}) as client:
         result = await client.post('/api/upload?name=notes.txt', content=b'Codename: Foxglove',
                                    headers={'Content-Type': 'application/octet-stream'})
@@ -39,7 +39,7 @@ async def test_uploaded_file_reaches_agent_and_retained_chat(server):
 
 async def test_attachment_cannot_reference_arbitrary_or_missing_file(server):
     srv, prompts, _ = server
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://test',
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://127.0.0.1',
                                  headers={'X-Dream-Token': srv.token}) as client:
         for ids in [['/etc/passwd'], ['unknown'], 'not-an-array', [123]]:
             result = await client.post('/api/prompt', json={'prompt': 'Read', 'attachments': ids})
@@ -51,7 +51,7 @@ async def test_upload_rejects_symlink_directory_and_does_not_write_outside(serve
     srv, _, ws = server
     outside = tmp_path_factory.mktemp('outside')
     (ws / 'uploads').symlink_to(outside, target_is_directory=True)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://test',
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://127.0.0.1',
                                  headers={'X-Dream-Token': srv.token}) as client:
         result = await client.post('/api/upload?name=escape.txt', content=b'no')
         assert result.status_code == 400
@@ -62,7 +62,7 @@ async def test_upload_is_bounded_and_duplicate_names_do_not_overwrite(server, mo
     from dream.gui import uploads
     monkeypatch.setattr(uploads, 'MAX_FILE_BYTES', 100)
     srv, _, ws = server
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://test',
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://127.0.0.1',
                                  headers={'X-Dream-Token': srv.token}) as client:
         async def chunks():
             yield b'x' * 80
@@ -78,7 +78,7 @@ async def test_upload_is_bounded_and_duplicate_names_do_not_overwrite(server, mo
 
 async def test_multipart_upload_remains_compatible(server):
     srv, _, ws = server
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://test',
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://127.0.0.1',
                                  headers={'X-Dream-Token': srv.token}) as client:
         result = await client.post('/api/upload', files={'file': ('table.csv', b'a,b\n1,2\n')})
         assert result.status_code == 200
@@ -95,7 +95,7 @@ async def test_uploaded_image_is_visible_from_selected_workspace(server):
     buffer = io.BytesIO()
     Image.new('RGB', (2, 2), 'red').save(buffer, format='PNG')
     data = buffer.getvalue()
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://test',
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://127.0.0.1',
                                  headers={'X-Dream-Token': srv.token}) as client:
         result = await client.post('/api/upload?name=sample.png', content=data)
         assert result.status_code == 200
@@ -128,7 +128,7 @@ async def test_browser_attachment_send_retry_refresh_and_studio(server, monkeypa
             browser = await p.chromium.launch(args=['--disable-gpu'])
             page = await browser.new_page(viewport={'width': 1100, 'height': 800})
             page.set_default_timeout(4000)
-            await page.goto(url + '&companion=1')
+            await page.goto(url.replace('/#', '/?companion=1#'))
             await expect(page.locator('#dream-nav-studio')).to_be_visible()
             await page.locator('#file-input').set_input_files({'name': 'notes.txt', 'mimeType': 'text/plain', 'buffer': b'Foxglove'})
             await expect(page.locator('#attachments')).to_contain_text('notes.txt')

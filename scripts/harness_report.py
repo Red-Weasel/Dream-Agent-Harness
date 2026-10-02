@@ -9,10 +9,10 @@ import tempfile
 import time
 
 
-def main():
+def main(output: Path | None = None):
     from dream import config
     source_root = Path(__file__).resolve().parents[1]
-    output = source_root / "artifacts" / "harness-validation" / "measurements.json"
+    output = output or source_root / "artifacts" / "harness-validation" / "measurements.json"
     with tempfile.TemporaryDirectory(prefix="dream-harness-report-") as temporary:
         root = Path(temporary)
         # Fixture memory writes mirror to files. Redirect before constructing any
@@ -31,7 +31,7 @@ def main():
         from dream.core.profiles import PROFILES
         from dream.core.providers import get_provider
         from dream.core.subagents import local_subagents
-        from dream.core.tool_budget_schemas import measure
+        from dream.core.tool_budget_schemas import lookup_schema, measure
         from dream.tools.registry import _BASE_TOOLS
         from dream.tools.native import NATIVE_TOOLS
         from dream.tools.demonstration_tools import DEMONSTRATION_TOOLS
@@ -47,9 +47,24 @@ def main():
             schemas = backend._request_tools()
             elapsed = time.perf_counter() - started
             cost = measure(schemas)
+            # The mandatory floor: the pinned schemas, whole, plus the lookup tool naming every deferred tool.
+            # At 8K it alone exceeds the target, and DREAM-035 made it exempt there: exactly the floor must be
+            # sent (no optional schema, no catalog line), as tests/test_schema_budget_real.py asserts. From 16K
+            # up the whole array, floor included, stays within 15% (owner decision, DREAM-150), so a growing
+            # pinned schema still fails here. The floor's size is reported so its growth stays visible.
+            pinned = [s for s in backend.tool_schemas if s["function"]["name"] in backend._pinned]
+            optional = [s for s in backend.tool_schemas if s["function"]["name"] not in backend._pinned]
+            mandatory = pinned + [lookup_schema(optional, 0)]
+            floor = measure(mandatory)
+            floor_over_target = floor > int(window * backend.profile.schema_fraction)
+            exempt = window == 8192 and floor_over_target
             contexts.append({"window": window, "schema_tokens_estimated": cost,
                              "share": cost / window, "loaded": len(schemas),
-                             "deferred": len(backend._deferred_now), "assembly_ms": round(elapsed * 1000, 3)})
+                             "deferred": len(backend._deferred_now),
+                             "mandatory_tokens_estimated": floor, "mandatory_share": floor / window,
+                             "floor_over_target": floor_over_target, "floor_exempt": exempt,
+                             "within_limit": schemas == mandatory if exempt else cost / window <= .15,
+                             "assembly_ms": round(elapsed * 1000, 3)})
         corpus, golden = source_root / "eval/corpus.jsonl", source_root / "eval/golden.jsonl"
         store = build_fixture_store(load_jsonl(corpus), root / "fixture.db")
         try:
@@ -67,7 +82,7 @@ def main():
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
-    return 0 if all(row["share"] <= .15 for row in contexts) else 1
+    return 0 if all(row["within_limit"] for row in contexts) else 1
 
 
 if __name__ == "__main__":

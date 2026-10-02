@@ -23,13 +23,32 @@ def _stamp(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="minutes")
 
 
+def _project_label(owner: str, known: dict[str, str]) -> str:
+    """How a memory's project reads to the owner (DREAM-185): the workspace's folder name, "Everywhere" for a user-wide
+    memory, "Unassigned" for one no project claimed."""
+    if owner == project_memory.USER:
+        return "Everywhere"
+    if owner in known:
+        return Path(known[owner]).name or owner
+    return "Unassigned" if owner in ("", project_memory.UNASSIGNED) else owner
+
+
 def listing() -> dict:
+    """Every memory with its project and dates (DREAM-185), so the list can group by project and sort by time."""
+    from ..core import settings as runtime_settings
+    known = project_memory.known()
+    workspace = runtime_settings.workspace()
+    current = project_memory.project_key(workspace) if workspace is not None else None
     items = []
     for f in longterm.memory_files():
-        mem = longterm.read_file(f)
-        items.append({"scope": "global", "name": f.stem, "title": (mem or {}).get("title") or f.stem,
-                      "description": (mem or {}).get("description", ""), "path": str(f),
-                      "size": f.stat().st_size, "updated": _stamp(f)})
+        mem = longterm.read_file(f) or {}
+        owner = project_memory.valid_owner(mem.get("project")) or project_memory.UNASSIGNED
+        items.append({"scope": "global", "name": f.stem, "title": str(mem.get("title") or f.stem),
+                      "description": mem.get("description", ""), "path": str(f),
+                      "size": f.stat().st_size, "updated": _stamp(f),
+                      "created": str(mem.get("created_at") or "")[:10], "kind": mem.get("kind") or "",
+                      "project": owner, "project_label": _project_label(owner, known),
+                      "current": owner == current})
     root = project_memory.projects_dir()
     for d in sorted(p for p in root.glob("*") if p.is_dir()) if root.is_dir() else []:
         nb = d / project_memory.NOTEBOOK
@@ -39,8 +58,11 @@ def listing() -> dict:
         workspace = marker.read_text(encoding="utf-8").strip() if marker.is_file() else ""
         items.append({"scope": "project", "name": d.name,
                       "title": (Path(workspace).name if workspace else d.name) + " — project notebook",
-                      "description": workspace, "path": str(nb), "size": nb.stat().st_size, "updated": _stamp(nb)})
-    return {"items": items, "memory_dir": str(config.MEMORY_DIR)}
+                      "description": workspace, "path": str(nb), "size": nb.stat().st_size, "updated": _stamp(nb),
+                      "created": "", "kind": "notebook", "project": d.name,
+                      "project_label": Path(workspace).name if workspace else d.name, "current": d.name == current})
+    return {"items": items, "memory_dir": str(config.MEMORY_DIR),
+            "current_project": _project_label(current, known) if current else None}
 
 
 def _path(scope: str, name: str) -> Path:

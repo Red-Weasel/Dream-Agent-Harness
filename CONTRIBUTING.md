@@ -33,7 +33,7 @@ uv run --locked dream local
 uv run --locked pytest tests/ -q
 ```
 
-The suite is large (5,000+ tests) and takes about nine minutes. While iterating, run the files
+The suite is large (9,000+ tests) and takes about 25 minutes. While iterating, run the files
 your change touches:
 
 ```bash

@@ -31,15 +31,19 @@ def test_browser_refuses_non_web_or_ambiguous_input(raw):
 
 
 def test_discovery_belongs_to_current_child(tmp_path):
+    """The token rides in the fragment (DREAM-187); the session publishes no other form."""
     path = tmp_path / 'session.json'
-    path.write_text(json.dumps({'pid': 123, 'url': 'http://127.0.0.1:3232/?token=abc'}))
+    path.write_text(json.dumps({'pid': 123, 'url': 'http://127.0.0.1:3232/#token=abc'}))
     assert session_address(path, 123) == ('http://127.0.0.1:3232', 'abc')
     assert session_address(path, 124) is None
 
 
 @pytest.mark.parametrize('url', [
     'http://evil.test:3232/?token=abc',
+    'http://evil.test:3232/#token=abc',
     'http://127.0.0.1:3232/',
+    'http://127.0.0.1:3232/?token=abc',   # the older query form: no producer writes it any more
+    'http://127.0.0.1:3232/#other=abc',
     'https://127.0.0.1:3232/?token=abc',
     'http://user@127.0.0.1:3232/?token=abc',
     'http://127.0.0.1:0/?token=abc',

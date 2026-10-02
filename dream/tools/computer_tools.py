@@ -9,7 +9,7 @@ from claude_agent_sdk import tool
 
 from .. import config
 from ..computer import Computer
-from .context import ctx, ok, err
+from .context import ctx, ok, err, untrusted_web_content
 
 
 def controller():
@@ -21,21 +21,28 @@ def controller():
     return current
 
 
+def _text(value):
+    text = json.dumps(value, ensure_ascii=False)
+    # A browser observation's text, title and control names come from the page (DREAM-187).
+    return untrusted_web_content(text) if value.get('kind') == 'browser' else text
+
+
 def result(value):
-    output = ok(json.dumps(value, ensure_ascii=False))
+    output = ok(_text(value))
     path = value.get('screenshot')
     if path and ctx().multimodal:
         output['content'].append({'type': 'image', 'mimeType': 'image/png',
                                   'data': base64.b64encode(Path(path).read_bytes()).decode('ascii')})
     elif path:
         value = {**value, 'image_note': 'Pixels are not attached: image input unavailable. DOM state remains readable; appearance is unverified.'}
-        output = ok(json.dumps(value, ensure_ascii=False))
+        output = ok(_text(value))
     return output
 
 
 @tool('computer_open',
       'Open an owned browser target (explicit http/https URL; separate from Studio/native browser and existing sign-ins), '
-      'or attach an explicit X11 desktop window ID. Does not focus a desktop window. Returns current state and a single-use observation_id. '
+      'or attach an explicit X11 desktop window ID. Does not focus a desktop window. Dream\'s own window is refused; '
+      'terminal windows attach view-only (observe and focus, no input). Returns current state and a single-use observation_id. '
       'Call computer_observe without a target to check availability/list windows. Requires ordinary tool approval.',
       {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['browser', 'desktop']},
        'url': {'type': 'string'}, 'window_id': {'type': 'string'}}, 'required': ['kind'], 'additionalProperties': False})

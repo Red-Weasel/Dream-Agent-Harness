@@ -10,7 +10,7 @@
 .project-panel button:disabled { opacity: .45; cursor: default; }
 .project-panel button:focus-visible, .project-panel input:focus-visible, .project-panel textarea:focus-visible { outline: 2px solid var(--accent, #acafff); outline-offset: 2px; }
 .project-card { border: 1px solid var(--border, #363642); border-radius: 9px; padding: 12px; margin: 10px 0; overflow-wrap: anywhere; }
-.project-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; background: var(--bg, #15151b); border-radius: 7px; padding: 12px; font-size: 12px; line-height: 1.5; }
+.project-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; background: var(--bg, var(--bg)); border-radius: 7px; padding: 12px; font-size: 12px; line-height: 1.5; }
 .project-panel [role=status] { min-height: 20px; }
 @media (max-width: 760px) { .project-columns { grid-template-columns: 1fr; gap: 0; } .project-panel { padding: 14px; } }
 

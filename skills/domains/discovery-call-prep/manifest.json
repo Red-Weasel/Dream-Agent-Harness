@@ -1,0 +1,12 @@
+{
+  "format": "dream-skill/v1",
+  "name": "discovery-call-prep",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "library_search",
+    "recall",
+    "read_file",
+    "write_file"
+  ]
+}

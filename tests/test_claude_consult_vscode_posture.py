@@ -90,6 +90,7 @@ def _assert_claude_code_posture(options, tmp_path, mode, append):
     assert options.tools == _PRESET_TOOLS
     assert options.permission_mode == _MODES.get(mode, 'plan')
     assert options.cwd == str(tmp_path) and options.max_turns is None
+    assert options.env == {'CLAUDE_AGENT_SDK_CLIENT_APP': 'dream/0.2.0'}
     assert options.strict_mcp_config is False  # the owner's MCP servers load
     # Dream's own tool server is NOT attached: without Dream's policy callback its tools
     # would run ungated under bypassPermissions.
@@ -276,3 +277,98 @@ async def test_prompt_optimizer_keeps_dream137_posture(tmp_path, monkeypatch):
     assert options.permission_mode == 'default' and options.system_prompt == prompt_optimizer._SYSTEM
     assert options.mcp_servers[config.MCP_SERVER_NAME] is _SERVER
     assert (await options.can_use_tool('Write', {'file_path': str(tmp_path / 'a')}, None)).behavior == 'deny'
+
+
+# --- DREAM-148: a server name that itself holds "__" ----------------------------------------------------------------
+
+@pytest.mark.parametrize('mode', ['plan', 'ask', 'accept-edits', 'auto'])
+async def test_a_server_name_holding_double_underscores_does_not_escape_the_guard(mode, tmp_path, monkeypatch):
+    """The DREAM-140 gate's note: `mcp__<server>__<tool>` was cut at its first two "__", so a Dream bridge the owner
+    registered as `my__bridge` offered `consult` as `mcp__my__bridge__consult`, which the guard read as the tool
+    `bridge__consult`. Every place the server name could end is read now (a name ending in "_" included)."""
+    options = await _advisor_options(tmp_path, monkeypatch, mode)
+    for server in ('my__bridge', 'a__b__c', 'dream_', 'x___'):
+        for name in ('consult', 'council'):
+            decision, reason = await _hook(options, f'mcp__{server}__{name}')
+            assert decision == 'deny' and 'Council' in reason, (server, name)
+        for name in _SESSION_STATE:
+            decision, reason = await _hook(options, f'mcp__{server}__{name}')
+            assert decision == 'deny' and 'main session' in reason, (server, name)
+        for name in _OWNER_FACING:
+            decision, reason = await _hook(options, f'mcp__{server}__{name}')
+            assert decision == 'deny' and 'owner' in reason, (server, name)
+        remember = await _hook(options, f'mcp__{server}__remember', {'content': 'x'})
+        assert (remember is None) == (mode in ('accept-edits', 'auto')), server
+        # The permission callback reads the name the same way.
+        refused = await options.can_use_tool(f'mcp__{server}__council', {}, None)
+        assert refused.behavior == 'deny' and 'Council' in refused.message, server
+
+
+async def test_a_guarded_word_inside_another_tool_name_is_not_refused(tmp_path, monkeypatch):
+    options = await _advisor_options(tmp_path, monkeypatch, 'auto')
+    for tool in ('mcp__my__bridge__recall', 'mcp__x__consult__notes', 'mcp__consult__search',
+                 'mcp__srv__consulting', 'mcp__srv__council_minutes', 'mcp__solo'):
+        assert await _hook(options, tool) is None, tool
+        assert anthropic.claude_code_refusal(tool, 'auto') is None, tool
+
+
+async def test_a_consult_reached_through_the_parent_bridge_meets_the_sessions_permission_gate(tmp_path, monkeypatch):
+    """The DREAM-140 gate's other note, "recursion via Bash (bridge discovery) untested" -- the half that can be tested
+    without a live Claude Code. The hook leaves Bash to Claude Code, and a process of the owner's user can find a
+    session's published parent bridge (dream/mcp/bridge.py: a 0600 file under the temp directory) and call its tools.
+    What stands in that path is the session's own permission gate: consult and council are never pre-approved
+    (not read-only or own-mind), plan refuses them and every other mode asks the owner. A Bash command running inside
+    the real CLI is not exercised here (see the DREAM-148 record)."""
+    import glob
+    import tempfile
+    import uuid
+    from pathlib import Path
+
+    import httpx
+    from claude_agent_sdk import tool
+    from starlette.applications import Starlette
+
+    from dream.core import policy
+    from dream.core.engine import Engine
+    from dream.local import machx
+    from dream.mcp.bridge import SessionToolBridge
+
+    for name in ('consult', 'council'):
+        assert policy.capability(config.tool_id(name)) not in policy.AUTO_CAPS, name
+        assert policy.decide(config.tool_id(name), {}, 'plan', tmp_path)[0] == 'deny', name
+        for mode in ('ask', 'accept-edits', 'auto'):
+            assert policy.decide(config.tool_id(name), {}, mode, tmp_path)[0] == 'ask', (name, mode)
+
+    monkeypatch.setattr(machx, 'BASE_URL', 'http://127.0.0.1:1/v1')
+    monkeypatch.setattr(tempfile, 'tempdir', str(tmp_path))     # the bridge's folder in this test's directory only
+    answers, asked, ran = [False, True], [], []
+
+    async def owner(name, args):
+        asked.append(name)
+        return answers.pop(0)
+
+    @tool('consult', 'fixture consult', {'advisor': str, 'question': str})
+    async def consult(args):
+        ran.append(args)
+        return {'content': [{'type': 'text', 'text': 'advice'}]}
+
+    engine = Engine(provider='machx', workspace=tmp_path, can_use_tool=owner)
+    engine._started = True
+    engine._session_tools = {'consult': consult}
+    bridge = SessionToolBridge(engine.session_id, lambda: list(engine._session_tools.values()),
+                               engine._call_bridge_tool)
+    try:
+        bridge.publish('http://127.0.0.1:8123')
+        [found] = glob.glob(str(tmp_path / 'dream-parent-bridge-*' / 'session.json'))   # what a Bash command can do
+        found = json.loads(Path(found).read_text())
+        transport = httpx.ASGITransport(app=Starlette(routes=bridge.routes()), client=('127.0.0.1', 2345))
+        async with httpx.AsyncClient(transport=transport, base_url=found['url']) as client:
+            replies = [await client.post('/api/mcp/call', json={
+                'request_id': str(uuid.uuid4()), 'name': 'consult', 'arguments': {'advisor': 'codex', 'question': 'q'}},
+                headers={'x-dream-bridge-token': found['token'], 'x-dream-session-id': found['session_id']})
+                for _ in range(2)]
+    finally:
+        await bridge.close()
+    assert [r.status_code for r in replies] == [200, 200]
+    assert replies[0].json()['isError'] is True and 'Declined' in replies[0].json()['content'][0]['text']
+    assert asked == ['consult', 'consult'] and len(ran) == 1      # it runs only once the owner allows it

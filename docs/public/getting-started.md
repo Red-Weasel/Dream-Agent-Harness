@@ -38,6 +38,10 @@ The native process uses a system Python with GI bindings while the harness keeps
 its Python environment. Run from a graphical session. Optional applications-menu
 installation: `python3 scripts/install-desktop.py`.
 
+Desktop web content (Studio and the Browser tab) runs in WebKit's bubblewrap
+sandbox. Dream opens no web view while `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS`
+is set; unset it and start Dream again.
+
 ## Optional tools
 
 The hidden Studio inspection browser uses Playwright Chromium:
@@ -46,8 +50,13 @@ The hidden Studio inspection browser uses Playwright Chromium:
 uv run --locked playwright install chromium
 ```
 
-Other web browsing uses Camoufox; install its browser assets through its supported
-setup. Search can use a separately configured SearXNG instance. Set
+The model's `browse` tool uses Camoufox; install its browser assets through its
+supported setup. On Linux, Camoufox runs inside a bubblewrap sandbox with its own
+network namespace, so the `bubblewrap` package (`/usr/bin/bwrap`) is required
+there: without it, `browse` reports an error and fetches nothing. There is no
+unsandboxed fallback, and the sandboxed browser is headless only
+(`DREAM_BROWSER_HEADLESS=0` is refused on Linux). Other platforms use Dream's
+proxy boundary alone. Search can use a separately configured SearXNG instance. Set
 `DREAM_SEARXNG_DIR` for its checkout and `DREAM_SEARXNG_HOST` / `DREAM_SEARXNG_PORT`
 for the endpoint; `DREAM_SEARXNG_AUTOSTART=0` disables automatic startup.
 

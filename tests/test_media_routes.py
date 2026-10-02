@@ -6,7 +6,7 @@ from dream.gui.bus import EventBus
 
 def session(tmp_path):
     server = StudioServer(EventBus(), session={'workspace': str(tmp_path)})
-    return server, TestClient(server.app)
+    return server, TestClient(server.app, base_url="http://127.0.0.1")
 
 
 def test_media_auth_origin_and_request_limits(tmp_path):

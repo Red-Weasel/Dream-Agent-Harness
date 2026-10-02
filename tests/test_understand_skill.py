@@ -96,7 +96,9 @@ def test_it_ships_as_a_small_curated_package(curated, skill_text):
     wheel = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["hatch"]["build"]["targets"]["wheel"]
     assert "skills/understand" in wheel["only-include"]
     assert GLUE.is_file() and (SKILL / "references" / "schema.md").is_file()
-    assert "references/schema.md" in skill_text and 'path="glue.py"' in skill_text
+    # 2026-10-01: the glue's fallback copies the real file with the shell ($DREAM_SKILLS, readable in the sandbox),
+    # never rebuilt from skill_file's text, which shortens long files
+    assert "references/schema.md" in skill_text and 'cp "$DREAM_SKILLS/understand/glue.py"' in skill_text
     # the bundle is what skill_open lists, so the model can fetch the two files it names -- and nothing else is there
     assert set(loader.bundled_names(skill)) == {"glue.py", "manifest.json", "references/schema.md"}
 
@@ -223,7 +225,8 @@ def test_the_curated_skill_wins_the_name_and_the_plugin_stays_reachable(with_plu
                     "understand-anything:understand-domain", "understand-explain", "understand-figma",
                     "understand-knowledge", "understand-onboard"):
         assert sibling in by_name and by_name[sibling].provenance == "dream-plugin", sibling
-    assert any("reachable as 'understand-anything:understand'" in w for w in installed_skill_tools.warnings())
+    assert any("reachable as 'understand-anything:understand'" in n for n in installed_skill_tools.notes())
+    assert not any("understand-anything:understand'" in w for w in installed_skill_tools.warnings())  # DREAM-170
     # selection: the dock's prompt and $understand pick the curated one; the qualified name picks the plugin's
     picked = select_for_task(ASK, with_plugin, max_chars=guidance_budget(200_000))
     assert picked.names == ("understand",) and '"$UA_SKILLS/understand/' in picked.text and "Phase 0" not in picked.text

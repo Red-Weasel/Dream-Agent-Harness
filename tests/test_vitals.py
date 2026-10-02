@@ -8,6 +8,8 @@ import math
 
 import pytest
 
+from lease_isolation import isolated_lease_dir  # noqa: F401  (DREAM-205: leases under tmp_path, never the live folder)
+
 from dream.core.profiles import PROFILES
 from dream.telemetry.runtime import RunMeter
 from test_schema_deferral import _FakeClient, _backend, _sse

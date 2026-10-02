@@ -5,12 +5,10 @@ description: Create, animate, render or polish Blender scenes and existing .blen
 
 # Blender animation
 
-Inspect existing scenes, scripts and outputs before rebuilding or rerendering.
-Skill loading alone does not establish improved task performance.
-
-1. Inspect workspace `.blend` files, scripts, assets, frames and video. Identify
-   the deliverable, authoritative revision, fps, frame range and dimensions.
-   Preserve source in a new version or authorized working copy.
+1. Before rebuilding or rerendering, inspect workspace `.blend` files, scripts,
+   assets, frames and video. Identify the deliverable, authoritative revision,
+   fps, frame range and dimensions. Preserve source in a new version or
+   authorized working copy.
 2. Prefer [live Blender](references/live.md) when `blender__*` tools are listed:
    MCP for scene and code, screenshots or computer use to look, the owner
    steering in chat. Else run inspected Blender Python via `run_bash`;

@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from lease_isolation import isolated_lease_dir  # noqa: F401  (DREAM-205: leases under tmp_path, never the live folder)
+
 from test_backend_resilience import _backend, _ScriptedClient, _text_round, _multi_call_round, _tool
 from test_task_guidance_integration import engine  # noqa: F401
 
@@ -47,7 +49,7 @@ async def test_server_steering_does_not_silently_use_ordinary_callback():
     import httpx
     ordinary = []
     server = StudioServer(EventBus(), on_prompt=ordinary.append)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url='http://test') as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url='http://127.0.0.1') as client:
         response = await client.post('/api/prompt', headers={'X-Dream-Token': server.token},
             json={'prompt': 'correction', 'delivery': 'steer', 'steering_id': 'a' * 32})
     assert response.status_code == 400
@@ -376,7 +378,7 @@ async def test_steering_api_passes_target_and_preserves_regular_callback():
         corrections.append((text, identifier, target))
         return {'id': identifier, 'status': 'pending'}
     server = StudioServer(EventBus(), on_prompt=ordinary.append, on_steer=steer)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url='http://test',
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url='http://127.0.0.1',
                                headers={'X-Dream-Token': server.token}) as client:
         assert (await client.post('/api/prompt', json={'prompt': 'ordinary'})).json() == {'ok': True}
         response = await client.post('/api/prompt', json={'prompt': 'correction', 'delivery': 'steer',

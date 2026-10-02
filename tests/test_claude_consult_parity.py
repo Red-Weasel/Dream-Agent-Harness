@@ -75,7 +75,8 @@ def test_main_path_options_are_unchanged_by_the_shared_builder(tmp_path):
     assert options.disallowed_tools == ['WebSearch', 'WebFetch', 'Bash']
     assert options.allowed_tools == _EXEMPT + SAFE_BUILTINS
     assert options.mcp_servers == {config.MCP_SERVER_NAME: _SERVER}
-    assert options.env == {'CLAUDE_AGENT_SDK_CLIENT_APP': 'dream/0.1.0', 'ENABLE_TOOL_SEARCH': 'auto:100'}
+    assert options.env == {'CLAUDE_AGENT_SDK_CLIENT_APP': 'dream/0.2.0', 'ENABLE_TOOL_SEARCH': 'auto:100',
+                           'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS': '1'}   # sub-agents in the foreground
 
 
 async def _verdict(options, name, args):

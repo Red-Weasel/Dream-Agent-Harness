@@ -183,6 +183,7 @@ async def test_a_subagent_loop_compacts_without_saving_notes(working, monkeypatc
     from test_local_subagents import _FakeClient as _SubClient, _sub_final  # noqa: E402
 
     b = _backend(n_ctx=8192)
+    b.apply_context_policy({"subagent_overflow": "compact"})   # the owner's default is return (DREAM-177)
     b._client = _SubClient(post_scripts=[_sub_final("done")])  # a subagent posts, non-streaming
     spec = SimpleNamespace(name="x", description="d", prompt="p", tool_names=())
     text, failed = await b._subagent_loop(spec, "x", "q " * 20000)  # ~10k tokens: over the line

@@ -59,7 +59,7 @@ def test_monitor_pane_live_in_real_terminal(tmp_path):
     # A wide terminal, so the two-column layout engages (>= 100 cols).
     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 130, 0, 0))
     env = {**os.environ, "DREAM_ROOT": str(tmp_path), "DREAM_MONITOR": "1",
-           "TERM": "xterm-256color", "DREAM_GUI": "0", "DREAM_GUI_OPEN": "0",
+           "TERM": "xterm-256color", "DREAM_GUI": "0",
            "DREAM_SEMANTIC_MEMORY": "0", "DREAM_RERANK": "0",
            "DREAM_DB": str(tmp_path / "data" / "dream.db"),
            "DREAM_LIBRARY_DB": str(tmp_path / "data" / "library" / "library.db"),

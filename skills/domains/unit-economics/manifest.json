@@ -1,0 +1,13 @@
+{
+  "format": "dream-skill/v1",
+  "name": "unit-economics",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "read_file",
+    "web_search",
+    "run_bash",
+    "chart_display_v0",
+    "write_file"
+  ]
+}

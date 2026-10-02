@@ -27,6 +27,7 @@ from .context import ctx, err, in_thread, ok
 # Discovered once and reused. None = not yet loaded this process.
 _CACHE: list[loader.FileSkill] | None = None
 _WARNINGS: list[str] = []
+_NOTES: list[str] = []   # intended aliases (a plugin copy of a built-in's name): not faults (DREAM-170)
 
 # A search that matches nearly everything is not a search; cap what one call returns
 # so a vague query cannot dump the whole index back into context.
@@ -34,13 +35,15 @@ _FIND_LIMIT = 25
 
 
 def installed(refresh: bool = False) -> list[loader.FileSkill]:
-    """The installed skills, discovering them on first use."""
-    return [s for s in inventory(refresh) if loader.enabled(s)]
+    """The installed skills, discovering them on first use, narrowed by the session's skill preset (DREAM-170)."""
+    from .. import presets
+    preset = presets.session()
+    return [s for s in inventory(refresh) if loader.enabled(s) and presets.keeps_skill(s, preset)]
 
 
 def inventory(refresh: bool = False) -> list[loader.FileSkill]:
     """All packages for settings, including disabled ones; metadata only."""
-    global _CACHE, _WARNINGS
+    global _CACHE, _WARNINGS, _NOTES
     if _CACHE is None or refresh:
         from .. import plugins
         roots = config.skill_dirs()
@@ -48,7 +51,8 @@ def inventory(refresh: bool = False) -> list[loader.FileSkill]:
         # parent switch. installed() applies the plugin/skill enable settings.
         roots.extend(p.skill_dir for p in plugins.loaded()
                      if p.skill_dir and p.skill_dir not in roots)
-        _CACHE, _WARNINGS = loader.discover(roots)
+        _NOTES = []
+        _CACHE, _WARNINGS = loader.discover(roots, aliases=_NOTES)
     return _CACHE
 
 
@@ -58,13 +62,22 @@ def warnings() -> list[str]:
     return list(_WARNINGS)
 
 
+def notes() -> list[str]:
+    """Intended aliases from the last walk: shown muted, never as a warning."""
+    installed()
+    return list(_NOTES)
+
+
 def index_lines() -> list[str]:
-    """Only the small curated index is carried at wake-up; search sees all enabled roots."""
+    """Only the small curated index is carried at wake-up; search sees all enabled roots. A skill preset's session
+    lists that preset's skills, curated or not (DREAM-170)."""
+    from .. import presets
     try:
-        skills = [skill for skill in installed() if skill.curated]
+        skills = [skill for skill in installed() if skill.curated or presets.session() is not None]
+        cap = 1600 if presets.session() is None else None   # a preset bounds its own list; all of it is listed (DREAM-174)
         lines, used = [], 0
         for line in loader.index_lines(skills):
-            if used + len(line) + 1 > 1600:
+            if cap is not None and used + len(line) + 1 > cap:
                 break
             lines.append(line)
             used += len(line) + 1

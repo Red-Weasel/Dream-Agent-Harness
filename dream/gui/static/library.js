@@ -20,6 +20,24 @@
     return data;
   }
   const pages = {};
+  // The list column: search, Show and Sort, count, keyboard hint and rows. DREAM-174: the Skills page's preset column
+  // is built by the same function, so the two columns are identically structured.
+  function sidebar(view, title, key=view, cls='library-sidebar') {
+    const aside = node('aside',null,{class:cls,'aria-label':title+' list'});
+    const search = node('input',null,{type:'search',placeholder:'Search '+title.toLowerCase(),'aria-label':'Search '+title.toLowerCase()});
+    const list = node('div',null,{class:'library-list'});
+    const filters=node('div',null,{class:'library-filters'});
+    const filter=field(filters,'Show','select',{'aria-label':'Filter '+title.toLowerCase()}),sort=field(filters,'Sort','select',{'aria-label':'Sort '+title.toLowerCase()});
+    const choices=view==='skills'?[['all','All skills'],['managed','Your versions'],['installed','Installed originals'],['enabled','Enabled'],['disabled','Disabled'],['plugins','Plugins'],['mcp','MCP servers'],['tools','Tool groups']]:view==='memory'?[['all','All memories'],['current','This project'],['everywhere','Everywhere'],['project','Project notebooks']]:view==='files'?[['workspace','Project folder'],['dream','Dream setup']]:[['all','All projects'],['current','Current workspace'],['conversations','With conversations']];
+    for(const [value,label] of choices)filter.append(node('option',label,{value}));
+    for(const [value,label] of view==='memory'?[['recent','Recently changed'],['name','Name A–Z']]:[['name','Name A–Z'],['reverse','Name Z–A'],...(view==='projects'?[['conversations','Most conversations']]:[])])sort.append(node('option',label,{value}));
+    const count=node('p','',{class:'library-count',role:'status','aria-live':'polite'});
+    const hint=node('p','Use ↑ and ↓ to browse, Enter to open.',{class:'library-keyboard-hint',id:'library-'+key+'-keys'});list.setAttribute('aria-describedby',hint.id);
+    list.onkeydown=event=>{const items=[...list.querySelectorAll('button:not(.library-assign)')],index=items.indexOf(document.activeElement);if(index<0)return;let next;if(event.key==='ArrowDown')next=Math.min(index+1,items.length-1);else if(event.key==='ArrowUp')next=Math.max(0,index-1);else if(event.key==='Home')next=0;else if(event.key==='End')next=items.length-1;else return;event.preventDefault();items[next]?.focus();};
+    search.onkeydown=event=>{if(event.key==='ArrowDown'){event.preventDefault();list.querySelector('button')?.focus();}};
+    aside.append(search,filters,count,hint,list);
+    return {aside, search, filter, sort, count, list};
+  }
   function page(view, title, description) {
     const root = node('section', null, {id:'dream-' + view + '-page', class:'dream-library', 'aria-label':title});
     root.hidden = true;
@@ -28,20 +46,10 @@
     const actions = node('div',null,{class:'library-actions'});
     header.append(intro, actions);
     const status = node('p','',{class:'library-status',role:'status','aria-live':'polite'});
-    const layout = node('div',null,{class:'library-layout'}), aside = node('aside',null,{class:'library-sidebar','aria-label':title+' list'});
-    const search = node('input',null,{type:'search',placeholder:'Search '+title.toLowerCase(),'aria-label':'Search '+title.toLowerCase()});
-    const list = node('div',null,{class:'library-list'}), detail = node('div',null,{class:'library-detail'});
-    const filters=node('div',null,{class:'library-filters'});
-    const filter=field(filters,'Show','select',{'aria-label':'Filter '+title.toLowerCase()}),sort=field(filters,'Sort','select',{'aria-label':'Sort '+title.toLowerCase()});
-    const choices=view==='skills'?[['all','All skills'],['managed','Your versions'],['installed','Installed originals'],['enabled','Enabled'],['disabled','Disabled']]:view==='memory'?[['all','All memories'],['global','Global'],['project','Project notebooks']]:view==='files'?[['workspace','Project folder'],['dream','Dream setup']]:[['all','All projects'],['current','Current workspace'],['conversations','With conversations']];
-    for(const [value,label] of choices)filter.append(node('option',label,{value}));
-    for(const [value,label] of view==='memory'?[['recent','Recently changed'],['name','Name A–Z']]:[['name','Name A–Z'],['reverse','Name Z–A'],...(view==='projects'?[['conversations','Most conversations']]:[])])sort.append(node('option',label,{value}));
-    const count=node('p','',{class:'library-count',role:'status','aria-live':'polite'});
-    const hint=node('p','Use ↑ and ↓ to browse, Enter to open.',{class:'library-keyboard-hint',id:'library-'+view+'-keys'});list.setAttribute('aria-describedby',hint.id);
-    list.onkeydown=event=>{const items=[...list.querySelectorAll('button')],index=items.indexOf(document.activeElement);if(index<0)return;let next;if(event.key==='ArrowDown')next=Math.min(index+1,items.length-1);else if(event.key==='ArrowUp')next=Math.max(0,index-1);else if(event.key==='Home')next=0;else if(event.key==='End')next=items.length-1;else return;event.preventDefault();items[next]?.focus();};
-    search.onkeydown=event=>{if(event.key==='ArrowDown'){event.preventDefault();list.querySelector('button')?.focus();}};
-    aside.append(search,filters,count,hint,list);layout.append(aside,detail);root.append(header,status,layout);document.querySelector('.split').append(root);
-    const state = {root, actions, status, search, filter, sort, count, list, detail, loaded:false};pages[view] = state;
+    const layout = node('div',null,{class:'library-layout'}), detail = node('div',null,{class:'library-detail'});
+    const side = sidebar(view, title);
+    layout.append(side.aside,detail);root.append(header,status,layout);document.querySelector('.split').append(root);
+    const state = {root, actions, status, ...side, detail, loaded:false};pages[view] = state;
     return state;
   }
   function report(p, text, error = false) { p.status.textContent = text;p.status.dataset.error = String(error); }
@@ -78,21 +86,119 @@
   const skills=page('skills','Skills','Read the full instructions, make them your own, or build a reusable skill.');
   let skillRows=[], selectedSkill=null, skillDraft=false, skillRequest=0;
   skills.actions.append(button('Refresh',safe(skills,()=>skills.refresh())),button('New skill',()=>newSkill(),{class:'primary'}));
-  function drawSkills() {
-    const focused=skills.list.contains(document.activeElement)?document.activeElement.dataset.key:null;
-    const query=skills.search.value.trim().toLowerCase();skills.list.replaceChildren();
-    const rows=skillRows.filter(s=>(s.name+' '+s.description).toLowerCase().includes(query)).filter(s=>skills.filter.value==='all'||(skills.filter.value==='managed'?s.managed:skills.filter.value==='installed'?!s.managed:skills.filter.value==='enabled'?s.enabled!==false:s.enabled===false));
-    rows.sort((a,b)=>a.name.localeCompare(b.name)* (skills.sort.value==='reverse'?-1:1));
-    skills.count.textContent=rows.length+' of '+skillRows.length+' skills';
-    for(const s of rows){
-      const b=button('',safe(skills,()=>openSkill(s.name)),{'aria-current':String(selectedSkill?.name===s.name),'data-key':s.name});
-      b.append(node('strong',s.name),node('small',s.description||'No description'),node('small',s.managed?'Your version':s.source||'Installed skill'));skills.list.append(b);
-    }
-    if(!skills.list.children.length)skills.list.append(node('p',query||skills.filter.value!=='all'?'No matching skills. Change the search or filter.':'No skills saved yet.'));
-    [...skills.list.querySelectorAll('button')].find(b=>b.dataset.key===focused)?.focus();
+  // DREAM-171: the Skills workspace -- the library (skills, plugins, MCP servers, tool groups), the preset they are
+  // assigned to (each row's toggle, or drag a row onto the preset: assigning never moves anything), the editor.
+  // DREAM-174: the preset column is the library column again (same builder, same rows), with the preset list on top,
+  // a × instead of the toggle, and the cost and actions below.
+  const KINDS={skills:'Skills',tools:'Tool groups',mcp:'MCP servers',plugins:'Plugins'},DRAG='application/x-dream-item';
+  let presetData=null,presetName=null,extRows=[],selectedItem=null,skillNotes=[];
+  const col=sidebar('skills','Preset','preset','library-preset-col'),presetHead=node('div',null,{class:'library-preset-head'}),presetFoot=node('div',null,{class:'library-preset-foot'});
+  col.aside.prepend(presetHead);col.aside.append(presetFoot);
+  skills.root.querySelector('.library-layout').classList.add('skills-workspace');skills.detail.before(col.aside);
+  const shownPreset=()=>presetData?.presets.find(p=>p.name===presetName)||presetData?.presets[0];
+  const same=(a,b)=>a.toLowerCase()===b.toLowerCase();
+  const has=(p,kind,name)=>!p?.items||(p.items[kind]||[]).some(v=>same(v,name));
+  const via=(p,r)=>r.kind==='skills'&&r.row.plugin&&(p?.items?.plugins||[]).some(v=>same(v,r.row.plugin))?r.row.plugin:null;   // F4
+  const tokens=c=>`${c.skills} skills · ${c.tools} tools · ~${(c.tokens/1000).toFixed(1)}K tokens`;
+  function libraryRows(f){
+    if(f==='plugins'||f==='mcp')return extRows.filter(r=>r.kind===(f==='mcp'?'mcp':'plugin')).map(r=>({kind:f,name:r.name,key:r.id,description:r.description||r.source||'',sub:KINDS[f].slice(0,-1)+(r.enabled?'':' · Off'),row:r}));
+    if(f==='tools')return (presetData?.groups||[]).map(g=>({kind:'tools',name:g.name,key:'tools:'+g.name,description:g.tools+' tools'+(g.core?' · '+g.core+' always on':''),sub:'Tool group',row:g}));
+    return skillRows.filter(s=>f==='all'||(f==='managed'?s.managed:f==='installed'?!s.managed:f==='enabled'?s.enabled!==false:s.enabled===false))
+      .map(s=>({kind:'skills',name:s.name,key:s.name,description:s.description||'No description',row:s,
+        sub:(s.copy_of?'Your version of '+s.copy_of:({yours:'Yours',copy:'Your version',plugin:'Plugin',builtin:'Built-in'}[s.origin]||(s.managed?'Your version':s.source||'Installed skill')))
+          +(s.enabled===false?' · Off':'')+(skillNotes.some(n=>n.startsWith(`'${s.name}'`))?' · plugin original; the other version is used':'')}));
   }
-  skills.search.oninput=drawSkills;skills.filter.onchange=drawSkills;skills.sort.onchange=drawSkills;
-  skills.refresh=safe(skills,async()=>{const data=await api('/api/skills');skillRows=data.skills||[];skills.loaded=true;drawSkills();report(skills,data.warnings?.length?'Library warnings: '+data.warnings.join(' · '):'Skill library refreshed.',!!data.warnings?.length);});
+  function presetRows(f,p){
+    const lib=libraryRows(f);
+    if(!p?.items)return lib.filter(r=>r.row.enabled!==false);
+    const kind=KINDS[f]?f:'skills',named=(p.items[kind]||[]).map(n=>lib.find(r=>same(r.name,n))
+      ||(kind==='tools'&&(presetData.groups||[]).some(g=>g.names?.includes(n))?{kind,name:n,key:'tools:'+n,description:'One tool from the '+presetData.groups.find(g=>g.names?.includes(n)).name+' group',sub:'Tool',row:{}}:null)
+      ||(f==='all'||KINDS[f]?{kind,name:n,key:kind+':'+n,description:'Not in the library',sub:'Missing',row:{},missing:true}:null)).filter(Boolean);
+    return [...named,...lib.filter(r=>!named.includes(r)&&via(p,r)).map(r=>({...r,sub:r.sub+' · via plugin '+via(p,r)}))];
+  }
+  function row(r,action,key,drag){
+    const item=node('div',null,{class:'library-row',...(drag?{draggable:'true'}:{})});
+    const b=button('',safe(skills,()=>r.missing?report(skills,r.name+' is not in the library.',true):r.kind==='skills'?openSkill(r.name):openItem(r)),{'aria-current':String(r.kind==='skills'?selectedSkill?.name===r.name:selectedItem===r.key),'data-key':key});
+    b.append(node('strong',r.name),node('small',r.description),node('small',r.sub));
+    if(drag)item.ondragstart=e=>{e.dataTransfer.setData(DRAG,JSON.stringify({kind:r.kind,name:r.name}));e.dataTransfer.effectAllowed='copy';};
+    item.append(b);if(action)item.append(action);return item;
+  }
+  function fill(c,all,total,action,prefix,drag,none){
+    const a=document.activeElement,keep=c.list.contains(a)?(a.dataset.key?`[data-key="${CSS.escape(a.dataset.key)}"]`:a.dataset.assign?`[data-assign="${CSS.escape(a.dataset.assign)}"]`:null):null;
+    const query=c.search.value.trim().toLowerCase();
+    const rows=all.filter(r=>(r.name+' '+r.description).toLowerCase().includes(query)).sort((x,y)=>x.name.localeCompare(y.name)*(c.sort.value==='reverse'?-1:1));
+    c.count.textContent=rows.length+' of '+total;
+    c.list.replaceChildren(...rows.map(r=>row(r,action(r),prefix+r.key,drag)));
+    if(!rows.length)c.list.append(node('p',query||c.filter.value!=='all'?'No matching items. Change the search or filter.':none));
+    if(keep)c.list.querySelector(keep)?.focus();
+  }
+  function toggle(r){
+    const p=shownPreset(),on=has(p,r.kind,r.name),v=!on&&via(p,r);
+    const t=button(on||v?'✓':'+',safe(skills,()=>assign(r.kind,r.name,!on,r.key)),{class:'library-assign','aria-pressed':String(on||!!v),'data-assign':r.key,
+      'aria-label':'In '+(p?.name||'Default')+': '+r.name+(v?' (via plugin '+v+')':''),title:!p?.items?'Default includes everything that is on':v?'In '+p.name+' via plugin '+v:(on?'In ':'Add to ')+p.name});
+    t.disabled=!p?.items||!!v;return t;
+  }
+  function removal(r){
+    const p=shownPreset();
+    return p?.items&&has(p,r.kind,r.name)?button('×',safe(skills,()=>assign(r.kind,r.name,false)),{class:'library-assign','aria-label':'Remove '+r.name+' from '+p.name,title:'Remove from '+p.name}):null;
+  }
+  function drawSkills() {
+    const f=skills.filter.value,all=libraryRows(f),p=shownPreset(),pf=col.filter.value,mine=presetRows(pf,p);
+    fill(skills,all,KINDS[f]?all.length+' '+KINDS[f].toLowerCase():skillRows.length+' skills',toggle,'',true,'No skills saved yet.');
+    fill(col,mine,mine.length+' '+(KINDS[pf]||'skills').toLowerCase(),removal,'preset:',false,p?.items?'Nothing assigned yet. Drag a row here, or use its + button.':'Nothing is on.');
+  }
+  for(const c of [skills,col]){c.search.oninput=drawSkills;c.filter.onchange=drawSkills;c.sort.onchange=drawSkills;}
+  async function presetOp(body){
+    try{presetData=await api('/api/presets',{...body,sha256:presetData.sha256});window.dispatchEvent(new CustomEvent('dream:presets',{detail:'skills'}));}
+    catch(e){presetData=await api('/api/presets');throw e;}
+    finally{drawSkills();drawPreset();}
+  }
+  async function assign(kind,name,on,key){
+    const p=shownPreset();await presetOp({op:'assign',preset:p.name,kind,item:name,on});
+    report(skills,(on?'Added '+name+' to ':'Removed '+name+' from ')+p.name+'. It applies to sessions started with '+p.name+'.');
+    if(key)skills.list.querySelector(`[data-assign="${CSS.escape(key)}"]`)?.focus();
+  }
+  function drawPreset(){
+    const p=shownPreset();if(!p)return;presetName=p.name;
+    const sel=node('select',null,{'aria-label':'Preset'}),label=node('label','Preset');label.append(sel);
+    for(const x of presetData.presets)sel.append(node('option',x.name+(x.name===presetData.active?' · next session':''),{value:x.name}));
+    sel.append(node('option','Add new…',{value:''}));sel.value=p.name;
+    sel.onchange=()=>{if(!sel.value){sel.value=p.name;presetForm();return;}presetName=sel.value;drawSkills();drawPreset();};
+    const origin={default:'Default filters nothing and takes no drops',builtin:'Built-in',edited:'Built-in · edited by you',user:'Yours'}[p.origin];
+    presetHead.replaceChildren(label,node('p',origin+(p.name===presetData.active?' · active for new sessions':'')+' · this session: '+presetData.session,{class:'library-meta'}));
+    const bar=node('div',null,{class:'library-actions'}),active=p.name===presetData.active;
+    const use=button(active?'Active for new sessions':'Use for next session',safe(skills,async()=>{await presetOp({op:'use',preset:p.name});report(skills,'New sessions start with '+p.name+'. This session keeps '+presetData.session+'.');}),{class:'primary'});
+    use.disabled=active;bar.append(use);
+    if(p.origin==='user')bar.append(button('Rename',()=>presetForm(p.name)),button('Delete',safe(skills,async()=>{if(!confirm('Delete the preset "'+p.name+'"? Its skills stay in the library.'))return;await presetOp({op:'delete',preset:p.name});report(skills,'Preset '+p.name+' deleted.');})));
+    if(p.origin==='edited')bar.append(button('Reset',safe(skills,async()=>{if(!confirm('Reset "'+p.name+'" to how it shipped? Your changes to it are dropped.'))return;await presetOp({op:'reset',preset:p.name});report(skills,p.name+' is back to how it shipped.');})));
+    presetFoot.replaceChildren(node('p',tokens(p.cost),{class:'library-cost'}),bar);
+  }
+  function presetForm(from){
+    const form=node('form',null,{class:'library-preset-form'}),input=field(form,from?'Rename preset':'New preset name','input',{required:'',maxlength:'60'});input.value=from||'';
+    const bar=node('div',null,{class:'library-actions'});bar.append(node('button',from?'Rename':'Create preset',{type:'submit',class:'primary'}),button('Cancel',drawPreset));form.append(bar);
+    form.onsubmit=safe(skills,async()=>{const name=input.value.trim();await presetOp(from?{op:'rename',preset:from,to:name}:{op:'create',name});presetName=name;drawSkills();drawPreset();report(skills,from?'Preset renamed to '+name+'.':'Preset '+name+' created. Add items with + or by dragging them here.');});
+    presetHead.replaceChildren(form);input.focus();
+  }
+  col.aside.ondragover=e=>{if(shownPreset()?.items&&e.dataTransfer.types.includes(DRAG)){e.preventDefault();e.dataTransfer.dropEffect='copy';col.aside.classList.add('drop');}};
+  col.aside.ondragleave=()=>col.aside.classList.remove('drop');
+  col.aside.ondrop=safe(skills,async e=>{col.aside.classList.remove('drop');const d=JSON.parse(e.dataTransfer.getData(DRAG)||'null');if(d&&shownPreset()?.items)await assign(d.kind,d.name,true);});
+  function openItem(r){
+    if(!mayChangeSkill())return;
+    ++skillRequest;selectedSkill=null;selectedItem=r.key;drawSkills();
+    const box=node('div',null,{class:'library-editor'}),inAll=presetData.presets.filter(p=>p.items&&has(p,r.kind,r.name)).map(p=>p.name);
+    box.append(node('h2',r.name),node('p',r.description,{class:'library-meta'}),node('p',r.sub+(r.kind==='plugins'?' · the plugin owns its skills and tools':''),{class:'library-meta'}),
+      node('p','In presets: '+(inAll.join(', ')||'none')+'. Default includes it while it is on.'));
+    if(r.kind!=='tools')box.append(button(r.row.enabled?'Turn off':'Turn on',safe(skills,async()=>{await api('/api/control',{action:'extension',id:r.row.id,enabled:!r.row.enabled});await skills.refresh();const again=libraryRows(skills.filter.value).find(x=>x.key===r.key);if(again)openItem(again);}),{'aria-pressed':String(!!r.row.enabled)}));
+    skills.detail.replaceChildren(box);
+  }
+  // The composer's preset select changes the same file: follow it (one source of truth, /api/presets).
+  window.addEventListener('dream:presets',async e=>{if(e.detail==='skills'||!skills.loaded)return;try{presetData=await api('/api/presets');drawSkills();drawPreset();}catch(err){report(skills,err.message,true);}});
+  skills.refresh=safe(skills,async()=>{
+    const [data,ext,presetsNow]=await Promise.all([api('/api/skills'),api('/api/extensions').catch(e=>({extensions:[],error:e.message})),api('/api/presets')]);
+    skillRows=data.skills||[];skillNotes=data.notes||[];extRows=(ext.extensions||[]).filter(r=>r.kind==='plugin'||r.kind==='mcp');presetData=presetsNow;skills.loaded=true;drawSkills();drawPreset();
+    const notes=presetData.notes||[],problem=data.warnings?.length?'Library warnings: '+data.warnings.join(' · '):presetData.error||(ext.error&&'Plugins and MCP servers could not be read: '+ext.error);
+    report(skills,problem||'Skill library refreshed.'+(notes.length?' Note: '+notes.join(' · '):''),!!problem);
+  });
   function mayChangeSkill() {
     if(!skillDraft)return true;
     report(skills,'Save this draft or choose Discard changes before opening another skill.',true);return false;
@@ -104,7 +210,7 @@
     const data=await api('/api/skills/'+encodeURIComponent(name));
     if(request!==skillRequest)return;
     if(!mayChangeSkill())return;
-    selectedSkill=data;drawSkills();editSkill(data);report(skills,'Full instructions loaded.');
+    selectedSkill=data;selectedItem=null;drawSkills();editSkill(data);report(skills,'Full instructions loaded.');
   }
   function newSkill() {
     if(!mayChangeSkill())return;
@@ -124,6 +230,16 @@
     const save=node('button','Save skill',{type:'submit',class:'primary'});
     bar.append(save,button('Discard changes',()=>{skillDraft=false;if(creating)newSkill();else editSkill(data);report(skills,'Draft discarded.');}),saved);
     if(!creating){const use=button('Use in chat',()=>chatDraft('Use the '+data.name+' skill.'));use.disabled=data.enabled===false;bar.append(use);}
+    // DREAM-171/172: yours can be deleted (to the skills trash), your version of an installed or plugin skill removed
+    // (the original returns); a plugin's skill opens read-only with Edit a copy -- the plugin's files are never written.
+    const mine=data.origin==='yours'||data.origin==='copy';
+    if(!creating&&mine)bar.append(button(data.origin==='yours'?'Delete':'Remove your version',safe(skills,async()=>{
+      if(!confirm(data.origin==='yours'?'Delete "'+data.name+'"? It moves to the skills trash.':'Remove your version of "'+data.name+'"? The installed original returns.'))return;
+      const r=await api('/api/skills/'+encodeURIComponent(data.name)+'/remove',{expected_sha256:data.sha256});
+      skillDraft=false;selectedSkill=null;skillsEmpty();await skills.refresh();report(skills,r.restored?'Your version was removed; the installed original is back.':'Skill moved to the trash.');})));
+    if(data.origin==='plugin'){content.readOnly=true;save.hidden=true;notice.textContent='A plugin skill: the plugin owns its files. Edit a copy to make your own version; Remove your version later brings the plugin\'s back.';
+      const copy=button('Edit a copy',()=>{content.readOnly=false;save.hidden=false;copy.remove();content.focus();report(skills,'Saving creates your version; the plugin\'s files stay as they are.');});
+      bar.append(copy,button(data.enabled===false?'Turn on':'Turn off',safe(skills,async()=>{await api('/api/control',{action:'extension',id:'skill:'+data.name,enabled:data.enabled===false});await skills.refresh();await openSkill(data.name);})));}
     form.append(bar);skills.detail.replaceChildren(form);
     form.oninput=()=>{skillDraft=true;saved.textContent='Unsaved changes';};
     name.oninput=()=>{
@@ -145,7 +261,8 @@
       }finally{save.disabled=false;}
     });
   }
-  empty(skills,'Instructions you can shape','Choose a skill to read all of it, or create one for a workflow you repeat.',button('Create a skill',newSkill,{class:'primary'}));
+  function skillsEmpty(){empty(skills,'Instructions you can shape','Choose a skill to read all of it, or create one for a workflow you repeat.',button('Create a skill',newSkill,{class:'primary'}));}
+  skillsEmpty();
 
   const projects=page('projects','Projects','A place for each body of work. Return to its files, instructions, and conversations.');
   let projectRows=[],selectedProject=null,projectDraft=false,projectRequest=0,conversationRequest=0,documentRequest=0,handoffRequest=0;
@@ -370,46 +487,123 @@
     }
   });
   window.addEventListener('dream:project-reset',()=>{hide();document.documentElement.dataset.dreamView='chat';});
-  window.addEventListener('beforeunload',e=>{if(skillDraft||projectDraft){e.preventDefault();e.returnValue='';}});
+  window.addEventListener('beforeunload',e=>{if(skillDraft||projectDraft||memoryDirty){e.preventDefault();e.returnValue='';}});
   // Memory (owner request): read, edit, delete and consolidate what Dream remembers --
   // global memories and per-project notebooks. Saving writes the file; nothing runs.
-  const memory=page('memory','Memory','Read, edit and prune what Dream remembers: global memories and each project\'s notebook.');
+  // DREAM-183: Lucid Control -- the files that shape what Dream knows and how it answers, in one place: Global and
+  // Current Project columns with the response styles (the board), and the memories list. Opening a file or a memory
+  // swaps the board for its editor; "Back to Lucid Control" returns.
+  const memory=page('memory','Lucid Control','What Dream knows and how it answers: your instructions, this project\'s files, the response style and every memory, in one place.');
+  memory.root.classList.add('lucid');
+  memory.aside.prepend(node('h2','Memories',{class:'lucid-heading'}));
+  let lucidReturn=null;   // the card a file or memory was opened from: focus goes back there
+  let lucidView=0;        // bumped on every navigation: a late answer for an earlier view is dropped (Codex re-review #7)
+  memory.search.placeholder='Search memories';memory.search.setAttribute('aria-label','Search memories');
   let memoryRows=[], openMemory=null, memoryDirty=false;
   const picked=new Set();
-  memory.actions.append(button('Refresh',safe(memory,()=>memory.refresh())),
-    button('Consolidate selected',()=>consolidateMemories(),{class:'primary'}));
+  memory.actions.append(button('Refresh',safe(memory,()=>memory.refresh())));
+  memory.aside.append(button('Consolidate selected',()=>consolidateMemories(),{class:'primary lucid-consolidate'}));
+  // DREAM-185: the memories grouped by the project they belong to -- this project first, then the ones Dream uses
+  // everywhere, then other projects by name, then unassigned -- newest first (or by name) inside each group.
   function drawMemory(){
     const query=memory.search.value.trim().toLowerCase();memory.list.replaceChildren();
-    const rows=memoryRows.filter(m=>(m.title+' '+m.description+' '+m.name).toLowerCase().includes(query))
-      .filter(m=>memory.filter.value==='all'||m.scope===memory.filter.value);
+    const show=memory.filter.value;
+    const rows=memoryRows.filter(m=>(m.title+' '+m.description+' '+m.name+' '+(m.project_label||'')).toLowerCase().includes(query))
+      .filter(m=>show==='all'||(show==='current'?m.current:show==='everywhere'?m.project==='user':show==='project'?m.scope==='project':true));
     rows.sort((a,b)=>memory.sort.value==='name'?a.title.localeCompare(b.title):String(b.updated).localeCompare(String(a.updated)));
     memory.count.textContent=rows.length+' of '+memoryRows.length+' memories';
-    for(const m of rows){
-      const key=m.scope+'/'+m.name, row=node('div',null,{class:'memory-row'});
-      const tick=node('input',null,{type:'checkbox','aria-label':'Select '+m.title});tick.checked=picked.has(key);
-      tick.onchange=()=>{tick.checked?picked.add(key):picked.delete(key);};
-      const b=button('',safe(memory,()=>openMem(m)),{'aria-current':String(openMemory?.key===key),'data-key':key});
-      b.append(node('strong',m.title),node('small',(m.scope==='project'?'Project notebook':'Global memory')+' · '+m.updated+' · '+m.size+' bytes'));
-      row.append(tick,b);memory.list.append(row);
+    const rank=m=>m.current?0:m.project==='user'?1:m.project==='unassigned'?3:2;
+    const groups=new Map();
+    for(const m of [...rows].sort((a,b)=>rank(a)-rank(b)||(rank(a)===2?String(a.project_label).localeCompare(String(b.project_label)):0))){
+      const name=m.current?'This project · '+(m.project_label||''):m.project==='user'?'Everywhere':m.project==='unassigned'?'Unassigned':(m.project_label||m.project);
+      const id=m.current?'':m.project;        // keyed by project, so two same-named folders stay apart
+      if(!groups.has(id))groups.set(id,{name,items:[]});groups.get(id).items.push(m);
+    }
+    for(const {name,items} of groups.values()){
+      memory.list.append(node('h3',name+' ('+items.length+')',{class:'lucid-group'}));
+      for(const m of items){
+        const key=m.scope+'/'+m.name, row=node('div',null,{class:'memory-row'});
+        const tick=node('input',null,{type:'checkbox','aria-label':'Select '+m.title});tick.checked=picked.has(key);
+        tick.onchange=()=>{tick.checked?picked.add(key):picked.delete(key);};
+        const b=button('',safe(memory,()=>openMem(m)),{'aria-current':String(openMemory?.key===key),'data-key':key});
+        const when=String(m.updated||'').replace('T',' ');
+        b.append(node('strong',m.title),node('small',(m.scope==='project'?'Project notebook':(m.kind||'memory'))+' · updated '+when+(m.created?' · created '+m.created:'')));
+        row.append(tick,b);memory.list.append(row);
+      }
     }
     if(!memory.list.children.length)memory.list.append(node('p',query?'No matching memories.':'Dream has not saved any memories yet.'));
   }
   memory.search.oninput=drawMemory;memory.filter.onchange=drawMemory;memory.sort.onchange=drawMemory;
   memory.refresh=safe(memory,async()=>{const data=await api('/api/memory');memoryRows=data.items||[];memory.loaded=true;drawMemory();
-    report(memory,'Memory folder: '+(data.memory_dir||''));});
+    if(!openMemory)await drawLucidBoard();report(memory,'Memory folder: '+(data.memory_dir||''));});
+  async function drawLucidBoard(){
+    const view=lucidView;const data=await api('/api/lucid');
+    if(view!==lucidView||openMemory)return;   // the owner moved on (an editor is open): never replace it
+    const board=node('div',null,{class:'lucid-board'});
+    const column=(title,note,files)=>{const col=node('section',null,{class:'lucid-column dream-panel','aria-label':title});
+      col.append(node('h2',title),node('p',note,{class:'lucid-note'}));
+      for(const f of files){const card=button('',safe(memory,()=>openLucidFile(f)),{class:'lucid-file dream-card','data-key':f.scope+'/'+f.key});
+        card.append(node('strong',f.label),node('span',f.problem||f.about),node('small',f.problem?'Unavailable':(f.exists?(f.size+' bytes'):'Not created yet')+(f.editable?'':' · read-only')));
+        if(f.problem)card.disabled=true;
+        col.append(card);}
+      if(!files.length)col.append(node('p','Start Dream in a project folder to see its files here.',{class:'lucid-note'}));
+      return col;};
+    board.append(column('Global','Read in every session, whatever the project.',data.global),
+                 column('Current project',data.workspace||'No project open',data.project));
+    const styles=node('section',null,{class:'lucid-styles dream-panel','aria-label':'Response style'});
+    styles.append(node('h2','Response style'),node('p','How Dream words its replies. A change applies to the next session.',{class:'lucid-note'}));
+    const shown=node('div',null,{class:'lucid-style-text',role:'region','aria-live':'polite'});
+    const grid=node('div',null,{class:'lucid-style-grid'});
+    for(const st of data.styles){const card=button('',()=>{grid.querySelectorAll('[aria-pressed]').forEach(n=>n.setAttribute('aria-pressed','false'));
+        card.setAttribute('aria-pressed','true');shown.replaceChildren(node('h3',st.label),node('p',st.summary),...(st.text?[node('pre',st.text)]:[]),
+          st.active?node('p','In use for new sessions.',{class:'lucid-note'}):button('Use for new sessions',safe(memory,async()=>{
+            // saved where the style in use comes from: a project value wins over the global one (Codex re-review #8)
+            const scope=data.style_source==='project'?'project':'global';
+            await api('/api/control',{action:'settings_save',key:'behaviour.response_style',value:st.key,scope});
+            report(memory,st.label+' will be used from the next session (/new starts one)'+(scope==='project'?' in this project.':'.'));await drawLucidBoard();}),{class:'primary'}));},
+        {class:'lucid-style dream-card','aria-pressed':'false','data-style':st.key});
+      card.append(node('strong',st.label),node('small',st.active?'In use':st.summary));if(st.active)card.classList.add('lucid-active');grid.append(card);}
+    styles.append(grid,shown);board.append(styles);memory.detail.replaceChildren(board);
+  }
+  async function openLucidFile(f){
+    if(memoryDirty&&!confirm('Discard your unsaved changes?'))return;
+    memoryDirty=false;const view=++lucidView;
+    lucidReturn='.lucid-file[data-key="'+CSS.escape(f.scope+'/'+f.key)+'"]';
+    const data=await api('/api/lucid/'+f.scope+'/'+f.key);if(view!==lucidView)return;
+    if(memoryDirty&&!confirm('Discard your unsaved changes?'))return;   // typed while this was loading
+    openMemory={key:'file/'+f.scope+'/'+f.key};memoryDirty=false;
+    const box=node('div',null,{class:'memory-editor lucid-editor'});
+    const text=node('textarea',null,{'aria-label':f.label+' text',spellcheck:'false'});text.value=data.text;text.readOnly=!data.editable;
+    text.oninput=()=>{memoryDirty=true;};let stamp=data.stamp;
+    const back=button('Back to Lucid Control',safe(memory,async()=>{if(memoryDirty&&!confirm('Discard your unsaved changes?'))return;
+      memoryDirty=false;openMemory=null;lucidView++;drawMemory();await drawLucidBoard();refocus();}));
+    const actions=node('div',null,{class:'library-actions'});
+    if(data.editable)actions.append(button('Save',safe(memory,async()=>{const sent=text.value,mine=openMemory;
+      const saved=await api('/api/lucid/'+f.scope+'/'+f.key,{text:sent,stamp});
+      stamp=saved.stamp;if(openMemory===mine)memoryDirty=text.value!==sent;   // this editor's typing only (Codex re-review #6)
+      report(memory,saved.warning||('Saved '+saved.path),Boolean(saved.warning));}),{class:'primary'}));
+    actions.append(back);
+    box.append(node('h2',f.label),node('p',data.about,{class:'lucid-note'}),node('p',data.path,{class:'memory-path'}),text,actions);
+    memory.detail.replaceChildren(box);drawMemory();text.focus();
+  }
+  function refocus(){const target=lucidReturn&&memory.root.querySelector(lucidReturn);lucidReturn=null;target?.focus();}
   async function openMem(m){
-    if(memoryDirty&&!confirm('Discard your unsaved changes to this memory?'))return;
-    const data=await api('/api/memory/'+m.scope+'/'+encodeURIComponent(m.name));
+    if(memoryDirty&&!confirm('Discard your unsaved changes?'))return;
+    lucidReturn='.memory-row [data-key="'+CSS.escape(m.scope+'/'+m.name)+'"]';
+    memoryDirty=false;const view=++lucidView;const data=await api('/api/memory/'+m.scope+'/'+encodeURIComponent(m.name));if(view!==lucidView)return;
+    if(memoryDirty&&!confirm('Discard your unsaved changes?'))return;
     openMemory={key:m.scope+'/'+m.name,...m};memoryDirty=false;
     const box=node('div',null,{class:'memory-editor'});
     const text=node('textarea',null,{'aria-label':'Memory text',spellcheck:'false'});text.value=data.text;text.oninput=()=>{memoryDirty=true;};
-    const save=button('Save',safe(memory,async()=>{await api('/api/memory/'+m.scope+'/'+encodeURIComponent(m.name),{text:text.value});
-      memoryDirty=false;await memory.refresh();report(memory,'Saved '+data.path);}),{class:'primary'});
+    const save=button('Save',safe(memory,async()=>{const sent=text.value,mine=openMemory;await api('/api/memory/'+m.scope+'/'+encodeURIComponent(m.name),{text:sent});
+      if(openMemory===mine)memoryDirty=text.value!==sent;await memory.refresh();report(memory,'Saved '+data.path);}),{class:'primary'});
     const del=button('Delete',safe(memory,async()=>{if(!confirm('Delete "'+m.title+'"? This removes the file.'))return;
       await api('/api/memory/'+m.scope+'/'+encodeURIComponent(m.name),{delete:true});memoryDirty=false;openMemory=null;
-      picked.delete(m.scope+'/'+m.name);memory.detail.replaceChildren();await memory.refresh();report(memory,'Deleted '+data.path);}));
+      picked.delete(m.scope+'/'+m.name);await memory.refresh();report(memory,'Deleted '+data.path);}));
+    const back=button('Back to Lucid Control',safe(memory,async()=>{if(memoryDirty&&!confirm('Discard your unsaved changes?'))return;
+      memoryDirty=false;openMemory=null;lucidView++;drawMemory();await drawLucidBoard();refocus();}));
     box.append(node('h2',m.title),node('p',data.path,{class:'memory-path'}),text,node('div',null,{class:'library-actions'}));
-    box.lastChild.append(save,del);memory.detail.replaceChildren(box);drawMemory();
+    box.lastChild.append(save,del,back);memory.detail.replaceChildren(box);drawMemory();text.focus();
   }
   function consolidateMemories(){
     const chosen=memoryRows.filter(m=>picked.has(m.scope+'/'+m.name));

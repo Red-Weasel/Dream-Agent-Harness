@@ -22,9 +22,12 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from dream.core import tool_budget_schemas as tbs
 from dream.core.backends import openai_compat
 from dream.core.backends.openai_compat import OpenAICompatBackend
+from dream.core.profiles import PROFILES
 from dream.tools import memory_tools, notes
 from dream.tools.native import NATIVE_TOOLS
 
@@ -55,14 +58,14 @@ def _tool(name, nprops=1, calls=None):
     )
 
 
-def _backend(tools=(), n_ctx=16384, subagents=None) -> OpenAICompatBackend:
+def _backend(tools=(), n_ctx=16384, subagents=None, profile=None) -> OpenAICompatBackend:
     p = SimpleNamespace(
         key="machx", label="MachX", base_url="http://x/v1",
         multimodal=False, api_key=lambda: "n",
     )
     b = OpenAICompatBackend(
         provider=p, model="m", system_prompt="SYSTEM PROMPT",
-        tools=list(tools), permission_cb=None, subagents=subagents,
+        tools=list(tools), permission_cb=None, subagents=subagents, profile=profile,
     )
     b.n_ctx = n_ctx
     return b
@@ -168,12 +171,20 @@ def _fat_toolset(n=20, calls=None):
 async def test_a_big_toolset_is_cut_to_the_budget_and_catalogued():
     # The full pins and discovery hatch leave room for catalog lines. 21000 since 2026-09-22:
     # read_file gained start_line/line_count and the pinned tools carry approval notes (fix #43/#44).
-    window = 21000
+    # 25000 since 2026-09-26 (DREAM-150): run_bash's skill-folder note (2026-09-24) and the
+    # project-memory schemas of remember/recall put that floor at 2,220, over 21000's 2,100 budget.
+    window = 25000
     b = _backend(_fat_toolset(), n_ctx=window)
     b._client = _FakeClient([_text_round()])
     [ev async for ev in b.ask("hi")]
     payload = b._client.payloads[0]
 
+    # DREAM-035: a window meant for this case must establish it. Over the target, the full pins and the
+    # hatch go out alone by design (tests/test_schema_budget_real.py), which is not what is tested here.
+    pinned = [s for s in b.tool_schemas if s["function"]["name"] in b._pinned]
+    optional = [s for s in b.tool_schemas if s["function"]["name"] not in b._pinned]
+    floor = tbs.measure(pinned + [tbs.lookup_schema(optional, 0)])
+    assert floor < int(window * tbs.DEFAULT_BUDGET_FRAC), f"the pins and hatch ({floor}) outgrew this window"
     assert tbs.measure(b.tool_schemas) > int(window * tbs.DEFAULT_BUDGET_FRAC)
     assert tbs.measure(payload["tools"]) <= int(window * tbs.DEFAULT_BUDGET_FRAC)
 
@@ -218,6 +229,40 @@ async def test_the_task_tool_is_pinned_when_subagents_are_enabled():
     b._client = _FakeClient([_text_round()])
     [ev async for ev in b.ask("hi")]
     assert "task" in _sent_names(b._client.payloads[0])
+
+
+# --- DREAM-208: `task` is pinned whenever there are sub-agents, whatever the prompt style ------------------------
+
+def _compact(window, subagents):
+    """A balanced-profile backend (a compact prompt style) whose toolset is past its schema budget at `window`: the
+    core tools and enough fillers, each cheaper than `task`, to fill the budget alone. With no store the selector
+    ranks cheapest first, so unless `task` is pinned the fillers take the room it would need."""
+    filler = openai_compat._tool_schema(_tool("filler_0000", nprops=4))
+    n = int(window * PROFILES["balanced"].schema_fraction) // tbs.measure([filler]) + 1
+    b = _backend(_CORE_TOOLS + [_tool(f"filler_{i:04d}", nprops=4) for i in range(n)], n_ctx=window,
+                 subagents=subagents, profile=PROFILES["balanced"])
+    b._client = _FakeClient([_text_round()])
+    return b, filler
+
+
+@pytest.mark.parametrize("window", [200_000, 16_384])
+async def test_a_compact_profile_pins_task_when_there_are_sub_agents(window):
+    """Under a compact prompt style (the balanced and lean profiles) the pins were the four hands only: the selector
+    deferred `task`, and the lead could not delegate before a tool_schema round."""
+    b, filler = _compact(window, {"researcher": SimpleNamespace(description="digs things up", prompt="p",
+                                                                tool_names=["read_file"])})
+    [task] = [s for s in b.tool_schemas if s["function"]["name"] == "task"]
+    assert tbs.measure([filler]) < tbs.measure([task]), "the premise: a filler is cheaper than `task`"
+    [ev async for ev in b.ask("hi")]
+    sent = _sent_names(b._client.payloads[0])
+    assert tbs.LOOKUP_TOOL_NAME in sent, "the selector deferred tools at this window"
+    assert "task" in sent
+
+
+async def test_a_compact_profile_pins_no_task_without_sub_agents():
+    b, _ = _compact(16_384, None)
+    [ev async for ev in b.ask("hi")]
+    assert "task" not in b._pinned and "task" not in _sent_names(b._client.payloads[0])
 
 
 async def test_deferral_is_stable_across_the_rounds_of_a_turn():

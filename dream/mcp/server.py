@@ -26,7 +26,7 @@ import mcp.types as mcp_types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
-from .. import config
+from .. import __version__, config
 from ..core.backends.base import content_to_text
 from ..memory.store import MemoryStore
 from ..memory.working import WorkingMemory
@@ -97,7 +97,7 @@ def build_server(bridge=None) -> Server:
     """Assemble the low-level MCP ``Server`` with ``list_tools``/``call_tool`` wired to
     the exposed Dream tools. Building the context is the caller's job (``serve`` does it)
     so the server object can be constructed in-process by tests without any env."""
-    server: Server = Server(config.MCP_SERVER_NAME, version=config.__dict__.get("VERSION", "0.1.0"))
+    server: Server = Server(config.MCP_SERVER_NAME, version=config.__dict__.get("VERSION", __version__))
 
     @server.list_tools()
     async def _list_tools() -> list[mcp_types.Tool]:

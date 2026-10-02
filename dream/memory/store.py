@@ -718,6 +718,16 @@ class MemoryStore:
             ).fetchone()
             return row[0]
 
+    def recent_user_turns(self, session_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        """The session's last `limit` user-role turns, newest first: the owner's and the ones Dream
+        wrote (core/turn_origin.py tells them apart)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT role, content, tool_name, ts FROM turns WHERE session_id=? AND role='user' "
+                "ORDER BY id DESC LIMIT ?", (session_id, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def recent_sessions(
         self, limit: int = 10, *, exclude_session_id: str | None = None, scope: Any = _DEFAULT,
     ) -> list[dict[str, Any]]:

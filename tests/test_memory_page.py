@@ -28,7 +28,7 @@ def mem(tmp_path, monkeypatch):
 
 async def test_list_read_save_and_delete(mem):
     srv, root, ws = mem
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://test',
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://127.0.0.1',
                                  headers={'X-Dream-Token': srv.token}) as client:
         items = (await client.get('/api/memory')).json()['items']
         scopes = {(i['scope'], i['title']) for i in items}
@@ -66,7 +66,7 @@ async def test_the_memory_page_opens_edits_and_drafts_a_consolidation(mem, monke
             page.set_default_timeout(4000)
             errors = []
             page.on('pageerror', lambda e: errors.append(str(e)))
-            await page.goto(url + '&companion=1')
+            await page.goto(url.replace('/#', '/?companion=1#'))
             await page.locator('#dream-nav-memory').click()
             await expect(page.locator('#dream-memory-page')).to_be_visible()
             await expect(page.locator('#dream-memory-page .memory-row')).to_have_count(2)

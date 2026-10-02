@@ -1,0 +1,46 @@
+{
+  "presets": {
+    "Software Development": {
+      "skills": ["code-review", "test-writing", "api-design", "dependency-upgrade", "coding", "debugging", "verifying", "gated-build", "brainstorming", "frontend-design", "understand", "understand-dashboard", "understand-domain"],
+      "tools": ["files", "project_outline", "web", "studio", "checkpoint_tools", "project", "github_tools", "visual_check", "measure_image", "vision", "questions"],
+      "mcp": [],
+      "plugins": ["understand-anything"]
+    },
+    "Finance": {
+      "skills": ["financial-statements", "variance-analysis", "cash-flow-forecast", "reconciliation", "unit-economics", "data-analysis", "documents", "research", "verifying"],
+      "tools": ["files", "web", "library_tools", "export_tools", "widgets", "vision", "show_to_user"],
+      "mcp": [],
+      "plugins": []
+    },
+    "Sales": {
+      "skills": ["account-research", "outreach-draft", "discovery-call-prep", "proposal-builder", "pipeline-review", "research", "writing", "documents"],
+      "tools": ["web", "library_tools", "export_tools", "widgets", "show_to_user"],
+      "mcp": [],
+      "plugins": []
+    },
+    "Legal": {
+      "skills": ["contract-review", "clause-comparison", "nda-triage", "legal-research-memo", "compliance-checklist", "research", "writing", "documents", "verifying"],
+      "tools": ["web", "library_tools", "export_tools", "vision", "show_to_user"],
+      "mcp": [],
+      "plugins": []
+    },
+    "Security": {
+      "skills": ["threat-model", "secure-code-review", "dependency-audit", "incident-triage", "hardening-checklist", "coding", "debugging", "verifying", "research"],
+      "tools": ["files", "project_outline", "web", "checkpoint_tools", "github_tools", "show_to_user", "done"],
+      "mcp": [],
+      "plugins": []
+    },
+    "Scientific": {
+      "skills": ["literature-review", "experiment-design", "statistical-analysis", "paper-summary", "reproducibility-check", "research", "data-analysis", "writing"],
+      "tools": ["files", "web", "library_tools", "export_tools", "widgets", "vision", "media_tools", "github_tools"],
+      "mcp": [],
+      "plugins": []
+    },
+    "Creative": {
+      "skills": ["story-development", "brand-voice", "copy-variations", "visual-brief", "worldbuilding", "writing", "media", "frontend-design", "brainstorming"],
+      "tools": ["files", "web", "vision", "media_tools", "studio", "starters", "export_tools", "visual_check", "measure_image", "questions", "library_tools"],
+      "mcp": [],
+      "plugins": []
+    }
+  }
+}

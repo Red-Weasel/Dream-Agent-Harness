@@ -132,7 +132,8 @@ _SHELL = {"Bash", "run_bash"}
 # Removes things. Explicit destructive capability preserves path checks and asks
 # even in Auto, except for the validated, bounded red-team deletion grant.
 _DESTRUCTIVE = {"delete_file"}
-_DELEGATING = {"Task"}  # a subagent can write; it is not read-only inspection
+_DELEGATING = {"Task", "Agent", "delegate_local"}  # a subagent can write; not read-only inspection. Agent:
+# the bundled Claude CLI's launch tool, Task its older name (DREAM-212 gate); delegate_local: DREAM-213
 
 # Self-built tools, by name, as declared by the registry each boot. Provenance —
 # not the name string — decides their capability: a tool Dream wrote for itself is

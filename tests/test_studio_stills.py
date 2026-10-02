@@ -76,7 +76,7 @@ async def test_the_real_pane_follows_renders_labels_stills_and_opens_the_page_in
             context = await browser.new_context(viewport={"width": 2554, "height": 1338})
             page = await context.new_page()
             page.set_default_timeout(8000)
-            await page.goto(url + "&companion=1", wait_until="load")
+            await page.goto(url.replace("/#", "/?companion=1#"), wait_until="load")
             await page.wait_for_function("document.getElementById('stat').textContent !== 'connecting'")
             for _ in range(50):
                 if srv.client_count:

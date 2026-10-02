@@ -66,7 +66,7 @@ Build a candidate wheel separately from runtime data:
 ```sh
 uv build --wheel --offline --out-dir /tmp/dream-wheel
 uv venv /tmp/dream-install
-uv pip install --offline --python /tmp/dream-install/bin/python /tmp/dream-wheel/dream-0.1.0-py3-none-any.whl
+uv pip install --offline --python /tmp/dream-install/bin/python /tmp/dream-wheel/dream-0.2.0-py3-none-any.whl
 ```
 
 An offline dependency install requires cached distributions. If dependencies are

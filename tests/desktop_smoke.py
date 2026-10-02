@@ -76,7 +76,7 @@ def native_check(output: Path):
     workspace = Path(temporary.name)
     w = DreamWindow(str(ROOT / '.venv/bin/python'), str(ROOT), [], autostart=False)
     w.running = True
-    env = dict(os.environ, DREAM_DESKTOP_SESSION_FILE=str(w.discovery), DREAM_GUI_OPEN='0')
+    env = dict(os.environ, DREAM_DESKTOP_SESSION_FILE=str(w.discovery))
     w.terminal.spawn_async(Vte.PtyFlags.DEFAULT, str(ROOT),
                           [str(ROOT / '.venv/bin/python'), str(Path(__file__).resolve()), '--server', str(workspace)],
                           [f'{k}={v}' for k,v in env.items()], GLib.SpawnFlags.DEFAULT,

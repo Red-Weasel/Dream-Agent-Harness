@@ -12,7 +12,7 @@ Helpers:
 - **Glue** is `python3 .ua/tmp/ua_glue.py <command>` through run_bash. It prepares the scripts' inputs, assembles the four files and checks them (never write those by hand); do what its `next:` lines say.
 
 ## 1. Status
-- Get the glue: `skill_open(name="understand")` prints `Directory: <dir>`; then `copy_files(files=[{"src": "<dir>/glue.py", "dest": ".ua/tmp/ua_glue.py"}])`. Without copy_files: `skill_file(name="understand", path="glue.py")` and write_file its text (after the `understand/glue.py:` line) to `.ua/tmp/ua_glue.py`.
+- Get the glue: `skill_open(name="understand")` prints `Directory: <dir>`; then `copy_files(files=[{"src": "<dir>/glue.py", "dest": ".ua/tmp/ua_glue.py"}])`. Without copy_files, run_bash: `mkdir -p .ua/tmp && cp "$DREAM_SKILLS/understand/glue.py" .ua/tmp/ua_glue.py` (never from skill_file: it shortens long files).
 - glue `status` (add `--exclude "<p1,p2>"` for paths the user leaves out, `--include "<dir>"` for a skipped folder the user wants) compares the map with the files, writes `.ua/.understandignore` if missing, skips installed packages and browsers, and prints one of:
   - `The map is current` or `nothing to map`: tell the user what it printed (when built, what it covers), and stop.
   - `update mode`: only edited, added and deleted files are redone. Do steps 2-9 as its `next:` lines say.

@@ -65,9 +65,8 @@ def routes(server):
             return JSONResponse({'error': str(exc)}, status_code=status)
 
     async def artifact(request):
-        refused = guard(request)
-        if refused is not None:
-            return refused
+        if not server._authorized(request, query=True):   # a link carries no header
+            return JSONResponse({'error': 'unauthorized'}, status_code=401)
         try:
             svc = await run_in_threadpool(service)
             name, data = await run_in_threadpool(svc.artifact, request.path_params['task_id'], request.path_params['artifact_id'])

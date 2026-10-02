@@ -1,0 +1,14 @@
+{
+  "format": "dream-skill/v1",
+  "name": "dependency-upgrade",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "grep",
+    "checkpoint_list",
+    "web_search",
+    "browse",
+    "run_bash",
+    "str_replace_edit"
+  ]
+}

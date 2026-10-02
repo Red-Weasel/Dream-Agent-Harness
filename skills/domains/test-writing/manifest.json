@@ -1,0 +1,16 @@
+{
+  "format": "dream-skill/v1",
+  "name": "test-writing",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "list_dir",
+    "read_file",
+    "grep",
+    "update_plan",
+    "note",
+    "run_bash",
+    "write_file",
+    "str_replace_edit"
+  ]
+}

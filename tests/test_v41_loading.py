@@ -72,18 +72,25 @@ def test_other_memory_planners_keep_existing_weight_fit_check(hardware, caps):
         startup.launch_preflight(475, 2, caps)
 
 
-def test_v41_parallel_control_is_limited_to_one():
+def test_v41_parallel_control_takes_lanes():
+    """DREAM-154 (was: limited to one): the engine serves V4.1 in lanes (P4 B6b), 1-4; DREAM-201: 1-16 (v0.2.0)."""
     controls = settings.available_controls({**CAPS, 'load': ['parallel'], 'defaults': {'parallel': 1}})
     control = next(c for c in controls if c.name == 'parallel')
-    assert control.maximum == 1
+    assert control.maximum == 16 and settings.parse_value(control, '2') == 2
+    assert settings.parse_value(control, '16') == 16
     with pytest.raises(ValueError):
-        settings.parse_value(control, '2')
+        settings.parse_value(control, '17')
 
 
-def test_v41_native_selection_rejects_multiple_slots():
+def test_v41_native_selection_takes_up_to_sixteen_slots():
+    """DREAM-154 (was: rejects multiple slots); DREAM-201: up to 16 (was 4)."""
     metadata = {**CAPS, 'controls': [{'name': 'parallel', 'choices': []}]}
-    with pytest.raises(ValueError, match='parallel'):
-        startup.validate_selection(dict(ctx=4096, gpus=2, options={'parallel': 2}), metadata)
+    assert startup.validate_selection(dict(ctx=4096, gpus=2, options={'parallel': 2}), metadata)['options'] == {
+        'parallel': 2}
+    assert startup.validate_selection(dict(ctx=4096, gpus=2, options={'parallel': 16}), metadata)['options'] == {
+        'parallel': 16}
+    with pytest.raises(ValueError):
+        startup.validate_selection(dict(ctx=4096, gpus=2, options={'parallel': 17}), metadata)
 
 
 def test_v41_reserve_applies_even_to_small_checkpoint(hardware):

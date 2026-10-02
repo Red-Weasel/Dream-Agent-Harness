@@ -88,3 +88,18 @@ def test_build_server_exposes_the_expected_tools():
         "web_search",
     }
     assert "browse" not in names and "see" not in names
+
+
+def test_both_mcp_servers_report_the_package_version():
+    # DREAM-153: config defines no VERSION, so both servers report their fallback, which
+    # must be the package version (pyproject.toml's), not a literal that can drift.
+    import tomllib
+    from pathlib import Path
+
+    import dream
+    from dream.tools import registry
+
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    assert dream.__version__ == pyproject["project"]["version"]
+    assert mcp_server.build_server().version == dream.__version__
+    assert registry.build()["server"]["instance"].version == dream.__version__

@@ -35,7 +35,7 @@ def make_skill(root, name, *, filename='SKILL.md', text='Apply the specific work
 
 def test_default_catalog_is_small_and_all_workflows_are_packaged(curated):
     assert {s.name for s in curated} == set(config.CURATED_SKILLS)
-    assert len(curated) == 19
+    assert len(curated) == 20
     # 10 workflows fit in 16k; the four process skills added 2026-09-22 (brainstorming,
     # debugging, gated-build, frontend-design) bring the curated set to 14 at ~2.1k each;
     # grill-me and handoff (owner request 2026-09-23, DREAM-090) bring it to 16 at ~1.5k each;
@@ -47,15 +47,20 @@ def test_default_catalog_is_small_and_all_workflows_are_packaged(curated):
     # summed 34,981, so 34,981 + 1,443 + 4,141 = 40,565 < 41,000; their index lines (173 and 170
     # chars, one newline each) take the joined index from 2,010 to 2,010 + 174 + 171 = 2,355 < 2,400.
     # Like the others after `understand` by name, neither is in the 1,600-char wake index.
-    assert sum(len(s.manifest.read_text()) for s in curated) < 41000
-    assert len('\n'.join(loader.index_lines(curated))) < 2400
+    # DREAM-181 adds thinking-out-loud (1,868 chars; its worked example is a reference file, read on demand): the texts
+    # sum under 41,000 + 1,868 < 43,000, and its index line keeps the joined index under 2,400 + 260.
+    assert sum(len(s.manifest.read_text()) for s in curated) < 43000
+    assert len('\n'.join(loader.index_lines(curated))) < 2660
     project = tomllib.loads((ROOT/'pyproject.toml').read_text())
     wheel = project['tool']['hatch']['build']['targets']['wheel']
     selected = set(wheel['only-include'])
-    assert selected == {'dream', 'skills/illuminati-handshake',
+    assert selected == {'dream', 'skills/illuminati-handshake', 'skills/domains',   # DREAM-172 domain skills
                         *(f'skills/{skill.name}' for skill in curated)}
     mapping = wheel['sources']
     assert mapping == {'skills': 'dream/resources/skills'}
+    # That rewrite changes a prefix, so hatchling's default editable build fails on any
+    # packaged skill .py file (glue.py); the explicit checkout-root path keeps uv sync working (DREAM-149).
+    assert wheel['dev-mode-dirs'] == ['.']
     for skill in curated:
         source = Path('skills') / skill.name
         assert source.as_posix() in selected
@@ -80,7 +85,8 @@ def test_default_roots_do_not_discover_global_skills_or_optional_package(monkeyp
     make_skill(tmp_path/'.codex'/'skills', 'global-codex')
     make_skill(tmp_path/'.agents'/'skills', 'global-agent')
     found, warnings = loader.discover(config.skill_dirs())
-    assert {s.name for s in found} == set(config.CURATED_SKILLS)
+    domains = {s.name for s in loader.discover(config.DOMAIN_SKILL_DIRS)[0]}      # DREAM-172: Dream's own, not curated
+    assert {s.name for s in found} == set(config.CURATED_SKILLS) | domains and len(domains) == 34
     assert not warnings
 
 

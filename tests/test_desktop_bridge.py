@@ -197,7 +197,7 @@ async def test_session_metadata_follows_the_current_engine_without_restarting_st
     app.engine = SimpleNamespace(session_id="first", model="old", effort="low",
                                  vision_status=lambda: {"state": "off", "enabled": False, "source": "fixture"})
     srv = StudioServer(EventBus(), session=app._studio_session_info)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://127.0.0.1") as client:
         headers = {"X-Dream-Token": srv.token}
         assert (await client.get("/api/desktop", headers=headers)).json()["session"]["session_id"] == "first"
         app.engine = SimpleNamespace(session_id="next", model="new", effort="high",
@@ -271,24 +271,24 @@ def test_local_gui_flag_reaches_the_shared_launcher(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("browser_result", [False, OSError("no browser")])
-async def test_browser_launch_failure_is_reported_without_losing_studio(app_factory, monkeypatch, browser_result):
+async def test_the_studio_url_is_printed_once_and_never_handed_to_a_browser(app_factory, monkeypatch):
+    """The URL carries the session token (DREAM-187): a browser's history and sync would keep it."""
     import webbrowser
     from dream.gui import server
     from dream.tools import context
 
     app = app_factory(gui=True)
     app.engine = SimpleNamespace(session_id="s", model="scripted", effort=None)
-    fake = SimpleNamespace(start=AsyncMock(return_value="http://127.0.0.1:1234"), stop=AsyncMock())
+    url = "http://127.0.0.1:1234/#token=secret"
+    fake = SimpleNamespace(start=AsyncMock(return_value=url), stop=AsyncMock())
     monkeypatch.setattr(server, "StudioServer", Mock(return_value=fake))
-    monkeypatch.setattr(config, "GUI_OPEN", True)
     monkeypatch.setattr(context, "_STUDIO", None)
-    opener = Mock(side_effect=browser_result) if isinstance(browser_result, Exception) else Mock(return_value=browser_result)
+    opener = Mock()
     monkeypatch.setattr(webbrowser, "open", opener)
     await app._start_studio()
     assert app.studio is fake and context.studio() is fake
-    messages = " ".join(str(call) for call in app.renderer.system.call_args_list)
-    assert "browser" in messages and "Open the URL above" in messages
+    opener.assert_not_called()
+    assert sum(url in str(call) for call in app.renderer.system.call_args_list) == 1
 
 
 @pytest.mark.asyncio
@@ -353,7 +353,7 @@ asyncio.run(main())
     child = await asyncio.create_subprocess_exec(
         sys.executable, "-c", script,
         env={**os.environ, "DREAM_ROOT": str(tmp_path / "child"), "DREAM_GUI": "1",
-             "DREAM_GUI_OPEN": "0", "DREAM_MONITOR": "0", "DREAM_SEMANTIC_MEMORY": "0",
+             "DREAM_MONITOR": "0", "DREAM_SEMANTIC_MEMORY": "0",
              "DREAM_RERANK": "0", "DREAM_CONSOLIDATE": "0",
              "DREAM_DESKTOP_SESSION_FILE": str(private_discovery)},
         stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
@@ -372,7 +372,7 @@ asyncio.run(main())
         assert state["session"]["workspace"] == str(tmp_path / "child")
         assert state["show_sequence"] == 1
         async with httpx.AsyncClient(trust_env=False) as client:
-            response = await client.get(f"{base}/?token={token}&companion=1")
+            response = await client.get(f"{base}/?companion=1#token={token}")
             assert response.status_code == 200
             async with websockets.connect(base.replace("http:", "ws:") + f"/ws?token={token}", proxy=None) as ws:
                 assert json.loads(await asyncio.wait_for(ws.recv(), 1))["data"]["session_id"] == "native-test"

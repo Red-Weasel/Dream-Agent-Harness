@@ -6,7 +6,36 @@
 <title>Dream Studio</title>
 <link rel="icon" href="/assets/dream-app-icon.png" type="image/png">
 <link rel="stylesheet" href="/assets/media.css">
-<script>document.documentElement.classList.toggle('companion', new URLSearchParams(location.search).get('companion') === '1');</script>
+<script>
+(() => {
+  // Read before any module runs. The session token arrives in the fragment (never sent to a server, never
+  // in a Referer), and every module reads it through dreamToken(). In a browser it then leaves the address
+  // bar, so a copied link and the page's own history entry no longer carry it (the browser may have
+  // recorded the visit as it arrived); the tab keeps it for a reload in sessionStorage (this tab and
+  // origin only, gone when the tab closes), and only once that has taken it: with storage refused, the
+  // fragment is what a reload reads. The desktop pane (?companion=1) has no address bar and keeps it in
+  // the URL, because the shell recognises its own authenticated document by that URL (DREAM-187).
+  const hash = new URLSearchParams(location.hash.slice(1)), query = new URLSearchParams(location.search);
+  const companion = query.get('companion') === '1';
+  document.documentElement.classList.toggle('companion', companion);
+  let token = hash.get('token') || '', stored = false;
+  try {
+    if (token) { sessionStorage.setItem('dream-token', token); stored = true; }
+    else token = sessionStorage.getItem('dream-token') || '';
+  } catch (e) { /* storage denied: this load still has the URL's token, and keeps it there */ }
+  if (!companion && stored) {
+    hash.delete('token');
+    history.replaceState(history.state, '', location.pathname + location.search + (String(hash) ? '#' + hash : ''));
+  }
+  window.dreamToken = () => token;
+  // A new session on the same port differs only in the fragment, which a browser treats as a move within
+  // this document, not a load: reload, so the page takes the new token and connects to the new session.
+  addEventListener('hashchange', () => {
+    const next = new URLSearchParams(location.hash.slice(1)).get('token');
+    if (next && next !== token) location.reload();
+  });
+})();
+</script>
 <style>
 :root{
   --violet:#8b5cf6; --cyan:#22d3ee;
@@ -55,10 +84,10 @@ main{flex:1;min-width:380px;overflow-y:auto;padding:22px 20px 8px;scroll-behavio
 .body ul,.body ol{margin:0 0 10px;padding-left:22px}
 .body li{margin:3px 0}
 .body a{color:var(--cyan)}
-.body code{font:.88em var(--mono);background:#1b2030;padding:1.5px 5px;border-radius:4px;color:#c4b5fd}
-.body pre{background:#0d1017;border:1px solid var(--line);border-radius:8px;
+.body code{font:.88em var(--mono);background:var(--panel);padding:1.5px 5px;border-radius:4px;color:#c4b5fd}
+.body pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;
   padding:12px 14px;overflow-x:auto;margin:0 0 12px}
-.body pre code{background:none;padding:0;color:#cbd5e1;font-size:12.5px;line-height:1.55}
+.body pre code{background:none;padding:0;color:var(--fg);font-size:12.5px;line-height:1.55}
 .body blockquote{border-left:2px solid var(--line);margin:0 0 10px;padding-left:12px;color:var(--dim)}
 .body table{border-collapse:collapse;margin:0 0 12px;font-size:13px}
 .body th,.body td{border:1px solid var(--line);padding:5px 10px;text-align:left}
@@ -76,16 +105,16 @@ main{flex:1;min-width:380px;overflow-y:auto;padding:22px 20px 8px;scroll-behavio
 .tool .tname{color:var(--violet);font-weight:600}
 .tool .targ{color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .tool .badge{margin-left:auto;font-size:10px;padding:1px 7px;border-radius:99px;
-  background:#1b2030;color:var(--dim);flex:0 0 auto}
+  background:var(--panel);color:var(--dim);flex:0 0 auto}
 .tool-preview{margin:0 0 8px;padding:10px 12px;max-height:40vh;overflow:auto;border:1px dashed var(--line);
-  border-radius:8px;background:#0d1017;color:var(--dim);font:11.5px/1.5 var(--mono);white-space:pre-wrap;
+  border-radius:8px;background:var(--bg);color:var(--dim);font:11.5px/1.5 var(--mono);white-space:pre-wrap;
   overflow-wrap:anywhere}
 .tool-preview::before{content:'Writing\2026';display:block;color:var(--violet);font-size:10px;
   letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px}
 .tool.err{border-color:#4a2226}
 .tool.err .badge{background:#3b1d21;color:var(--err)}
-.tool pre{margin:0;padding:11px 13px;background:#0d1017;border-top:1px solid var(--line);
-  font:11.5px/1.5 var(--mono);color:#9fb0c9;max-height:340px;overflow:auto;white-space:pre-wrap;
+.tool pre{margin:0;padding:11px 13px;background:var(--bg);border-top:1px solid var(--line);
+  font:11.5px/1.5 var(--mono);color:var(--dim);max-height:340px;overflow:auto;white-space:pre-wrap;
   word-break:break-word}
 
 /* thinking + system */
@@ -105,13 +134,15 @@ footer{flex:0 0 auto;background:var(--bg2);border-top:1px solid var(--line);padd
 textarea{flex:1;background:none;border:0;outline:0;color:var(--fg);font:14px/1.55 var(--sans);
   resize:none;max-height:190px;min-height:23px}
 textarea::placeholder{color:var(--faint)}
-button{background:var(--grad);border:0;border-radius:8px;color:#0b0d12;font:600 12px var(--sans);
+button{background:var(--grad);border:0;border-radius:8px;color:var(--bg0);font:600 12px var(--sans);
   padding:8px 15px;cursor:pointer;flex:0 0 auto}
 button:disabled{opacity:.35;cursor:default}
 .hint{max-width:860px;margin:7px auto 0;color:var(--faint);font:10.5px var(--mono);display:flex;gap:16px}
 /* The project's plan (update_plan): a one-line strip left of the prompt box (#88); its phases open in a popover above it; stale after 30 minutes without an update (#89). */
 #plan-panel{position:relative;flex:0 1 auto;min-width:0;max-width:45%;padding-bottom:5px;font:12.5px/1.5 var(--sans, sans-serif);color:var(--fg)}
-#plan-panel summary{cursor:pointer;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* The summary breaks only between its two parts ("Plan · phase 3 of 6 · 5/14 steps" and "updated 2 h 22 min ago"): when a wider font leaves no room for both on one line (DejaVu Sans needs 369 px where Noto Sans needs 340; 45 % of the composer at 1000 px is 361), the age takes a second line whole instead of being cut (DREAM-150). */
+#plan-panel summary{cursor:pointer;color:var(--dim);overflow:hidden;text-overflow:ellipsis}
+#plan-panel summary>span{white-space:nowrap}
 #plan-panel summary:hover,#plan-panel[open] summary{color:var(--fg)}
 #plan-panel.stale summary{color:#f59e0b}
 #plan-panel ol{position:absolute;left:0;bottom:calc(100% + 12px);z-index:6;min-width:260px;max-width:min(440px,86vw);max-height:50vh;overflow:auto;margin:0;padding:8px 12px;list-style:none;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
@@ -125,15 +156,22 @@ button:disabled{opacity:.35;cursor:default}
 #plan-panel .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;border:1.5px solid #6b7280}
 #plan-panel .done > .dot, #plan-panel .done > div > .dot{background:#22c55e;border-color:#22c55e}
 #plan-panel .in_progress > .dot, #plan-panel .in_progress > div > .dot{background:#f59e0b;border-color:#f59e0b}
-#read-twice{background:none;border:1px solid var(--line);color:var(--faint);font:inherit;border-radius:6px;padding:1px 7px;cursor:pointer}
+#read-twice{background:none;border:1px solid var(--line);color:var(--faint);font:inherit;border-radius:999px;padding:2px 11px;cursor:pointer}
 #read-twice.on{border-color:var(--violet);color:var(--fg);background:color-mix(in srgb, var(--violet) 22%, transparent)}
-#fresh-start{background:none;border:1px solid var(--line);color:var(--faint);font:inherit;border-radius:6px;padding:1px 7px;cursor:pointer}
+#fresh-start{background:none;border:1px solid var(--line);color:var(--faint);font:inherit;border-radius:999px;padding:2px 11px;cursor:pointer}
 #fresh-start:hover:not(:disabled){color:var(--fg);border-color:var(--dim)}
 #fresh-start:disabled{opacity:.45;cursor:not-allowed}
+/* DREAM-170: the skill preset for new sessions, beside the prompt; the row wraps on a narrow window, never scrolls sideways. */
+footer .hint{flex-wrap:wrap;row-gap:4px}
+#preset-pick{white-space:nowrap}
+#preset-pick select{background:none;border:1px solid var(--line);color:var(--faint);font:inherit;border-radius:6px;padding:0 3px;max-width:11em}
+#preset-cost{white-space:nowrap}
+/* Below the companion's side-by-side width (1000 px) the hint keeps its one line and the preview its height: the cost moves into the select's tooltip. */
+@media (max-width:999px){.companion #preset-cost{display:none}.companion #preset-pick select{max-width:8.5em}}
 /* The desktop pane (480 px): the keyboard hint yields its width to the pills rather than wrap the row, which would take a line from the preview. */
 .companion footer .hint .keys{flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 main::-webkit-scrollbar,.tool pre::-webkit-scrollbar{width:9px;height:9px}
-main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252b3d;border-radius:6px}
+main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:var(--raised);border-radius:6px}
 
 /* telemetry rail — the thing no other app in this space does properly */
 .split{flex:1;display:flex;min-height:0}
@@ -147,7 +185,7 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
 .card .nm{color:var(--fg);font-size:11.5px;margin-bottom:2px;overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap}
 .card .bdf{color:var(--faint);font-size:9.5px;margin-bottom:8px}
-.bar{height:5px;border-radius:99px;background:#0d1017;overflow:hidden;margin:5px 0 3px}
+.bar{height:5px;border-radius:99px;background:var(--bg);overflow:hidden;margin:5px 0 3px}
 .bar>i{display:block;height:100%;background:var(--grad);width:0;transition:width .45s ease}
 .bar.hot>i{background:linear-gradient(90deg,var(--warn),var(--err))}
 .kv{display:flex;justify-content:space-between;color:var(--dim);font-size:10.5px;padding:1.5px 0}
@@ -156,13 +194,13 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
   background-clip:text;color:transparent}
 .big small{font:400 10px var(--mono);color:var(--faint);-webkit-text-fill-color:var(--faint)}
 .pill{display:inline-block;font-size:9.5px;padding:1px 7px;border-radius:99px;
-  background:#1b2030;color:var(--dim);margin-left:6px}
+  background:var(--panel);color:var(--dim);margin-left:6px}
 .pill.live{background:#12301f;color:var(--ok)}
 #railtoggle,.tabs button{background:none;border:1px solid var(--line);color:var(--dim);
   padding:4px 9px;font:10px var(--mono);border-radius:6px;cursor:pointer}
 #railtoggle:hover,.tabs button:hover{color:var(--fg);border-color:var(--violet)}
 .tabs{display:flex;gap:6px;margin:0 0 11px}
-.tabs button.on{color:var(--fg);border-color:var(--violet);background:#1b1630}
+.tabs button.on{color:var(--fg);border-color:var(--violet);background:var(--plum)}
 /* vital signs (DREAM-135): a monitoring card in the rail, never in the chat; no alarm colour while uncalibrated */
 #vitals .rail-h small{font-weight:400;letter-spacing:0;text-transform:none}
 #vitals .vt-row{position:relative;cursor:help;outline:none;border-radius:4px}
@@ -187,7 +225,7 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
 .cp .acts button{flex:1;padding:4px 0;font-size:10px}
 .cp .acts button.danger{border-color:#4a2226;color:#fca5a5}
 .cp .acts button.danger:hover{background:#2a1417;border-color:var(--err)}
-.cpdiff{background:#0d1017;border:1px solid var(--line);border-radius:7px;margin-top:7px;
+.cpdiff{background:var(--bg);border:1px solid var(--line);border-radius:7px;margin-top:7px;
   padding:8px 9px;font:10.5px/1.5 var(--mono);max-height:280px;overflow:auto;white-space:pre-wrap}
 .cpdiff .a{color:var(--ok)}.cpdiff .d{color:var(--err)}.cpdiff .h{color:var(--violet)}
 
@@ -197,7 +235,7 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
   transition:border-color .15s}
 .artchip:hover{border-color:var(--violet)}
 .artchip .ic{width:23px;height:23px;border-radius:6px;background:var(--grad);flex:0 0 auto;
-  display:grid;place-items:center;font:600 10px var(--mono);color:#0b0d12}
+  display:grid;place-items:center;font:600 10px var(--mono);color:var(--bg0)}
 .artchip .t{flex:1;min-width:0}
 .artchip .t b{display:block;font-size:12.5px;font-weight:500;overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap}
@@ -216,13 +254,13 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
   border-radius:6px;font:10px var(--mono);padding:3px 6px}
 .seg{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
 .seg button{background:none;border:0;color:var(--dim);font:10px var(--mono);padding:4px 10px;cursor:pointer}
-.seg button.on{background:#1b1630;color:var(--fg)}
+.seg button.on{background:var(--panel);color:var(--fg)}
 .artclose{background:none;border:0;color:var(--faint);font-size:17px;cursor:pointer;padding:0 4px}
 .artclose:hover{color:var(--fg)}
 #artbody{flex:1;min-height:0;overflow:auto;background:#fff}
-#artbody.code{background:#0d1017}
+#artbody.code{background:var(--bg)}
 #artbody iframe{width:100%;height:100%;border:0;display:block}
-#artbody pre{margin:0;padding:14px;font:12px/1.6 var(--mono);color:#cbd5e1;white-space:pre-wrap;
+#artbody pre{margin:0;padding:14px;font:12px/1.6 var(--mono);color:var(--fg);white-space:pre-wrap;
   word-break:break-word}
 #artbody.image, .companion #artbody.image{display:flex;align-items:center;justify-content:center;background:#111}
 #artbody.image img{max-width:100%;max-height:100%;object-fit:contain}
@@ -279,24 +317,24 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
 .vcard a{color:var(--cyan)}
 .vcard .dom{color:var(--faint);font:10.5px var(--mono);margin-left:8px}
 .vcard .price{color:var(--ok);font:600 12px var(--mono);margin-left:8px}
-.vcard .pill{display:inline-block;font-size:10.5px;padding:1px 8px;border-radius:99px;background:#1b2030;color:var(--dim);margin:4px 6px 0 0}
+.vcard .pill{display:inline-block;font-size:10.5px;padding:1px 8px;border-radius:99px;background:var(--panel);color:var(--dim);margin:4px 6px 0 0}
 .vcard .tscroll{overflow-x:auto}
 .vcard table.cmp{border-collapse:collapse;width:100%;font-size:13px}
 .vcard table.cmp th,.vcard table.cmp td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}
-.vcard table.cmp thead th{background:#1b2030}
+.vcard table.cmp thead th{background:var(--panel)}
 .vcard table.cmp tbody th{color:var(--dim);font-weight:500;white-space:nowrap}
 .vcard .prow{display:flex;gap:10px;overflow-x:auto;padding-bottom:4px}
-.vcard .ptile{flex:0 0 240px;background:#0d1017;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.vcard .ptile{flex:0 0 240px;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
 .vcard .ogrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
-.vcard .opt{background:#0d1017;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.vcard .opt{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
 .vcard .place,.vcard .lnk{padding:7px 0;border-top:1px solid var(--line)}
 .vcard .place:first-of-type,.vcard .lnk:first-of-type{border-top:0}
-.vcard details.day,.vcard details.q,.vcard ol.steps details{border:1px solid var(--line);border-radius:8px;padding:6px 10px;margin:0 0 6px;background:#0d1017}
+.vcard details.day,.vcard details.q,.vcard ol.steps details{border:1px solid var(--line);border-radius:8px;padding:6px 10px;margin:0 0 6px;background:var(--bg)}
 .vcard summary{cursor:pointer;font-weight:500}
 .vcard .time{color:var(--cyan);font:11px var(--mono);margin-right:8px}
 .vcard ol.steps{padding-left:22px}.vcard ol.steps li{margin:4px 0}
 .vcard .tr2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.vcard .tr2>div{background:#0d1017;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.vcard .tr2>div{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
 .vcard .tr2 p{font-size:15px}.vcard .tr2 i{color:var(--dim);display:block;margin-bottom:6px}
 .vcard button.opt,.vcard button.copy{all:unset;cursor:pointer;display:block;padding:6px 10px;border-radius:7px;border:1px solid var(--line);margin:4px 0;font-size:13px}
 .vcard button.copy{display:inline-block;font:11px var(--mono);color:var(--dim);padding:3px 8px}
@@ -306,9 +344,9 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
 .vcard .fb{margin-top:4px;font-size:13px}.vcard .fb.ok{color:var(--ok)}.vcard .fb.bad{color:var(--err)}
 .vcard .irow{display:flex;gap:8px;flex-wrap:wrap}
 .vcard .irow a{display:flex;flex-direction:column;gap:3px;font:10.5px var(--mono);color:var(--faint);text-decoration:none}
-.vcard .irow img{display:block;height:120px;min-width:90px;max-width:220px;object-fit:cover;border-radius:7px;border:1px solid var(--line);background:#0d1017;color:var(--faint);font:10px var(--mono)}
+.vcard .irow img{display:block;height:120px;min-width:90px;max-width:220px;object-fit:cover;border-radius:7px;border:1px solid var(--line);background:var(--bg);color:var(--faint);font:10px var(--mono)}
 .vcard .rs{display:flex;gap:12px;align-items:center}.vcard .rs p{flex:1;margin:0}
-.vcard .rs button{background:var(--grad);border:0;border-radius:8px;color:#0b0d12;font:600 12px var(--sans);padding:8px 14px;cursor:pointer}
+.vcard .rs button{background:var(--grad);border:0;border-radius:8px;color:var(--bg0);font:600 12px var(--sans);padding:8px 14px;cursor:pointer}
 .vcard svg.chart{width:100%;height:auto;display:block}
 .vcard svg.chart .grid{stroke:var(--line);stroke-width:1}.vcard svg.chart .tick{fill:var(--dim);font:11px var(--mono)}
 .vcard .legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font:11px var(--mono);color:var(--dim)}
@@ -388,14 +426,15 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#252
   <div class="hint">
     <span>⏎ send · ⇧⏎ newline</span><span>one session, two views</span>
     <button id="read-twice" type="button" aria-pressed="false" title="Read ×2: the model reads each message you type twice (only your words, never the history)">Read ×2</button>
-    <button id="fresh-start" type="button" title="Fresh start: compact this conversation into a short handoff now: your requests, Dream&#39;s last reply, the files written this session and open tasks. Earlier detail stays in the session transcript. Between turns only; typing /fresh does the same.">Fresh start</button>
+    <button id="fresh-start" type="button" title="Handoff: rewrite this conversation as one short Handoff now: your requests, Dream&#39;s last reply, the files written this session and open tasks. Earlier detail stays in the session transcript. Between turns only; typing /handoff does the same.">Handoff</button>
+    <label id="preset-pick" title="Skill preset for new sessions: the skills and tools a new session starts with. This session keeps its own. Manage presets in Skills.">Preset <select id="preset-select" aria-label="Skill preset for new sessions"></select></label><span id="preset-cost"></span>
     <span id="perf" title="Last request: prompt reading speed, generation speed, and how full the context window is"></span>
     <span id="counts"></span>
   </div>
 </footer>
 
 <script>
-const TOKEN = new URLSearchParams(location.search).get('token') || '';
+const TOKEN = dreamToken();
 const COMPANION = document.documentElement.classList.contains('companion');
 let companion = null;
 const $ = id => document.getElementById(id);
@@ -424,7 +463,7 @@ function md(src){
   t = t.replace(/^&gt; (.*)$/gm,'<blockquote>$1</blockquote>');
   t = t.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>')
        .replace(/(^|\W)\*([^*\n]+)\*(?=\W|$)/g,'$1<em>$2</em>');
-  t = t.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+  t = t.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
   t = t.replace(/^[-*] (.*)$/gm,'<li>$1</li>').replace(/^\d+\. (.*)$/gm,'<li>$1</li>');
   t = t.replace(/(<li>[\s\S]*?<\/li>)(?!\s*<li>)/g,'<ul>$1</ul>');
   t = t.split(/\n{2,}/).map(p =>
@@ -512,6 +551,7 @@ function endTurn(){
 
 /* ---------- event handling ---------------------------------------------- */
 function handle(m){
+  window.dispatchEvent(new CustomEvent('dream:event', {detail:{m, replay:replayingHistory}}));   // other views (Nested Dream) rebuild their state from the same events, live and on replay (DREAM-188)
   // A server event can arrive after the reader moves but before the browser's
   // queued scroll event. Capture that movement before adding more content.
   syncFeedPosition();
@@ -571,6 +611,7 @@ function handle(m){
         s.session_id && `<span>${esc(s.session_id)}</span>`,
       ].filter(Boolean).join('');
       companion?.session(s);
+      loadPresets();
       break;
     }
     case 'text_delta': {
@@ -755,19 +796,49 @@ document.addEventListener('click', e => {
 });
 window.syncReadTwice = syncReadTwice;
 setTimeout(syncReadTwice, 0);
-// Fresh start (DREAM-113): this conversation becomes a short handoff now, between turns only. The button
-// and /fresh ask the same route; Dream refuses while a turn or queued input runs, and this line says why.
+// Handoff (DREAM-113; Fresh start until DREAM-175): this conversation becomes a short handoff now, between turns
+// only. The button and /handoff (or the old /fresh) ask the same route; Dream refuses while a turn or queued input runs, and this line says why.
 async function freshStart(){
   const b = $('fresh-start');
   if(b) b.disabled = true;
   try{
     const r = await fetch('/api/control', {method:'POST', headers:{'Content-Type':'application/json','X-Dream-Token':TOKEN},
                                           body: JSON.stringify({action:'fresh_start'})});
-    if(!r.ok){ const data = await r.json().catch(() => ({})); sysline(data.error || `Fresh start failed (HTTP ${r.status})`, 'error'); }
-  }catch(e){ sysline('Could not reach Dream. Reconnect, then try Fresh start again.', 'error'); }
+    if(!r.ok){ const data = await r.json().catch(() => ({})); sysline(data.error || `Handoff failed (HTTP ${r.status})`, 'error'); }
+  }catch(e){ sysline('Could not reach Dream. Reconnect, then try Handoff again.', 'error'); }
   finally{ if(b) b.disabled = working; }
 }
 document.addEventListener('click', e => { if(e.target.closest?.('#fresh-start')) freshStart(); });
+// Skill presets (DREAM-170/171): the select chooses the preset NEW sessions start with, with what it costs. One source
+// of truth, /api/presets, shared with the Skills workspace; each tells the other through a dream:presets event.
+let presetState = null;
+async function presetFetch(body){
+  const r = await fetch('/api/presets', body ? {method:'POST', headers:{'Content-Type':'application/json','X-Dream-Token':TOKEN}, body: JSON.stringify(body)}
+                                            : {headers:{'X-Dream-Token':TOKEN}, cache:'no-store'});
+  const data = await r.json().catch(() => ({}));
+  if(!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  return data;
+}
+async function loadPresets(){
+  const sel = $('preset-select'); if(!sel) return;
+  try{
+    presetState = await presetFetch();
+    sel.replaceChildren(...presetState.presets.map(p => new Option(p.name, p.name, false, p.name === presetState.active)));
+    const c = presetState.presets.find(p => p.name === sel.value)?.cost;
+    sel.title = $('preset-cost').textContent = presetState.error || ((c ? `${c.skills} skills · ${c.tools} tools · ~${(c.tokens / 1000).toFixed(1)}K tokens` : '')
+      + (sel.value === presetState.session ? '' : ' · new sessions'));
+  }catch(e){ $('preset-cost').textContent = 'Presets unavailable: ' + e.message; }
+}
+document.addEventListener('change', async e => {
+  if(e.target.id !== 'preset-select' || !presetState) return;
+  try{
+    await presetFetch({op:'use', preset:e.target.value, sha256:presetState.sha256});
+    sysline(`Skill preset ${e.target.value} applies to new sessions (New chat or /new).`);
+    window.dispatchEvent(new CustomEvent('dream:presets', {detail:'composer'}));
+  }catch(err){ sysline(err.message, 'error'); }
+  loadPresets();
+});
+window.addEventListener('dream:presets', e => { if(e.detail !== 'composer') loadPresets(); });
 // The project's phased plan (update_plan): a one-line strip left of the prompt box, collapsed by default, the
 // phases in a popover on click (#88), with the age of the last update, stale after 30 minutes (#89). The age
 // comes from the plan event's updated_at (the write's time); a reload replays the retained event.
@@ -789,9 +860,10 @@ function renderPlan(plan){
   const current = phases.findIndex(p => p.status !== 'done');
   const wasOpen = el.hidden ? false : el.open;
   el.replaceChildren();
-  const head = document.createElement('summary');
-  head.textContent = 'Plan · ' + (current < 0 ? `all ${phases.length} phases done` : `phase ${current + 1} of ${phases.length}`)
+  const head = document.createElement('summary'), lead = document.createElement('span');
+  lead.textContent = 'Plan · ' + (current < 0 ? `all ${phases.length} phases done` : `phase ${current + 1} of ${phases.length}`)
     + ` · ${done}/${steps.length} steps`;
+  head.append(lead);
   head.title = `Plan${plan.title ? ': ' + plan.title : ''}` + (current < 0 ? '' : ` — ${phases[current].name}`);
   planUpdatedAt = Number(plan.updated_at) > 0 ? Number(plan.updated_at) * 1000 : 0;
   if(planUpdatedAt){ const age = document.createElement('span'); age.className = 'age'; head.append(' · ', age); }
@@ -890,7 +962,7 @@ function grow(){ input.style.height='auto'; input.style.height=Math.min(input.sc
 async function submit(delivery = 'queue'){
   const typed = input.value.trim(), fileIds = draftAttachments.ids();
   if((!typed && !fileIds.length) || sending) return;
-  if(typed.toLowerCase() === '/fresh' && !fileIds.length && delivery === 'queue'){
+  if(['/handoff', '/fresh'].includes(typed.toLowerCase()) && !fileIds.length && delivery === 'queue'){
     input.value = ''; grow(); freshStart(); return;   // the control's route, never a message to the model
   }
   if(!draftAttachments.ready()){ sysline('Finish uploading, retry, or remove failed attachments before sending.', 'error'); return; }
@@ -2107,6 +2179,18 @@ function artifactFromWrite(input){
 <script src="/assets/understand.js"></script>
 <link rel="stylesheet" href="/assets/library.css">
 <script src="/assets/library.js"></script>
+<link rel="stylesheet" href="/assets/sleepwalk.css">
+<script src="/assets/sleepwalk.js"></script>
+<link rel="stylesheet" href="/assets/nested.css">
+<script src="/assets/nested.js"></script>
+<script src="/assets/nested-drawer.js"></script>
+<script src="/assets/nested-layout.js"></script>
+<script src="/assets/nested-customize.js"></script>
+<link rel="stylesheet" href="/assets/nested-plan.css">
+<script src="/assets/nested-plan.js"></script>
+<link rel="stylesheet" href="/assets/nested-footer.css">
+<script src="/assets/nested-footer.js"></script>
+<script src="/assets/nested-workflows.js"></script>
 <link rel="stylesheet" href="/assets/branding.css">
 <script>
 // All frame constants, listeners, and companion controls must exist before a

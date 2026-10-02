@@ -262,14 +262,17 @@ def all_specs() -> list[dict]:
 
 
 def subagents() -> dict[str, AgentDefinition]:
-    """SDK AgentDefinitions for the Claude backend (native Task tool)."""
+    """SDK AgentDefinitions for the Claude backend (native Task tool). An agent's model is "inherit" (the lead's)
+    unless roles.subagents.<name>, else roles.subagents.default, names provider anthropic with a model alias
+    (settings.sdk_model, DREAM-145); a role for another provider is not the SDK's and changes nothing here."""
+    from .settings import sdk_model
     return {
         s["name"]: AgentDefinition(
             description=s["description"],
             prompt=s["prompt"],
             tools=(None if s["sdk_tools"] is None
                    else [_dream("run_bash") if tool == "Bash" else tool for tool in s["sdk_tools"]]),
-            model="inherit",
+            model=sdk_model(s["name"]),
         )
         for s in all_specs()
     }

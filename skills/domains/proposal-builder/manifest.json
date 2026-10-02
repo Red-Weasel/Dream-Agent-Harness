@@ -1,0 +1,14 @@
+{
+  "format": "dream-skill/v1",
+  "name": "proposal-builder",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "read_file",
+    "library_read",
+    "ask_user_input",
+    "write_file",
+    "gen_pptx",
+    "open_for_print"
+  ]
+}

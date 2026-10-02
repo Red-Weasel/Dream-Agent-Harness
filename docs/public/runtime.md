@@ -70,6 +70,39 @@ read cutoff by default; set `DREAM_LLM_READ_TIMEOUT_S` to request one. Hosted HT
 adapters keep their profile defaults unless overridden. Context reports the actual
 HTTP client's timeout where available. Output/token limits remain separate.
 
+## Settings, sub-agents and context
+
+`dream settings show`, `/settings` in a session and **Controls → Settings** list
+every setting with its value and source. `dream settings set <key> <value>` and
+`unset` change the saved ones; `dream settings check` reports problems. A refused
+value names its key and writes nothing.
+
+| Setting | Values | Default | What it does |
+|---|---|---|---|
+| `nested.max_workers` | 3, 7, 11, 15 | 7 | Sub-agents one reply may start (4, 8, 12 or 16 agents with the main agent) |
+| `engine.parallel` | 1–16 | unset | Lanes the local engine serves; applies the next time Dream starts it |
+| `engine.slot_ctx` | 0, or 9 and up | unset | Context of each extra lane; 0 or unset keeps the engine's own size |
+| `behaviour.context_overflow` | `compact`, `handoff`, `stop` | `compact` | The main agent at the trigger |
+| `behaviour.subagent_overflow` | `compact`, `handoff`, `return` | `return` | A sub-agent at the trigger |
+| `behaviour.context_trigger` | 10–95 (percent) | 80 | How full a context gets before the choice acts |
+| `behaviour.context_warning` | 0–50 (points) | 5 | How far before the trigger the model is warned; 0 is never |
+
+The worker and engine settings are saved for this computer only; a project file
+(`.dream/settings.json`) may hold roles, output and behaviour settings.
+
+**Nested Dream** in the sidebar shows the main agent and its sub-agents as they
+work. Sub-agents exist only inside a turn: the main agent starts them with its
+`task` tool, and a call past the worker limit is answered with a refusal instead of
+run. On a local engine serving lanes they run at once up to the lane count and the
+rest queue. Each lane holds its own context, 32,768 tokens by default, so a
+sub-agent's window is smaller than the main agent's. **Pause** holds a worker at
+its next round boundary. **Stop** ends that worker's call alone; on a local engine
+it takes effect at the next round boundary. A worker whose reply budget ran out
+while it was thinking returns no output and ends as **Outcome unknown**.
+
+Sub-agents that a Claude session runs appear as read-only cards: Dream cannot
+stop, pause or message them. The coding CLIs report no worker activity.
+
 ## When a request fails
 
 Inspect the reported error and partial work. Transport diagnostics record exception

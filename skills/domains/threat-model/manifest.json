@@ -1,0 +1,14 @@
+{
+  "format": "dream-skill/v1",
+  "name": "threat-model",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "project_outline",
+    "list_dir",
+    "read_file",
+    "grep",
+    "write_file",
+    "task_add"
+  ]
+}

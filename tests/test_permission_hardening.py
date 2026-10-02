@@ -230,3 +230,106 @@ async def test_new_rebuilds_engine_on_same_provider_and_workspace(tmp_path, monk
     finally:
         await a._shutdown()
     assert a.gpu is None and a.studio is None
+
+
+# --- DREAM-187: "always" on computer_action is scoped to one target ------------
+
+
+def test_always_key_is_per_target_for_computer_action(tmp_path):
+    a = App(workspace=tmp_path)
+    canvas = {"target_id": "t1", "observation_id": "o1", "action": "stroke", "points": []}
+    for name in ("computer_action", "mcp__dream__computer_action"):
+        # Another target (a different window or page) is a different grant...
+        assert a._always_key(name, canvas) != a._always_key(name, {**canvas, "target_id": "t2"})
+        # ...while the next action on the same target is the same grant.
+        assert a._always_key(name, canvas) == a._always_key(name, {"target_id": "t1", "observation_id": "o2", "action": "click"})
+    # The sibling tools stay keyed by name as before.
+    assert a._always_key("mcp__dream__computer_open", {"kind": "desktop", "window_id": "1"}) == "mcp__dream__computer_open"
+
+
+def _prompting_app(tmp_path):
+    """An App reduced to its permission prompt: records the questions, answers with `a.answer`."""
+    import asyncio
+
+    a = object.__new__(App)
+    a.workspace = tmp_path
+    a.mode = "auto"
+    a._active_loop = None
+    a._perm_lock = asyncio.Lock()
+    a._always_allow = set()
+    a.studio = None
+    a.prompts, a.messages = [], []
+    a.answer = "n"
+    a.renderer = types.SimpleNamespace(system=a.messages.append, live_pause=lambda: None, live_resume=lambda: None,
+                                       permission_request=lambda *args: a.prompts.append(args))
+
+    async def answer(choices):
+        return a.answer
+
+    a._read_answer = answer
+    a.engine = types.SimpleNamespace(workspace=tmp_path, execution_scope=None, execution_capability=None, turn_timing=None)
+    return a
+
+
+async def test_always_on_computer_action_does_not_cover_another_target(tmp_path):
+    a = _prompting_app(tmp_path)
+    t1 = {"target_id": "t1", "observation_id": "o1", "action": "click", "x": 1, "y": 1}
+    a.answer = "a"
+    assert await a._decide_permission("mcp__dream__computer_action", t1)
+    assert "this target" in a.prompts[-1][1]   # the question says what "always" covers
+    a.answer = "n"
+    assert await a._decide_permission("mcp__dream__computer_action", {**t1, "observation_id": "o2", "action": "type", "text": "x"})
+    assert len(a.prompts) == 1                 # remembered for t1: no second question
+    assert not await a._decide_permission("mcp__dream__computer_action", {**t1, "target_id": "t2"})
+    assert len(a.prompts) == 2                 # t2 is asked, and the owner's No stands
+
+
+# --- DREAM-187 (4 of 4): "always" is for the target as observed -- its origin, or its window and owner ----
+
+def _computer_with(identities):
+    """The session's computer as the App reaches it (engine._tool_context.computer), answering identity()."""
+    return types.SimpleNamespace(_tool_context=types.SimpleNamespace(computer=types.SimpleNamespace(identity=identities.get)))
+
+
+def test_always_key_follows_the_targets_identity_for_computer_action(tmp_path):
+    a = App(workspace=tmp_path)
+    identities = {"t1": "browser\x00http://a.example:443"}
+    a.engine = _computer_with(identities)
+    canvas = {"target_id": "t1", "observation_id": "o1", "action": "click", "x": 1, "y": 1}
+    for name in ("computer_action", "mcp__dream__computer_action"):
+        first = a._always_key(name, canvas)
+        identities["t1"] = "browser\x00http://b.example:443"   # the same target, navigated to another origin
+        assert a._always_key(name, canvas) != first
+        identities["t1"] = "browser\x00http://a.example:443"   # back at the first: the first grant again
+        assert a._always_key(name, {**canvas, "observation_id": "o2"}) == first
+    # No owned target behind the ID: keyed as unknown (such an action fails at the tool).
+    assert a._always_key("computer_action", {"target_id": "t9"}).endswith("\x00unknown")
+    a.engine = None
+    assert a._always_key("computer_action", canvas).endswith("\x00unknown")
+
+
+async def test_always_on_computer_action_asks_again_at_another_origin_or_window(tmp_path):
+    a = _prompting_app(tmp_path)
+    identities = {"t1": "browser\x00http://a.example:443"}
+    a.engine._tool_context = _computer_with(identities)._tool_context
+    name, t1 = "mcp__dream__computer_action", {"target_id": "t1", "observation_id": "o1", "action": "click", "x": 1, "y": 1}
+    a.answer = "a"
+    assert await a._decide_permission(name, t1)
+    assert "this target" in a.prompts[-1][1] and "another origin" in a.prompts[-1][1]   # the question says what "always" covers
+    a.answer = "n"
+    assert await a._decide_permission(name, {**t1, "observation_id": "o2", "action": "type", "text": "x"})
+    assert len(a.prompts) == 1                 # remembered for t1 at a.example: no second question
+    identities["t1"] = "browser\x00http://b.example:443"   # the page navigated to another origin
+    assert not await a._decide_permission(name, {**t1, "observation_id": "o3"})
+    assert len(a.prompts) == 2                 # asked again, and the owner's No stands
+    identities["t1"] = "browser\x00http://a.example:443"   # back at the granted origin: still granted
+    assert await a._decide_permission(name, {**t1, "observation_id": "o4"})
+    assert len(a.prompts) == 2
+    # A desktop target whose window changed owner (an X11 window-ID reuse) asks again too.
+    identities["t2"] = 'desktop\x00123\x004242\x00["fixture", "Fixture"]'
+    a.answer = "a"
+    assert await a._decide_permission(name, {**t1, "target_id": "t2"})
+    identities["t2"] = 'desktop\x00123\x009999\x00["other", "Other"]'
+    a.answer = "n"
+    assert not await a._decide_permission(name, {**t1, "target_id": "t2", "observation_id": "o5"})
+    assert len(a.prompts) == 4

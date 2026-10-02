@@ -1,0 +1,12 @@
+{
+  "format": "dream-skill/v1",
+  "name": "incident-triage",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "note",
+    "run_bash",
+    "grep",
+    "write_file"
+  ]
+}

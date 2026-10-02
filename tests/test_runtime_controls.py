@@ -11,7 +11,7 @@ def test_runtime_controls_reject_unauthorized_and_cross_origin_requests():
     called = []
     server = StudioServer(EventBus(), runtime=lambda: {"profile": {"name": "lean"}},
                           on_control=lambda payload: called.append(payload))
-    with TestClient(server.app) as client:
+    with TestClient(server.app, base_url="http://127.0.0.1") as client:
         assert client.get("/api/runtime").status_code == 401
         assert client.post("/api/control", json={"action": "profile"}).status_code == 401
         headers = {"x-dream-token": server.token}
@@ -25,7 +25,7 @@ def test_runtime_controls_reject_unauthorized_and_cross_origin_requests():
 def test_profile_controls_persist_valid_settings_and_reject_bad_values(tmp_path):
     app = App(provider="machx", workspace=tmp_path)
     server = StudioServer(EventBus(), on_control=app._runtime_control)
-    with TestClient(server.app) as client:
+    with TestClient(server.app, base_url="http://127.0.0.1") as client:
         headers = {"x-dream-token": server.token}
         saved = client.post("/api/control", headers=headers, json={"action": "profile", "profile": "lean",
                             "overrides": {"context_limit": 8192, "max_parallel": 1}})
@@ -41,7 +41,7 @@ def test_extensions_toggle_changes_real_catalog_and_requires_boolean(tmp_path):
     from dream import extensions
     app = App(provider="machx", workspace=tmp_path)
     server = StudioServer(EventBus(), on_control=app._runtime_control)
-    with TestClient(server.app) as client:
+    with TestClient(server.app, base_url="http://127.0.0.1") as client:
         headers = {"x-dream-token": server.token}
         invalid = client.post("/api/control", headers=headers, json={"action": "extension", "id": "skill:fixture", "enabled": "false"})
         assert invalid.status_code == 400
@@ -52,7 +52,7 @@ def test_extensions_toggle_changes_real_catalog_and_requires_boolean(tmp_path):
 def test_red_team_rejects_unscoped_host_paths(tmp_path):
     app = App(provider="machx", workspace=tmp_path)
     server = StudioServer(EventBus(), on_control=app._runtime_control)
-    with TestClient(server.app) as client:
+    with TestClient(server.app, base_url="http://127.0.0.1") as client:
         headers = {"x-dream-token": server.token}
         reply = client.post("/api/control", headers=headers, json={"action": "red_team", "enabled": True, "target": "/", "minutes": 15})
         assert reply.status_code == 400
@@ -65,7 +65,7 @@ def test_draft_can_be_reviewed_through_authenticated_real_api(tmp_path, monkeypa
     demonstrations.create_draft("demo-fixture", goal="Review a visible action", steps=[
         {"action": "Open project", "frames": ["frames/00001.jpg"], "basis": "inferred"}])
     server = StudioServer(EventBus())
-    with TestClient(server.app) as client:
+    with TestClient(server.app, base_url="http://127.0.0.1") as client:
         endpoint = "/api/learning/demo-fixture/draft"
         assert client.get(endpoint).status_code == 401
         response = client.get(endpoint, headers={"x-dream-token": server.token})
@@ -125,7 +125,7 @@ def test_module_review_and_trust_require_the_exact_visible_source(tmp_path, monk
     server = StudioServer(EventBus(), on_control=app._runtime_control)
     identifier = "tool:custom/review_fixture"
     endpoint = "/api/extensions/tool:custom/review_fixture/source"
-    with TestClient(server.app) as client:
+    with TestClient(server.app, base_url="http://127.0.0.1") as client:
         assert client.get(endpoint).status_code == 401
         headers = {"x-dream-token": server.token}
         review = client.get(endpoint, headers=headers).json()

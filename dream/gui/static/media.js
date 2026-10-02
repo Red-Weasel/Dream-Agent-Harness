@@ -2,7 +2,7 @@
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
-  const token = new URLSearchParams(location.search).get('token') || '';
+  const token = dreamToken();
   const opener = document.createElement('button');
   opener.id = 'dream-create-open'; opener.textContent = 'Create';
   opener.setAttribute('aria-haspopup', 'dialog'); opener.setAttribute('aria-controls', 'dream-create');

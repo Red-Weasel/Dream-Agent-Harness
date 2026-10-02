@@ -35,6 +35,62 @@ class CLIIsolationError(RuntimeError):
     pass
 
 
+# Sleepwalk (DREAM-157): a Codex run with none of the owner's plugins, apps (connectors), hooks, browser or computer
+# use, project AGENTS.md files or skills list. MCP servers from config.toml are turned off one by one, and
+# `codex mcp list` with the same flags must then report none enabled, or the run is refused.
+CODEX_ISOLATION = ('--disable', 'plugins', '--disable', 'apps', '--disable', 'hooks', '--disable', 'browser_use',
+                   '--disable', 'computer_use', '-c', 'project_doc_max_bytes=0', '-c', 'skills.include_instructions=false',
+                   '-c', 'shell_environment_policy.inherit="core"')     # its shell sees no inherited secrets
+_ALLOWED = {'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LANGUAGE', 'TERM', 'TMPDIR', 'TZ', 'LC_ALL', 'LC_CTYPE',
+            'LC_MESSAGES', 'LC_NUMERIC', 'LC_TIME', 'LC_COLLATE', 'LC_MONETARY', 'XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME',
+            'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME'}
+# The variables each CLI reads to sign in or find its sign-in; both normally sign in from files in the home folder
+# (~/.codex/auth.json, ~/.claude/.credentials.json), so the session bus is not passed.
+CODEX_SIGN_IN = ('CODEX_HOME', 'OPENAI_API_KEY', 'OPENAI_BASE_URL')
+CLAUDE_SIGN_IN = ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN',
+                  'CLAUDE_CONFIG_DIR')
+
+
+def runner_env(sign_in: tuple) -> dict:
+    """The environment an isolated runner (Sleepwalk) gets, an allowlist of named variables (the basics, the locale
+    and the XDG folders) and that CLI's own sign-in variables, so no other credential reaches it or its shell."""
+    return {k: v for k, v in os.environ.items() if k in _ALLOWED or k in sign_in}
+
+
+async def codex_isolation(executable: str, cwd: str) -> list[str]:
+    import re
+    import tomllib
+    config = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex') / 'config.toml'
+    try:
+        servers = tomllib.loads(config.read_text(encoding='utf-8')).get('mcp_servers') or {}
+    except FileNotFoundError:
+        servers = {}
+    except (OSError, ValueError) as exc:
+        raise CLIIsolationError(f'cannot read {config} to turn its MCP servers off ({type(exc).__name__})') from None
+    if not isinstance(servers, dict) or any(not re.fullmatch(r'[A-Za-z0-9_-]+', name) for name in servers):
+        raise CLIIsolationError(f'cannot turn off the MCP servers named in {config}')
+    args = [*CODEX_ISOLATION, *(x for name in servers for x in ('-c', f'mcp_servers.{name}.enabled=false'))]
+    proc = await asyncio.create_subprocess_exec(executable, 'mcp', 'list', '--json', *args, cwd=cwd,
+                                                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+                                                stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
+    try:
+        output, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        listed = json.loads(output)
+    except (asyncio.TimeoutError, ValueError):
+        listed = None
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+    if proc.returncode != 0 or not isinstance(listed, list):
+        raise CLIIsolationError('could not confirm that the Codex run has no MCP servers (codex mcp list failed)')
+    left = [str(s.get('name')) if isinstance(s, dict) else repr(s)[:80]
+            for s in listed if not isinstance(s, dict) or s.get('enabled') is not False]
+    if left:
+        raise CLIIsolationError('these MCP servers would still be available to the run: ' + ', '.join(left))
+    return args
+
+
 # Tool-using turns carry command output in the stream; the main path allows
 # 16 MiB per line, so a whole multi-turn consultation gets the same bound.
 _MAX_OUTPUT = 16 * 1024 * 1024

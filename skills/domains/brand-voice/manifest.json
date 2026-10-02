@@ -1,0 +1,12 @@
+{
+  "format": "dream-skill/v1",
+  "name": "brand-voice",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "browse",
+    "read_file",
+    "see",
+    "write_file"
+  ]
+}

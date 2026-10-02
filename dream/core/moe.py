@@ -18,6 +18,7 @@ import asyncio
 import json
 from dataclasses import asdict, dataclass, field
 import os
+import stat
 
 from .. import config
 from .evaluator import IsolatedOpenAIBackend as OpenAICompatBackend
@@ -57,14 +58,85 @@ class MoeConfig:
     advisor_efforts: dict[str, str] = field(default_factory=dict)
 
 
-def load_config() -> MoeConfig | None:
-    """The saved council, or ``None`` if there is none / the file is unreadable."""
+def _read_config() -> object:
+    """The Council file's JSON, read the way core/profiles.read_settings reads a settings file (DREAM-148, gate
+    round 1): opened without blocking, so a FIFO nobody writes to cannot hang a session start; a regular file only;
+    at most MAX_SETTINGS_BYTES. A link is followed, as it always was. FileNotFoundError when there is no file;
+    ValueError (or RecursionError, from absurdly deep nesting) when it cannot be used."""
+    from .profiles import MAX_SETTINGS_BYTES
+    fd = os.open(CONFIG_PATH, os.O_RDONLY | os.O_NONBLOCK)
     try:
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        info = os.fstat(fd)     # before os.fdopen, which refuses a directory with its own error
+        if not stat.S_ISREG(info.st_mode):
+            kind = next((name for test, name in ((stat.S_ISFIFO, "a FIFO"), (stat.S_ISDIR, "a directory"),
+                                                 (stat.S_ISCHR, "a character device"), (stat.S_ISBLK, "a block device"))
+                         if test(info.st_mode)), "a special file")
+            raise ValueError(f"it is not a regular file ({kind})")
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "rb") as source:
+        data = source.read(MAX_SETTINGS_BYTES + 1) if info.st_size <= MAX_SETTINGS_BYTES else b""
+    if info.st_size > MAX_SETTINGS_BYTES or len(data) > MAX_SETTINGS_BYTES:
+        raise ValueError(f"it is larger than {MAX_SETTINGS_BYTES:,} bytes")
+    return json.loads(data.decode("utf-8"))
+
+
+def load_config() -> MoeConfig | None:
+    """The saved council, or ``None`` if there is none / the file is unreadable or unusable (config_problem says
+    why; both read through _read_config, so they always agree)."""
+    try:
+        data = _read_config()
         from .council_config import parse_config
         return parse_config(data)
-    except (FileNotFoundError, OSError, ValueError, KeyError, TypeError):
+    except (FileNotFoundError, OSError, ValueError, KeyError, TypeError, RecursionError):
         return None
+
+
+def config_problem() -> tuple[str | None, str] | None:
+    """What makes the saved Council file unusable -- (the entry at fault, the rule it breaks), e.g. ("advisors",
+    "Advisors must be unique"), or (None, what is wrong with the file itself) -- or None when it is usable or absent
+    (DREAM-148). load_config() treats such a file as no saved Council and nothing rewrites it; this is what Dream
+    says instead of nothing. Read only; never raises for the file's content; bounded and printable (profiles.shown)."""
+    from .profiles import shown
+    try:
+        data = _read_config()
+    except FileNotFoundError:
+        return None
+    except UnicodeDecodeError:
+        return None, "it is not UTF-8 text"
+    except json.JSONDecodeError as exc:
+        return None, f"it is not valid JSON (line {exc.lineno}, column {exc.colno}: {exc.msg})"
+    except RecursionError:
+        return None, "it is not JSON Dream can read (nested too deeply)"
+    except OSError as exc:
+        return None, f"it could not be read ({exc.strerror or type(exc).__name__})"
+    except ValueError as exc:       # a special or oversized file (_read_config), or a number past Python's digit limit
+        return None, shown(str(exc), 300)
+    from .council_config import parse_config
+    try:
+        parse_config(data)
+    except ValueError as exc:
+        key = getattr(exc, "key", None)
+        return (shown(key, 200) if key else None), shown(str(exc), 300)
+    except (KeyError, TypeError, RecursionError) as exc:
+        return None, f"it could not be checked ({type(exc).__name__})"
+    return None
+
+
+def config_note(*, entry_only: bool = False) -> str | None:
+    """The sentence every surface shows for an unusable Council file -- the session-start note, `dream settings
+    check` and /settings check, the Settings tab's Council section -- naming the file and the entry; None when the
+    file is usable or absent. `entry_only` (the Settings tab, which names an entry and never a value from a file)
+    leaves out the rule's own wording, which may quote the value."""
+    problem = config_problem()
+    if problem is None:
+        return None
+    from .profiles import shown_path
+    entry, reason = problem
+    what = (f"the {entry} entry is not valid" if entry_only else f"{entry}: {reason}") if entry else reason
+    return (f"the Council settings file {shown_path(CONFIG_PATH)} could not be used, so the saved Council is off -- "
+            f"{what}. Dream never rewrites it; repair it by hand")
 
 
 def save_config(cfg: MoeConfig) -> None:
@@ -76,8 +148,10 @@ def save_config(cfg: MoeConfig) -> None:
 # --- one-shot advisor calls, one per provider kind ---------------------------
 
 
-def _context_meter(provider):
-    return attributed_meter(provider, scope='council')
+def _context_meter(provider, meter=None):
+    """The consultation's meter: `meter` when a caller gives one (the Frontier loop gives each call its own, DREAM-218),
+    else the bound run's."""
+    return attributed_meter(provider, scope='council', meter=meter)
 
 
 async def _run_backend(backend, prompt: str) -> str:
@@ -110,9 +184,9 @@ async def _run_backend(backend, prompt: str) -> str:
 
 
 async def _consult_cli(provider: Provider, prompt: str, *, cwd: str | None = None, model=None, effort=None,
-                       mode: str | None = None) -> str:
-    from .cli_review import CLIConsultation
-    consultation = CLIConsultation(provider, model, runtime_meter=_context_meter(provider), cwd=cwd, mode=mode)
+                       mode: str | None = None, system: str | None = None, isolate: bool = False, meter=None) -> str:
+    from .cli_review import CLIConsultation, codex_isolation, CODEX_SIGN_IN, runner_env
+    consultation = CLIConsultation(provider, model, runtime_meter=_context_meter(provider, meter), cwd=cwd, mode=mode)
     try:
         consultation.prepare()
         if effort is not None:
@@ -120,17 +194,26 @@ async def _consult_cli(provider: Provider, prompt: str, *, cwd: str | None = Non
             validate_effort(provider.key, effort, model)
             # Codex exec accepts per-invocation configuration before stdin '-'.
             consultation.argv[-1:-1] = ['-c', 'model_reasoning_effort=' + json.dumps(effort)]
-        return await consultation.run(ADVISOR_SYSTEM + '\n\n' + prompt)
+        if isolate:
+            consultation.argv[-1:-1] = await codex_isolation(consultation.executable, str(consultation.cwd))
+            consultation.env = runner_env(CODEX_SIGN_IN)
+            consultation.provenance.update(
+                isolation="sleepwalk: the owner's plugins, apps, hooks, skills list, project AGENTS.md and MCP servers off",
+                configuration="the owner's CLI home and sign-in; config.toml MCP servers disabled, checked with codex mcp list",
+                tool_scope="the CLI's own tools under its read-only sandbox, no MCP servers")
+        return await consultation.run((system or ADVISOR_SYSTEM) + '\n\n' + prompt)
     finally:
         await consultation._stop()
         consultation.close()
 
 
 async def _consult_anthropic(provider: Provider, prompt: str, *, cwd: str | None = None, model=None, effort=None,
-                             mode: str | None = None) -> str:
+                             mode: str | None = None, system: str | None = None, isolate: bool = False, meter=None,
+                             options=None) -> str:
     """A Claude Agent SDK consultation that runs like Claude Code in VS Code (DREAM-140):
     the owner's settings, native tools, multiple turns, a permission mode mapped from ``mode``
-    (none runs as ask)."""
+    (none runs as ask). ``options`` replaces those SDK options whole (the Frontier loop's lean call, DREAM-218);
+    the stream, receipt and cancellation handling below are the same either way."""
     import types
     from claude_agent_sdk import (
         AssistantMessage,
@@ -140,10 +223,11 @@ async def _consult_anthropic(provider: Provider, prompt: str, *, cwd: str | None
     )
     from .backends.anthropic import claude_code_options
 
-    opts = claude_code_options(system_prompt=ADVISOR_SYSTEM, cwd=cwd or str(config.ROOT), mode=mode,
-                               model=model or provider.default_model, effort=effort)
+    opts = options if options is not None else claude_code_options(
+        system_prompt=system or ADVISOR_SYSTEM, cwd=cwd or str(config.ROOT), mode=mode,
+        model=model or provider.default_model, effort=effort, owner_settings=not isolate)
     texts: list[str] = []
-    meter = _context_meter(provider)
+    meter = _context_meter(provider, meter)
     if meter:
         meter.check()
     # Permission callbacks require the SDK's streaming input contract.
@@ -275,20 +359,21 @@ async def _consult_anthropic(provider: Provider, prompt: str, *, cwd: str | None
     return '\n\n'.join(texts) or '[unavailable — advisor returned no answer]'
 
 
-async def _consult_openai(provider: Provider, prompt: str, *, cwd: str | None = None, model=None, effort=None) -> str:
+async def _consult_openai(provider: Provider, prompt: str, *, cwd: str | None = None, model=None, effort=None,
+                          system: str | None = None, meter=None) -> str:
     """One-shot call against an OpenAI-compatible provider, no tools."""
     selected_model = model or provider.default_model or 'default'
     backend = OpenAICompatBackend(
         provider=provider,
         model=selected_model,
         profile=resolve_profile(provider, model=selected_model),
-        system_prompt=ADVISOR_SYSTEM,
+        system_prompt=system or ADVISOR_SYSTEM,
         tools=[],
         permission_cb=None,
     )
     if effort is not None:
         backend.set_effort(effort)
-    meter = _context_meter(provider)
+    meter = _context_meter(provider, meter)
     if meter is not None:
         backend.runtime_meter = meter
     return await _run_backend(backend, prompt)
@@ -297,14 +382,17 @@ async def _consult_openai(provider: Provider, prompt: str, *, cwd: str | None = 
 async def consult_advisor(
     provider_key: str, question: str, context: str = "", *, cwd: str | None = None,
     model: str | None = None, timeout: float | None = None, effort: str | None = None,
-    mode: str | None = None,
+    mode: str | None = None, system: str | None = None, isolate: bool = False,
 ) -> str:
     """Ask one advisor for its take. Dispatches by provider kind. Never raises —
     any failure comes back as a short ``[label: unavailable — reason]`` string.
 
     The invoker is looked up by bare name (not a captured dict) so tests can
     monkeypatch ``_consult_cli`` / ``_consult_anthropic`` / ``_consult_openai``.
-    ``mode`` is Dream's permission mode; CLI and Claude advisors take it (their tool posture)."""
+    ``mode`` is Dream's permission mode; CLI and Claude advisors take it (their tool posture).
+    ``system`` replaces the advisor persona (Sleepwalk's runs, DREAM-156); None keeps it.
+    ``isolate`` (Sleepwalk, DREAM-157) runs without the owner's MCP servers, plugins, hooks and project instructions,
+    and refuses a runner that cannot (see can_isolate)."""
     label = provider_key
     try:
         provider = get_provider(provider_key)
@@ -322,12 +410,26 @@ async def consult_advisor(
             kwargs['effort'] = effort
         if mode is not None and provider.kind in ('cli', 'anthropic'):
             kwargs['mode'] = mode
+        if system is not None:
+            kwargs['system'] = system
+        if isolate:
+            if not can_isolate(provider_key):
+                raise ValueError(f"{label} cannot run without the owner's own MCP servers and settings, "
+                                 "so an isolated run is refused; choose Codex, Claude or an HTTP runner")
+            if provider.kind in ('cli', 'anthropic'):     # an HTTP runner has no local tools at all
+                kwargs['isolate'] = True
         invoker = {'cli': _consult_cli, 'anthropic': _consult_anthropic, 'openai': _consult_openai}.get(provider.kind)
         if invoker is None:
             return f"[{label}: unavailable — unknown provider kind '{provider.kind}']"
         return await asyncio.wait_for(invoker(provider, prompt, **kwargs), timeout=seconds)
     except Exception as e:  # noqa: BLE001 — an advisor must never sink the caller
         return f"[{label}: unavailable — {type(e).__name__}: {e}]"
+
+
+def can_isolate(provider_key: str) -> bool:
+    """Whether a run can leave out the owner's tools and settings: Codex (flags, checked by `codex mcp list`),
+    Claude (no setting sources) and HTTP runners (no local tools). The Grok and Gemini CLIs have no such switch."""
+    return get_provider(provider_key).kind != 'cli' or provider_key == 'codex'
 
 
 def _label_for(provider_key: str) -> str:

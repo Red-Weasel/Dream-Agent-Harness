@@ -85,7 +85,7 @@ async def council(tmp_path, monkeypatch):
             page.on("pageerror", lambda error: errors.append(str(error)))
             api = CouncilAPI()
             await page.route("**/api/control", api.route)
-            await page.goto(url + "&companion=1")
+            await page.goto(url.replace("/#", "/?companion=1#"))
             yield page, api, server, errors
             await browser.close()
     finally:

@@ -611,8 +611,11 @@ async def execute_bash(command: str, context: ExecutionContext, *, timeout: floa
 
     # DREAM-105: installed skills' script folders (and node's runtime) are visible READ-ONLY, so a skill runs its
     # scripts through the shell like any command; writes still reach only the workspace.
-    scope = replace(context.scope, read_roots=tuple(dict.fromkeys(
-        (*context.scope.read_roots, *skill_runtime.script_roots()))))
+    # A script root inside the workspace (Dream working on itself) is already visible, writable: a read-only mount of it
+    # after the workspace's would make that part of the workspace read-only.
+    workspace = context.scope.workspace.resolve()
+    extra = tuple(r for r in skill_runtime.script_roots() if not r.is_relative_to(workspace))
+    scope = replace(context.scope, read_roots=tuple(dict.fromkeys((*context.scope.read_roots, *extra))))
     env = minimal_environment(skill_runtime.script_env())
     scope.validate()
     if not isinstance(command, str) or not command.strip() or "\0" in command:

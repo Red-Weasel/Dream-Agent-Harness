@@ -1,6 +1,6 @@
 [project]
 name = "dream"
-version = "0.1.0"
+version = "0.2.0"
 description = "Your models. Your workspace. A multi-model agent harness."
 requires-python = ">=3.12"
 dependencies = [
@@ -16,6 +16,8 @@ dependencies = [
     "beautifulsoup4>=4.13",
     "lxml>=5",
     "camoufox>=0.4",
+    # browse: host names spelled as the browser puts them on the wire (UTS #46), web/browser.py
+    "idna>=3.7",
     "anyio>=4",
     "fastembed>=0.3",
     "hnswlib>=0.8",
@@ -35,6 +37,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+# Sleepwalk connectors (DREAM-160): the system keyring for their secrets, and iCal repeat rules.
+sleepwalk = ["keyring>=25", "python-dateutil>=2.8"]
 
 [project.scripts]
 dream = "dream.__main__:main"
@@ -50,10 +54,14 @@ only-include = [
     "skills/documents", "skills/data-analysis", "skills/media", "skills/library",
     "skills/verifying", "skills/computer-use", "skills/blender-animation",
     "skills/brainstorming", "skills/debugging", "skills/gated-build", "skills/frontend-design",
-    "skills/grill-me", "skills/handoff", "skills/understand",
+    "skills/grill-me", "skills/handoff", "skills/thinking-out-loud", "skills/understand",
     "skills/understand-dashboard", "skills/understand-domain",
-    "skills/illuminati-handshake",
+    "skills/illuminati-handshake", "skills/domains",
 ]
+# Editable installs (uv sync) put the checkout root on sys.path. Hatchling's
+# default editable build refuses the skills rewrite below once a skill ships a
+# .py file (skills/understand/glue.py): "path rewrite ... changes a prefix".
+dev-mode-dirs = ["."]
 
 [tool.hatch.build.targets.wheel.sources]
 "skills" = "dream/resources/skills"

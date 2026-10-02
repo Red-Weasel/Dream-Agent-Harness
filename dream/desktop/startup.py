@@ -85,19 +85,26 @@ def model_settings(path):
     memory_notes = (['Memory: MachX streams experts from host RAM and splits GPU work across the selected cards. '
                      'The full model file does not need to fit in VRAM; the engine checks weights, context and caches during startup.']
                     if caps.get('memory_planner') == 'streaming' else [])
-    from ..local.models import DIRECTORY_ARCHITECTURES
+    from ..local.models import DIRECTORY_ARCHITECTURES, LANE_ARCHITECTURES
     if caps.get('architecture') in DIRECTORY_ARCHITECTURES and caps.get('memory_planner') == 'streaming':
         memory_notes = ['Memory: this model uses GPU slots, bounded pinned RAM and disk-backed weights. '
                         'The full checkpoint need not fit in RAM. The engine keeps 40 GiB of host RAM '
                         'available and sizes expert slots from free GPU memory. It uses all visible Arc GPUs '
-                        'and serves one request at a time (parallel = 1).']
+                        + ('and serves as many requests at once as its lanes: Settings engine.parallel, else its '
+                           'parallel below ' + ('(2 or more need two cards).' if caps.get('architecture') == 'deepseek_v41'
+                                                else '(images need 1).')      # DREAM-154: V4.1 keeps its images
+                           if caps.get('architecture') in LANE_ARCHITECTURES
+                           else 'and serves one request at a time (parallel = 1).')]
+    if 'parallel' in selection['options']:                    # DREAM-151: what replaces it at launch, when set
+        from ..local.settings import engine_parallel_source
+        sources['parallel'] = engine_parallel_source(caps.get('architecture'), sources.get('parallel', ''))
     return dict(selection=selection, recommended={k: rec[k] for k in ('gpus', 'ctx', 'options')},
                 sources=sources, recommended_sources=rec['sources'], notes=memory_notes + rec['notes'] + caps.get('notes', []),
                 context_limit=rec['context_limit'], max_gpus=rec['gpus'] or caps.get('max_gpus'),
                 controls=[asdict(c) for c in available_controls(caps)],
                 identity=identity, revision=saved['revision'] if saved else None,
                 architecture=caps.get('architecture'), memory_policy=caps.get('memory_policy', {}),
-                memory_planner=caps.get('memory_planner'), capabilities=caps)
+                memory_planner=caps.get('memory_planner'), capabilities=caps, modes=rec.get('modes'))
 
 
 def validate_selection(selection, settings):
@@ -109,6 +116,8 @@ def validate_selection(selection, settings):
     if gpus is not None and (type(gpus) is not int or not 1 <= gpus <= maximum):
         raise ValueError('GPU count exceeds available hardware or engine limits.')
     controls = {c['name']: c for c in settings['controls']}
+    if selection['options'].get('context_overflow') == 'error':     # stop's name before DREAM-175: old saves load
+        selection = dict(selection, options=dict(selection['options'], context_overflow='stop'))
     for name, value in selection['options'].items():
         if name not in controls or (controls[name]['choices'] and value not in controls[name]['choices']):
             raise ValueError(f'{name} is no longer supported. Refresh the model settings.')
@@ -284,13 +293,25 @@ async def run(request, status_path):
             publish(status_path, 'starting', preflight)
             if machx.is_serving() or model_key(path) != settings['identity']:
                 raise ValueError('Server or model state changed during preflight. Refresh before trying again.')
-            options = selection['options']
+            # DREAM-151: the owner's engine lanes for a model that serves lanes; the preset keeps its own choices.
+            from ..local.settings import engine_lanes, lanes_report
+            options, lanes, lanes_note = engine_lanes(selection['options'], settings.get('architecture'),
+                                                      ctx=selection['ctx'], gpus=selection['gpus'])
+            machx.lanes_queue(options)      # DREAM-209: an unusable worker cap refuses a lanes launch before "Loading"
+            if lanes_note:
+                publish(status_path, 'starting', lanes_note)
             session_capabilities = settings.get('capabilities')
             publish(status_path, 'loading', f"Loading {item.name}. Large models can take several minutes. Full loading log: {machx._log_file()}.")
+            mark = machx.log_mark()
             proc = machx.serve(path, gpus=selection['gpus'], ctx=selection['ctx'], options=options)
             if not await asyncio.to_thread(machx.wait_ready, proc):
-                raise ValueError(f'Model did not become ready. Review {machx._log_file()}, then retry.')
+                said = machx.launch_error(mark)
+                raise ValueError(f'Model did not become ready. Review {machx._log_file()}, then retry.'
+                                 + (f' The engine said: {said}' if said else ''))
             model = machx.served_model_id() or item.name
+            if lanes:
+                publish(status_path, 'starting', lanes_report(lanes, await asyncio.to_thread(machx.served_lanes),
+                                                              settings.get('architecture')))
             try:
                 Presets().save(path, selection, expected=request.get('revision'), expected_key=settings['identity'])
             except (ValueError, OSError) as exc:

@@ -21,10 +21,14 @@ import os
 import time
 import zlib
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ..core.backends.base import Event
 from .context import ctx, in_thread, studio
+
+if TYPE_CHECKING:
+    # Imported where an event is built, not here: files.py and native.py import this module, and the
+    # offline harness eval (dream.harness_eval) must run those tools without importing dream.core.backends.
+    from ..core.backends.base import Event
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 # DREAM-111: what a run_bash call renders -- the owner's live session had the model
@@ -145,6 +149,7 @@ def show_image(p: Path) -> bool:
     if rel is None or p.suffix.lower() not in IMAGE_SUFFIXES or not p.is_file():
         return False
     stamp, size = signature(p) or (0, 0)
+    from ..core.backends.base import Event
     event = Event("studio", {"op": "show", "kind": "image", "path": rel, "title": p.name,
                              "source": "mirror", "size": size, "stamp": stamp})
     if not _emit(event):
@@ -217,6 +222,7 @@ def file_removed(p: Path) -> bool:
     if c is not None:
         c.studio_shown = None
     if following():
+        from ..core.backends.base import Event
         _emit(Event("studio", {"op": "removed", "path": state["given"], "title": held.name,
                                "source": "mirror"}))
     return True

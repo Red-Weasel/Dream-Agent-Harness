@@ -21,11 +21,12 @@ from pathlib import Path
 from rich.text import Text
 
 from .. import config
-from ..core import council_config, moe, turn_origin
+from ..core import council_config, moe, settings, turn_origin
 from ..core.backends.base import Event
 from ..core.run_state import atomic_write
 
-# The owner's name for each critic -> its Council provider key. The default is the first available, in this order.
+# The owner's name for each critic -> its Council provider key. The default is roles.critic.provider when set
+# (dream settings, DREAM-145), else the first available, in this order.
 PROVIDERS = {"claude": "anthropic", "codex": "codex", "gemini": "gemini", "grok": "grok"}
 TIMEOUT = 180.0
 IMAGES = {".png", ".jpg", ".jpeg", ".webp"}
@@ -52,18 +53,25 @@ def parse(argument: str) -> tuple[str | None, str]:
 
 
 def default_cli() -> str | None:
-    """The first of claude, codex, gemini, grok the Council lists as available (local prerequisites only)."""
+    """The critic roles.critic names (the owner's choice, whether or not its program is installed: a missing one
+    fails the consult visibly), else the first of claude, codex, gemini, grok the Council lists as available (local
+    prerequisites only). An unusable settings file raises ValueError; `command` says so and asks no one."""
+    role = settings.role("critic")
+    if role:
+        return next(cli for cli, key in PROVIDERS.items() if key == role["provider"])
     available = {row["key"] for row in council_config.provider_choices() if row.get("available")}
     return next((cli for cli, key in PROVIDERS.items() if key in available), None)
 
 
 def _images(folder: Path, workspace: Path) -> list[Path]:
-    """Image files in `folder`, inside the workspace once links are resolved."""
+    """Image files in `folder`, inside the workspace once links are resolved. By name: the listing order is the
+    filesystem's (a tmpfs and an ext4 disk gave two photos in opposite orders) and it broke the mtime ties below, so the
+    same folder must give the same images in the same order everywhere (DREAM-150)."""
     root = workspace.resolve()
     if not folder.is_dir():
         return []
-    return [p for p in folder.iterdir()
-            if p.suffix.lower() in IMAGES and p.is_file() and p.resolve().is_relative_to(root)]
+    return sorted(p for p in folder.iterdir()
+                  if p.suffix.lower() in IMAGES and p.is_file() and p.resolve().is_relative_to(root))
 
 
 def _clean(text: str) -> str:
@@ -145,7 +153,11 @@ def _say(app, kind: str, text: str) -> None:
 
 async def command(app, argument: str):
     cli, note = parse(argument)
-    cli = cli or default_cli()
+    try:
+        role = settings.role("critic") or {}
+        cli = cli or default_cli()
+    except ValueError as exc:
+        return _say(app, "error", f"Critique not run: {exc}. Nothing was sent.")
     if cli is None:
         return _say(app, "error", "No critic CLI is available (claude, codex, gemini or grok). Nothing was sent.")
     images = select_images(app.workspace)
@@ -161,6 +173,8 @@ async def command(app, argument: str):
     options = {"cwd": str(app.workspace), "mode": "plan", "timeout": seconds}
     if cfg and key in cfg.advisor_models:
         options["model"] = cfg.advisor_models[key]
+    if role.get("model") and role.get("provider") == key:      # the owner's critic model beats the Council's advisor model
+        options["model"] = role["model"]
     if cfg and key in cfg.advisor_efforts:
         options["effort"] = cfg.advisor_efforts[key]
     shown = [_clean(p.relative_to(app.workspace).as_posix())

@@ -556,7 +556,7 @@ async def test_the_header_chip_reads_borrowed_with_the_provider(monkeypatch, tmp
         async with async_playwright() as p:
             browser = await p.chromium.launch(args=["--disable-gpu"])
             page = await browser.new_page(viewport={"width": 2554, "height": 1338}, reduced_motion="reduce")
-            await page.goto(url + "&companion=1")
+            await page.goto(url.replace("/#", "/?companion=1#"))
             chip = page.locator("#dream-vision")
             await expect(chip).to_have_text("Vision · borrowed (OpenAI)", timeout=6000)
             assert await chip.get_attribute("data-state") == "borrowed"

@@ -1,0 +1,14 @@
+{
+  "format": "dream-skill/v1",
+  "name": "hardening-checklist",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "web_search",
+    "browse",
+    "read_file",
+    "run_bash",
+    "write_file",
+    "task_add"
+  ]
+}

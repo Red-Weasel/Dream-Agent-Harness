@@ -45,7 +45,7 @@ async def test_skills_filters_sort_keyboard_and_draft(library):
     ]
     await page.route('**/api/skills', lambda r:r.fulfill(json={'skills':rows}))
     await page.locator('#dream-nav-skills').click()
-    names = page.locator('#dream-skills-page .library-list strong')
+    names = page.locator('#dream-skills-page .library-sidebar .library-list strong')
     await expect(names).to_have_text(['alpha','writing','zebra'])
     await page.get_by_label('Sort skills').select_option('reverse')
     await expect(names).to_have_text(['zebra','writing','alpha'])
@@ -78,7 +78,7 @@ async def test_skills_filters_sort_keyboard_and_draft(library):
     await expect(page.locator('#dream-skills-page .library-status')).to_contain_text('Save this draft')
     await expect(editor).to_have_value('Unsaved catalog draft')
     await page.get_by_label('Search skills', exact=True).fill('unmatched')
-    await expect(page.locator('#dream-skills-page .library-count')).to_have_text('0 of 3 skills')
+    await expect(page.locator('#dream-skills-page .library-sidebar .library-count')).to_have_text('0 of 3 skills')
     assert prompts == []
 
 

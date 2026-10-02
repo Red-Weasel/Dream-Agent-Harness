@@ -22,7 +22,7 @@ def server(tmp_path):
 
 async def test_only_the_typed_words_are_doubled_and_shown_once(server):
     srv, prompts = server
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://test',
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://127.0.0.1',
                                  headers={'X-Dream-Token': srv.token}) as client:
         await client.post('/api/prompt', json={'prompt': 'Build the orbit shot', 'read_twice': True})
         await client.post('/api/prompt', json={'prompt': 'Build the orbit shot'})
@@ -42,7 +42,7 @@ async def test_the_pill_sends_the_flag_and_replay_shows_the_words_once(server, m
             browser = await p.chromium.launch(args=['--disable-gpu'])
             page = await browser.new_page(viewport={'width': 1100, 'height': 800})
             page.set_default_timeout(4000)
-            await page.goto(url + '&companion=1')
+            await page.goto(url.replace('/#', '/?companion=1#'))
             pill = page.locator('#read-twice')
             await expect(pill).to_have_attribute('aria-pressed', 'false')
             await pill.click()

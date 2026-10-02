@@ -188,7 +188,7 @@ async def test_studio_serves_the_manifest_with_renderable_content(ws):
         {"path": "tokens.css", "asset": "Tokens", "group": "Colors"},
     ]})
     srv = StudioServer(EventBus())
-    with TestClient(srv.app) as client:
+    with TestClient(srv.app, base_url="http://127.0.0.1") as client:
         assert client.get("/api/assets").status_code == 401
         rows = client.get("/api/assets", headers={"X-Dream-Token": srv.token}).json()["assets"]
     by = {r["asset"]: r for r in rows}

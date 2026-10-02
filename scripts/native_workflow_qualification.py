@@ -31,7 +31,7 @@ def fixture_environment(inherited: dict[str, str], workspace: Path) -> dict[str,
     env = {key: inherited[key] for key in ('DISPLAY', 'XAUTHORITY', 'LANG', 'LC_ALL', 'TZ')
            if key in inherited}
     env.update(PATH='/usr/bin:/bin', PYTHONPATH=str(ROOT), PYTHONUNBUFFERED='1',
-        DREAM_ROOT=str(workspace / 'state'), DREAM_GUI='1', DREAM_GUI_OPEN='0',
+        DREAM_ROOT=str(workspace / 'state'), DREAM_GUI='1',
         DREAM_DESKTOP_SESSION_FILE=str(workspace / 'session.json'),
         DREAM_SEMANTIC_MEMORY='0', DREAM_RERANK='0', DREAM_CONSOLIDATE='0',
         GDK_BACKEND='x11', LIBGL_ALWAYS_SOFTWARE='1', GALLIUM_DRIVER='llvmpipe',

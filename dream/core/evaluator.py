@@ -19,6 +19,7 @@ from typing import Any
 
 from claude_agent_sdk import SdkMcpTool
 
+from . import settings as runtime_settings
 from .backends.base import Event, content_to_text
 from .backends.openai_compat import OpenAICompatBackend
 from .providers import Provider, get_provider
@@ -37,12 +38,19 @@ class ReviewSettings:
     mode: str | None = None
 
     @classmethod
-    def resolve(cls, engine, *, provider=None, model=None, timeout=None):
+    def resolve(cls, engine, *, provider=None, model=None, timeout=None, role='evaluator'):
+        """Argument > environment > the saved role > the worker, field by field. `role` names the runtime-settings
+        row read after the environment (DREAM-145): 'evaluator' (the loop; DREAM_EVALUATOR_PROVIDER/MODEL come
+        first), 'reviewer' (/review; it has no environment variables) or None for neither -- the prompt optimizer
+        passes roles.evaluator's fields as arguments with role=None, so it reads no environment variables. An
+        unusable settings file raises: the caller reports it, nothing falls back."""
         worker = getattr(engine, 'provider', 'anthropic')
         worker = get_provider(worker) if isinstance(worker, str) else worker
-        selected = provider or os.environ.get('DREAM_EVALUATOR_PROVIDER') or worker
+        saved = (runtime_settings.role(role) or {}) if role else {}
+        env = os.environ if role == 'evaluator' else {}
+        selected = provider or env.get('DREAM_EVALUATOR_PROVIDER') or saved.get('provider') or worker
         selected = get_provider(selected) if isinstance(selected, str) else selected
-        chosen_model = model or os.environ.get('DREAM_EVALUATOR_MODEL')
+        chosen_model = model or env.get('DREAM_EVALUATOR_MODEL') or saved.get('model')
         if not chosen_model:
             chosen_model = (getattr(engine, 'model', None) if selected.key == worker.key
                             else selected.default_model)

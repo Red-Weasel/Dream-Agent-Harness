@@ -29,7 +29,7 @@ async def test_history_route_requires_auth_and_rejects_unbounded_limit(tmp_path)
     from dream.gui.server import StudioServer
     from dream.gui.bus import EventBus
     server=StudioServer(EventBus(),session={'workspace':str(tmp_path)})
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app),base_url='http://test') as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app),base_url='http://127.0.0.1') as client:
         assert (await client.get('/api/media/history')).status_code==401
         headers={'x-dream-token':server.token}
         response=await client.get('/api/media/history',headers=headers)

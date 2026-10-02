@@ -21,7 +21,6 @@ from typing import Any
 
 from claude_agent_sdk import tool
 
-from ..core.backends.base import Event
 from .context import ctx, err, in_thread, ok, studio
 
 _MAX_IMAGES = 6
@@ -138,6 +137,9 @@ async def visual_check(args: dict[str, Any]) -> dict[str, Any]:
 
     q: dict[str, Any] = ({"id": _ANSWER_ID, "kind": "text-options", "title": question, "options": options, "multi": False}
                          if options else {"id": _ANSWER_ID, "kind": "freeform", "title": question})
+    # Here, not at the top: native.py imports this module, and the offline harness eval runs the native
+    # tools without importing dream.core.backends (tests/test_harness_eval_offline.py).
+    from ..core.backends.base import Event
     emit(Event("studio", {"op": "ask", "form": {"title": _title(shown), "images": images, "questions": [q]}}))
     names = " and ".join(p.name for p in shown) if len(shown) <= 2 else f"{len(shown)} images"
     return ok(f"Showing {names} with your question in Studio. END YOUR TURN now; the answer comes back as the "

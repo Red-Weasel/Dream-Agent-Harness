@@ -4,6 +4,16 @@ from dream.core.backends.base import Event
 from test_desktop_chat import chat  # noqa: F401
 
 
+async def _saved_compact(page):
+    """Compact the way a returning user has it: saved in this browser (docs/desktop.md). An empty chat
+    hides the feed controls until the conversation starts (DREAM-078, branding.css), so there is no
+    select to use yet; the saved choice applies from the first event (DREAM-150)."""
+    await page.evaluate("localStorage.setItem('dream.feed.detail', 'compact')")
+    await page.reload()
+    await expect(page.locator('#stat')).to_have_text('Ready')
+    await expect(page.get_by_label('Feed detail')).to_have_value('compact')
+
+
 async def test_detailed_default_preserves_reasoning_choice_and_inspectable_tools(chat, tmp_path):
     server, page, prompts, _ = chat
     await expect(page.get_by_label('Feed detail')).to_have_value('detailed')
@@ -101,7 +111,7 @@ async def test_worker_activity_stays_attributed_and_does_not_change_lead_counts(
 
 async def test_failed_tool_opens_with_readable_error_in_compact(chat):
     server, page, _, _ = chat
-    await page.get_by_label('Feed detail').select_option('compact')
+    await _saved_compact(page)
     server.bus.publish(Event('tool_use', {'id':'failure', 'name':'read_file', 'input':{'path':'missing.md'}}))
     server.bus.publish(Event('tool_result', {'id':'failure', 'content':'File not found. Check the path.', 'is_error':True}))
     await expect(page.locator('#stream > .tool')).to_have_attribute('open', '')
@@ -159,7 +169,7 @@ async def test_worker_requested_and_interrupted_tool_status_are_literal(chat):
 
 async def test_worker_failure_explanation_visible_in_compact_and_retained(chat):
     server, page, _, _ = chat
-    await page.get_by_label('Feed detail').select_option('compact')
+    await _saved_compact(page)
     worker = {'run_id':'timeout-worker','agent':'Verifier','phase':'subagent'}
     server.bus.publish(Event('agent_activity', {**worker,'kind':'status','status':'running','text':'Subagent started.'}))
     card = page.locator('[data-run-id="timeout-worker"]')
@@ -176,7 +186,7 @@ async def test_worker_failure_explanation_visible_in_compact_and_retained(chat):
 
 async def test_compact_failed_child_tool_opens_enclosing_worker(chat):
     server, page, _, _ = chat
-    await page.get_by_label('Feed detail').select_option('compact')
+    await _saved_compact(page)
     worker = {'run_id':'tool-error-worker','agent':'Researcher','phase':'subagent'}
     server.bus.publish(Event('agent_activity', {**worker,'kind':'tool_use','status':'requested','data':{'id':'denied','name':'read_file','input':{'path':'sample.md'}}}))
     card = page.locator('[data-run-id="tool-error-worker"]')

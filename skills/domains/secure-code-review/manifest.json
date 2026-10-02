@@ -1,0 +1,12 @@
+{
+  "format": "dream-skill/v1",
+  "name": "secure-code-review",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "project_outline",
+    "grep",
+    "run_bash",
+    "write_file"
+  ]
+}

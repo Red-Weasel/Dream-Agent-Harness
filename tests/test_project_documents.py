@@ -65,7 +65,7 @@ async def test_document_routes_real_catalog_auth_and_restart(tmp_path,monkeypatc
     project=ProjectLibrary().create('Fixture',str(workspace))
     srv=StudioServer(EventBus(),session={'workspace':str(workspace)})
     path='/api/projects/'+project['id']+'/documents'
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app),base_url='http://test') as c:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app),base_url='http://127.0.0.1') as c:
         assert (await c.post(path,json=payload())).status_code==401
         c.headers['X-Dream-Token']=srv.token
         assert (await c.post(path,headers={'origin':'https://other.test'},json=payload())).status_code==403
@@ -88,7 +88,7 @@ async def test_context_usage_and_deep_json_are_truthful(tmp_path,monkeypatch):
     store.save(payload(title='T'*160,content='x'*5815))
     srv=StudioServer(EventBus())
     path='/api/projects/'+project['id']+'/documents'
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app),base_url='http://test',headers={'X-Dream-Token':srv.token}) as c:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app),base_url='http://127.0.0.1',headers={'X-Dream-Token':srv.token}) as c:
         result=await c.get(path)
         assert result.json()['context_chars']==len(build_context(project['id']))
         nested='['*10000+'0'+']'*10000

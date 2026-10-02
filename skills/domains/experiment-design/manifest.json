@@ -1,0 +1,10 @@
+{
+  "format": "dream-skill/v1",
+  "name": "experiment-design",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "run_bash",
+    "write_file"
+  ]
+}

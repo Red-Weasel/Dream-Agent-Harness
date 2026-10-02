@@ -16,7 +16,7 @@ from dream.tools.context import bind_context
 @pytest.fixture
 def native(tmp_path, monkeypatch):
     c = Computer(tmp_path, tmp_path / 'captures')
-    state = {'window_id': '123', 'focus': '123', 'title': 'Save As', 'rect': [0, 0, 400, 300]}
+    state = {'window_id': '123', 'focus': '123', 'title': 'Save As', 'rect': [0, 0, 400, 300], 'view_only': False}
     target = {'kind': 'desktop', 'window_id': '123', 'observation': 'before',
               'observed': time.monotonic(), 'fingerprint': _fingerprint(state),
               'pixels_sha256': hashlib.sha256(b'pixels').hexdigest()}
@@ -65,7 +65,7 @@ async def test_completed_native_input_survives_observation_failure(native, monke
     assert set(c.targets) == {'owned'}
     with pytest.raises(ComputerError, match='already used'):
         await c.act('owned', 'before', 'click', x=10, y=10)
-    assert calls == [('mousemove', '--window', '123', '10', '10'), ('getwindowfocus',), ('click', '1')]
+    assert calls == [('mousemove', '--window', '123', '10', '10'), ('click', '1')]   # the re-read between them is the (faked) state
 
 
 @pytest.mark.parametrize('kind', ['desktop', 'browser'])
@@ -133,7 +133,7 @@ async def test_same_target_can_be_observed_after_transient_capture_failure(nativ
     assert fresh['observation_id'] == target['observation']
     assert fresh['observation_id'] != 'before'
     assert fresh['state']['window_id'] == '123'
-    assert calls == [('getwindowfocus',), ('key', '--clearmodifiers', 'Tab')]
+    assert calls == [('key', '--clearmodifiers', 'Tab')]
 
 
 @pytest.mark.parametrize('token', [None, ''])
@@ -145,4 +145,4 @@ async def test_missing_token_cannot_replay_after_partial_result(native, monkeypa
     await c.act('owned', 'before', 'key', key='Tab')
     with pytest.raises(ComputerError, match='already used'):
         await c.act('owned', token, 'key', key='Tab')
-    assert calls == [('getwindowfocus',), ('key', '--clearmodifiers', 'Tab')]
+    assert calls == [('key', '--clearmodifiers', 'Tab')]

@@ -90,7 +90,7 @@ def test_blender_probe_route_keeps_auth_post_and_confirmation_boundaries(tmp_pat
 
     monkeypatch.setattr(service_module, 'probe_blender', fake_probe)
     server = StudioServer(EventBus(), session={'workspace': str(tmp_path)})
-    with TestClient(server.app) as client:
+    with TestClient(server.app, base_url="http://127.0.0.1") as client:
         path = '/api/media/probe_blender'
         assert client.post(path, json={'resource_confirmed': True}).status_code == 401
         headers = {'x-dream-token': server.token}

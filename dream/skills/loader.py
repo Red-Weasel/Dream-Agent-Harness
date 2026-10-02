@@ -50,6 +50,9 @@ MAX_DEPTH = 4
 HEADER_MAX_CHARS = 16384
 
 _MANIFEST = "SKILL.md"
+# DREAM-174: the Skills editor's copy of a plugin's skill names its plugin here, so the plugin's switch and presets
+# cover the copy too. Read only inside the private library (DATA_DIR/skills).
+COPY_MARKER = ".dream-copy.json"
 
 
 class SkillReadFailure(str):
@@ -191,6 +194,8 @@ def _iter_manifests(root: Path, max_depth: int = MAX_DEPTH) -> Iterator[Path]:
     if max_depth <= 0:
         return
     for entry in entries:
+        if entry.name == '.trash':
+            continue  # the Skills editor's removed private skills (DREAM-171)
         try:
             if entry.is_dir():  # follows symlinks, which is what we want here
                 yield from _iter_manifests(entry, max_depth - 1)
@@ -198,8 +203,9 @@ def _iter_manifests(root: Path, max_depth: int = MAX_DEPTH) -> Iterator[Path]:
             continue
 
 
-def discover(dirs: Iterable[Path | str]) -> tuple[list[FileSkill], list[str]]:
-    """Load every skill under ``dirs``. Returns (skills, warnings).
+def discover(dirs: Iterable[Path | str], aliases: list[str] | None = None) -> tuple[list[FileSkill], list[str]]:
+    """Load every skill under ``dirs``. Returns (skills, warnings); an intended plugin alias (below) is not a fault
+    and goes to ``aliases`` when given (DREAM-170).
 
     Earlier directories win a name collision: the roots are a precedence list, so a
     local override placed first genuinely overrides the packaged copy rather than
@@ -254,6 +260,7 @@ def discover(dirs: Iterable[Path | str]) -> tuple[list[FileSkill], list[str]]:
             # plugins.owner resolves symlinks, and a plugin's skills tree may be a symlink into another checkout
             # (plugins/understand-anything/skills -> ~/.understand-anything/...): the discovery root names the owner then.
             plugin = plugins.owner(manifest) or next((p for p in plugins.loaded() if p.skill_dir == root), None)
+            copied = None if plugin else _copied_from(manifest.parent, config.DATA_DIR / "skills")
             declared, key = name, name.casefold()
             if key in found:
                 # DREAM-102: a plugin's skill whose name a curated skill already holds stays reachable under its owner's
@@ -266,8 +273,9 @@ def discover(dirs: Iterable[Path | str]) -> tuple[list[FileSkill], list[str]]:
                         f"{found[key].root} — first root wins"
                     )
                     continue
-                warnings.append(f"skill '{name}' at {manifest.parent} shadowed by {found[key].root} — first root wins; "
-                                f"it stays reachable as '{alias}'")
+                if aliases is not None:
+                    aliases.append(f"'{alias}' is the plugin's copy of '{name}'; the built-in is used and the copy "
+                                 f"stays reachable as '{alias}'")
                 name, key = alias, alias.casefold()
             seen_roots.add(skill_root)
             package, notes = _package_metadata(manifest.parent, declared)
@@ -280,10 +288,21 @@ def discover(dirs: Iterable[Path | str]) -> tuple[list[FileSkill], list[str]]:
                 root=manifest.parent, source=source,
                 capabilities=tuple(package.get("capabilities", ())), portable=package.get("portable"),
                 version=package.get("version", ""), provenance=provenance,
-                parent_extension=extension_id("plugin", plugin.name) if plugin else None,
+                parent_extension=extension_id("plugin", plugin.name) if plugin else extension_id("plugin", copied) if copied else None,
                 curated=skill_root in {p.resolve() for p in config.bundled_skill_dirs()},
             )
     return [found[k] for k in sorted(found)], warnings
+
+
+def _copied_from(folder: Path, private: Path) -> str | None:
+    marker = folder / COPY_MARKER
+    try:
+        if not folder.resolve().is_relative_to(private.resolve()) or not marker.is_file():
+            return None
+        value = json.loads(marker.read_text(encoding="utf-8")).get("plugin")
+        return value if isinstance(value, str) and value.strip() else None
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 def index_lines(skills: Iterable[FileSkill]) -> list[str]:

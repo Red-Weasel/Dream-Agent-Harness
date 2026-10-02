@@ -158,6 +158,21 @@ _RULES = {
         r'\bgrill(?:ing)?\s+(?:me|us)\b|\bgrill\s+(?:my|our|this|the)\s+(?:plan|idea|design|decision|proposal|thinking|approach|spec|architecture)\b',
         r'\b(?:stress[- ]test|pressure[- ]test|poke holes in)\b.{0,40}\b(?:plan|idea|design|decision|proposal|thinking|approach|spec|architecture)\b',
     ),
+    # DREAM-181: the user is musing, not asking for work -- untangle the idea with them, build nothing yet.
+    # The owner's own words about their message, never a topic: "the thinking out loud skill" or "the model is thinking
+    # out loud" is work about the phrase (gate S1 #8). Matched on the whole prompt: "don't take this as instructions"
+    # is the signal itself, and the negation filter would blank it (gate S1 #7).
+    'thinking-out-loud': (
+        r"(?:^\W*|\b(?:i'?m|i\s+am|we'?re|we\s+are|me|just|ok|okay|so)\s+)(?:just\s+)?thinking\s+(?:this\s+|it\s+)?out\s+lou?d\b"
+        r"|(?<!not\s)\bthinking\s+out\s+lou?d\s+(?:here|now|again|for\s+a\s+(?:sec|second|minute))\b"
+        r"|(?<!not\s)\bjust\s+(?:spitballing|musing|a\s+thought)\b|(?<!the\s)\bhalf[- ]baked\s+idea\b(?!\s+\w+'s)",
+        # the whole message, not a scope limit: "don't take this as an order to touch the tests" restricts a task
+        r"\bdon'?t\s+(?:take|treat)\s+(?:this|it|any\s+of\s+(?:this|it))\s+as\s+(?:instructions?|a\s+task|an?\s+order)"
+        r"(?!\s+to\b)(?:\s+(?:yet|just\s+yet))?\b",
+        r"\b(?:been\s+chewing\s+on\s+(?:something|an\s+idea|this)|i\s+(?:feel|think)\s+(?:like\s+)?i'?m\s+onto\s+something"
+        r"|not\s+sure\s+(?:if|whether)\s+(?:it'?s|this\s+is|that'?s)\s+(?:even\s+)?worth"
+        r"|i'?ve\s+been\s+wondering\s+(?:whether|if))\b",
+    ),
     'handoff': (
         r'\bhand-?\s?off\b.{0,60}\b(?:session|conversation|agent|model|chat|context)\b|\b(?:session|conversation|agent|chat)\b.{0,60}\bhand-?\s?off\b',
         r'\bhand\s+(?:this|it|the)(?:\s+(?:work|session|conversation|task|chat))?\s+(?:off|over)\b',
@@ -215,16 +230,63 @@ _ACTION_PATTERN_INDEX = {
     'computer-use': (0, 1, 2, 3, 4), 'coding': (2,), 'research': (0, 2),
     'writing': (0,), 'documents': (1,), 'data-analysis': (1,), 'media': (1,),
     'library': (1,), 'verifying': (1,), 'brainstorming': (0,), 'debugging': (0, 1),
-    'gated-build': (0,), 'frontend-design': (0,), 'grill-me': (0, 1), 'handoff': (0, 1), 'understand': (0, 1, 2),
+    'gated-build': (0,), 'frontend-design': (0,), 'grill-me': (0, 1), 'thinking-out-loud': (0, 1, 2), 'handoff': (0, 1), 'understand': (0, 1, 2),
     'understand-dashboard': (0, 1, 2), 'understand-domain': (0, 1),
 }
 # A selected workflow that contradicts another drops it unless the user named it: grill-me asks every open decision
 # per round, brainstorming one question per message (DREAM-090). A repository map (understand, DREAM-102) is a fixed
 # tool pipeline; the coding workflow that "repo"/"build a code map" also wakes would only compete with it for the room.
-_DISPLACES = {'grill-me': ('brainstorming',), 'understand': ('coding',)}
+_DISPLACES = {'grill-me': ('brainstorming',), 'understand': ('coding',),
+              # DREAM-181: a musing is not a work order -- the build workflows would start doing what is only an idea.
+              'thinking-out-loud': ('brainstorming', 'grill-me', 'coding', 'gated-build')}
 # DREAM-103 (gate): an Understand skill displaces coding only when coding matched on incidental words ("repo" in "map this
 # repo"). When coding's own action pattern matched too, both load -- coding first on a tie -- so a misfire costs a
 # second workflow, not the turn. The dashboard and domain skills displace nothing; the rule would hold for them too.
+_WHOLE_PROMPT = frozenset({'thinking-out-loud'})
+_GO_AHEAD = re.compile(r"\b(?:go\s+ahead(?!\s+and\s+(?:tell|share|say|give|let|ask|think))|build\s+it|implement\s+it|ship\s+it"
+                       r"|just\s+do\s+it|do\s+it\s+now|write\s+it\s+up)\b", re.I)
+# A sentence that opens with a work verb is a task, whatever musing words sit around it ("just a thought: rename foo
+# across the repo", "thinking out loud: add retries and write tests"; gate S1 round 2).
+_TASK_OPENING = re.compile(r"(?:^|[.!?;:\n]\s*)(?:please\s+)?(?:fix|implement|refactor|rename|add|write|build|create|update|"
+                           r"remove|delete|change|run|move|replace|install|deploy|migrate)\b", re.I)
+
+
+_NO_EXECUTION = re.compile(r"(?<!not\s)(?<!not\smerely\s)(?<!not\sjust\s)\bthinking\s+out\s+lou?d\b"
+                           r"|(?<!not\s)\bjust\s+(?:spitballing|musing)\b"
+                           r"|\bdon'?t\s+(?:take|treat)\s+(?:this|it|any\s+of\s+(?:this|it))\s+as\s+(?:instructions?|a\s+task|an?\s+order)",
+                           re.I)
+_NEGATED = re.compile(r"(?i)\b(?:don'?t|do\s+not|not|never|no\s+need\s+to|if|when|once|unless|whether|before|until|after)\b")
+
+
+def _work_order(prompt: str) -> bool:
+    """True when some sentence of the owner's is an affirmative work order. A go-ahead counts unless its clause is
+    negated or conditional ("don't go ahead yet", "if we ever go ahead"). A sentence that OPENS with a work verb
+    counts too, unless the owner has said this is musing ("thinking out loud", "don't take this as instructions"):
+    then only an explicit go-ahead ends it, since a proposed step or a noun ("Update frequency is a concern",
+    "Possible approach: add retries") is part of the musing (Codex review #5, #6 and re-review #5, #6). A polite
+    request ("can you fix …", "please add …") is an order; a hypothetical ("could we …", "what if …") is not."""
+    musing = bool(_NO_EXECUTION.search(prompt))
+    for sentence in re.split(r"(?<=[.!?\n])\s+", prompt):
+        clause = sentence.strip()
+        if not clause:
+            continue
+        polite = re.match(r"(?i)(?:can|could|would|will)\s+you\s+(?:please\s+)?(\w+)", clause)
+        if polite and _TASK_OPENING.match(polite.group(1)) and not _NEGATED.search(clause[polite.end():]):
+            return True
+        if clause.endswith("?") or re.match(r"(?i)(?:could|should|would|can|what\s+if|how\s+about)\b", clause):
+            continue
+        for part in re.split(r";\s*", clause):
+            go = _GO_AHEAD.search(part)
+            if go and not _NEGATED.search(part[:go.start()]):
+                return True
+        if not musing and any(re.match(r"(?i)(?:please\s+)?(?:fix|implement|refactor|rename|add|write|build|create|update|"
+                                       r"remove|delete|change|run|move|replace|install|deploy|migrate|repair|debug)\s+"
+                                       r"(?!\w+\s+(?:is|are|was|were|seems)\b)", part.strip())
+                              for part in re.split(r":\s*", clause)):
+            return True
+    return False
+
+
 _DISPLACES_ONLY_INCIDENTAL = frozenset({'understand', 'understand-dashboard', 'understand-domain'})
 # DREAM-120 (#92): a modelling plan uses the words frontend-design keys on ("distinctive", "aesthetic", "look and feel",
 # "color palette"): on 2026-09-24 it selected frontend-design for a Blender task. In BLENDER WORK -- this session has
@@ -354,7 +416,8 @@ def select_for_task(prompt: str, skills: Iterable[loader.FileSkill] | None = Non
         excluded = re.search(rf"\b(?:without|avoid|skip)\s+(?:the\s+)?\$?{re.escape(skill.name)}\s+skill\b", prompt, re.I)
         if explicit == -1 or (explicit is None and excluded):
             continue
-        found = [pattern.search(positive) for pattern in _PATTERNS.get(skill.name, ())] if skill.curated else []
+        text = prompt if skill.name in _WHOLE_PROMPT else positive
+        found = [pattern.search(text) for pattern in _PATTERNS.get(skill.name, ())] if skill.curated else []
         matches = [bool(match) for match in found]
         acted = bool(matches) and any(matches[index] for index in _ACTION_PATTERN_INDEX.get(skill.name, ()))
         score = sum(matches) + 4 * acted if matches else 0
@@ -366,6 +429,8 @@ def select_for_task(prompt: str, skills: Iterable[loader.FileSkill] | None = Non
                       else ' '.join(next(match for match in found if match).group(0).split())[:_SIGNAL_CHARS])
             candidates.append((explicit is None, explicit if explicit is not None else -score,
                                skill.name.casefold(), skill, acted, signal))
+    if _work_order(prompt):   # a go-ahead or a work order: not a musing
+        candidates = [row for row in candidates if not (row[0] and row[3].name == 'thinking-out-loud')]
     present = {row[3].name for row in candidates}
     candidates = [row for row in candidates
                   if not (row[0] and any(row[3].name in _DISPLACES.get(name, ())

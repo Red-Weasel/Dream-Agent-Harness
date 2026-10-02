@@ -1,0 +1,11 @@
+{
+  "format": "dream-skill/v1",
+  "name": "nda-triage",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "read_file",
+    "library_search",
+    "write_file"
+  ]
+}

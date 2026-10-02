@@ -15,7 +15,7 @@ def make_server(tmp_path, **kwargs):
 async def post(server, tmp_path, **changes):
     body = {'draft': 'Write a short launch announcement.', 'mode': 'model',
             'session_id': 's1', 'workspace': str(tmp_path), **changes}
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url='http://test') as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url='http://127.0.0.1') as client:
         return await client.post('/api/prompt-optimizer', headers={'X-Dream-Token': server.token}, json=body)
 
 
@@ -63,7 +63,7 @@ async def test_missing_callback_is_visible_and_has_no_fallback(tmp_path):
 async def test_auth_origin_size_and_json_gates(tmp_path):
     called = []
     server = make_server(tmp_path, on_optimize_prompt=lambda *args: called.append(args))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url='http://test') as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url='http://127.0.0.1') as client:
         assert (await client.post('/api/prompt-optimizer', json={})).status_code == 401
         headers = {'X-Dream-Token': server.token, 'Origin': 'https://unrelated.invalid'}
         assert (await client.post('/api/prompt-optimizer', headers=headers, json={})).status_code == 403

@@ -108,7 +108,7 @@ async def test_a_fresh_start_leaves_the_head_and_one_handoff_and_nothing_older(s
     assert "OLD-TOOL-RESULT" not in json.dumps(b.messages)
     assert b.messages[0]["content"] == head_before                            # nothing changed: the same head
     (line,) = [e.data for e in events if e.kind == "system"]
-    assert line.startswith("Fresh start:") and "handoff" in line
+    assert line.startswith("Handoff:") and "handoff" in line
     (name, fields), = [(n, f) for n, f in b.runtime_meter.records if n == "fresh_start"]
     assert fields["messages"] >= 6 and fields["files"] == 1 and fields["notes"] >= 1
     saved = session.working.notes()
@@ -266,7 +266,7 @@ async def test_the_engine_binds_the_session_context_for_the_backend(session):
     b.fresh_start = spy
     events = engine.fresh_start()
     assert bound["context"] is session.context
-    assert events and events[0].data.startswith("Fresh start:")
+    assert events and events[0].data.startswith("Handoff:")
 
 
 # --- the app: the control refuses while anything runs; /fresh -------------------------------------------
@@ -294,7 +294,7 @@ def app(tmp_path):
 
     def fresh_start():
         calls.append(1)
-        return [Event("system", "Fresh start: the conversation is now a handoff.")]
+        return [Event("system", "Handoff: the conversation is now a handoff.")]
 
     obj.engine = SimpleNamespace(fresh_start=fresh_start, store=None)
     obj.shown, obj.calls = shown, calls
@@ -312,15 +312,15 @@ async def test_the_control_refuses_while_dream_is_busy_and_runs_when_idle(app):
     app._gui_prompts.get_nowait()
     assert app.calls == []
     result = await app._runtime_control({"action": "fresh_start"})
-    assert app.calls == [1] and result["notices"] == ["Fresh start: the conversation is now a handoff."]
-    assert "Fresh start: the conversation is now a handoff." in app.shown                    # the terminal
+    assert app.calls == [1] and result["notices"] == ["Handoff: the conversation is now a handoff."]
+    assert "Handoff: the conversation is now a handoff." in app.shown                    # the terminal
     events = app.bus.conversation.snapshot()["events"]
-    assert {"kind": "system", "data": "Fresh start: the conversation is now a handoff."} in events   # Studio
+    assert {"kind": "system", "data": "Handoff: the conversation is now a handoff."} in events   # Studio
 
 
 async def test_the_route_refuses_mid_turn_and_answers_between_turns(app):
     srv = StudioServer(app.bus, on_control=app._runtime_control)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://test",
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://127.0.0.1",
                                  headers={"X-Dream-Token": srv.token}) as client:
         app._accepting_input = False
         r = await client.post("/api/control", json={"action": "fresh_start"})
@@ -332,20 +332,27 @@ async def test_the_route_refuses_mid_turn_and_answers_between_turns(app):
 
 async def test_slash_fresh_in_the_terminal_and_the_use_new_answer(app):
     assert await app._command("/fresh") is False
-    assert app.calls == [1] and "Fresh start: the conversation is now a handoff." in app.shown
+    assert app.calls == [1] and "Handoff: the conversation is now a handoff." in app.shown
 
     def unsupported():
-        raise ValueError("Fresh start is not available here. Use /new to start a new session.")
+        raise ValueError("Handoff is not available here. Use /new to start a new session.")
 
     app.engine.fresh_start = unsupported
     await app._command("/fresh")
     assert any("/new" in line for line in app.shown)
 
 
-def test_help_lists_fresh():
+def test_help_lists_handoff():
     from dream.tui.app import HELP
 
-    assert "/fresh" in HELP
+    assert "/handoff" in HELP and "Fresh start" not in HELP       # DREAM-175: the owner's name for it
+
+
+async def test_slash_handoff_is_the_command_and_fresh_still_works(app):
+    assert await app._command("/handoff") is False
+    assert app.calls == [1]
+    assert await app._command("/fresh") is False                  # the name before DREAM-175 keeps working
+    assert app.calls == [1, 1]
 
 
 # --- the chat pane --------------------------------------------------------------------------------------
@@ -354,7 +361,7 @@ def test_help_lists_fresh():
 SHOTS = os.environ.get("DREAM_FRESH_SHOTS")
 
 
-@pytest.mark.parametrize("layout", ["", "&companion=1"])
+@pytest.mark.parametrize("layout", ["", "?companion=1"])
 async def test_the_chat_pane_control_appears_waits_for_the_turn_and_hits_the_route(tmp_path, monkeypatch, layout):
     from playwright.async_api import async_playwright, expect
 
@@ -367,9 +374,9 @@ async def test_the_chat_pane_control_appears_waits_for_the_turn_and_hits_the_rou
         if payload.get("action") != "fresh_start":
             return {}
         if state["busy"]:
-            raise ValueError("Fresh start waits until Dream is idle.")
-        srv.bus.publish(Event("system", "Fresh start: the conversation is now a handoff."))
-        return {"notices": ["Fresh start: the conversation is now a handoff."]}
+            raise ValueError("Handoff waits until Dream is idle.")
+        srv.bus.publish(Event("system", "Handoff: the conversation is now a handoff."))
+        return {"notices": ["Handoff: the conversation is now a handoff."]}
 
     srv = StudioServer(EventBus(), on_prompt=prompts.append, on_control=on_control,
                        session={"workspace": str(tmp_path), "model": "fixture"})
@@ -379,7 +386,7 @@ async def test_the_chat_pane_control_appears_waits_for_the_turn_and_hits_the_rou
             browser = await p.chromium.launch(args=["--disable-gpu"])
             page = await browser.new_page(viewport={"width": 1100, "height": 800})
             page.set_default_timeout(4000)
-            await page.goto(url + layout)
+            await page.goto(url.replace("/#", "/" + layout + "#"))
             control = page.locator("#fresh-start")
             await expect(control).to_be_visible()
             await expect(control).to_be_enabled()
@@ -392,11 +399,12 @@ async def test_the_chat_pane_control_appears_waits_for_the_turn_and_hits_the_rou
             srv.bus.publish(Event("turn_end", {}))
             await expect(control).to_be_enabled()
             await control.click()
-            await expect(page.locator("#stream .sys", has_text="Fresh start: the conversation")).to_have_count(1)
+            await expect(page.locator("#stream .sys", has_text="Handoff: the conversation")).to_have_count(1)
             assert [c for c in controls if c.get("action") == "fresh_start"] == [{"action": "fresh_start"}]
-            await page.locator("#input").fill("/fresh")                       # the slash command, same route
+            await page.locator("#input").fill("/handoff")                     # the slash command, same route
             await page.locator("#input").press("Enter")
-            await expect(page.locator("#stream .sys", has_text="Fresh start: the conversation")).to_have_count(2)
+            await expect(page.locator("#stream .sys", has_text="Handoff: the conversation")).to_have_count(2)
+            await expect(control).to_have_text("Handoff")                     # DREAM-175: the owner's name
             await expect(page.locator("#input")).to_have_value("")
             state["busy"] = True                                              # the route refuses mid-turn
             await page.locator("#input").fill("/fresh")

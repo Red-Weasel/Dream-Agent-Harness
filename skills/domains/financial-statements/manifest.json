@@ -1,0 +1,15 @@
+{
+  "format": "dream-skill/v1",
+  "name": "financial-statements",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "read_file",
+    "web_search",
+    "browse",
+    "library_search",
+    "run_bash",
+    "chart_display_v0",
+    "write_file"
+  ]
+}

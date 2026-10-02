@@ -1,0 +1,356 @@
+/* Nested Dream (DREAM-188): the view's tokens live under the page as --nd-*, derived from Dream's theme (theme.css);
+   the layout follows the v2 mockup: a top row with the numbered pips, the orchestrator column with the eclipse, two
+   pinned worker windows and a card row. Dream's font stack; nothing remote.
+   Specificity: the page's own button reset (.nd button, 0,1,1) ties with companion.css's base button paint and wins by
+   order; every control that sets its own colours is written as `.nd .x` (0,2,0) so it outranks both, and hover and
+   focus states carry the page id (1,x,x) so companion.css's `button:hover` (0,3,1) never repaints them. */
+#dream-nested-page{
+  --nd-bg:var(--bg0,#0e0f18);--nd-card:var(--bg2,#171926);--nd-raised:var(--raised,#27293a);--nd-hover:var(--panel,#1e202f);--nd-select:var(--plum,#2f2744);
+  --nd-line:var(--line,#3b3e54);--nd-line-strong:var(--line-strong,#515670);
+  --nd-fg1:var(--fg,#ebecf5);--nd-fg2:var(--dim,#b6b9ce);--nd-fg3:var(--faint,#a2a6be);
+  --nd-accent:var(--ember,#f6a06a);--nd-on-accent:var(--ember-ink,#241928);--nd-rose:#ff9ac0;
+  --nd-seg-on:var(--plum-line,#8e7bb4);--nd-on-seg:#12131c;   /* a checked segment: 3:1 and more against the page and a panel */
+  /* the owner's pip colours: green working, yellow verifying, orange needs you, red failed or stopped, pewter the rest */
+  --nd-ok:#7fd6ae;--nd-verify:#f2c14e;--nd-needs:var(--ember,#f6a06a);--nd-fail:#ff7385;--nd-pewter:#4a4a5c;--nd-on-pewter:#e7e3eb;--nd-on-status:#12131c;
+  --nd-sans:var(--sans,Cantarell,"Noto Sans",system-ui,sans-serif);--nd-mono:ui-monospace,"SFMono-Regular",Menlo,monospace;
+  --nd-s1:4px;--nd-s2:8px;--nd-s3:12px;--nd-s4:16px;--nd-s6:24px;--nd-s8:32px;
+  --nd-r-lg:10px;--nd-r-md:6px;--nd-r-sm:4px;--nd-card-w:320px;
+  /* the type scale (12 13 14 16 18 20), scaled by the text-size choice; a future light theme is a second token map here */
+  --nd-fz:1;--nd-t11:calc(11px * var(--nd-fz));--nd-t12:calc(12px * var(--nd-fz));--nd-t13:calc(13px * var(--nd-fz));--nd-t14:calc(14px * var(--nd-fz));
+  --nd-t16:calc(16px * var(--nd-fz));--nd-t18:calc(18px * var(--nd-fz));--nd-t20:calc(20px * var(--nd-fz));
+  position:absolute;inset:0;z-index:5;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;
+  background:var(--nd-bg);color:var(--nd-fg1);font-family:var(--nd-sans);font-size:var(--nd-t14);line-height:1.5;
+}
+#dream-nested-page[hidden]{display:none!important}
+/* With the Understand panel open the view flows beside it, as the chat does, instead of lying under it (the owner's
+   2026-09-30 screenshots: the panel hid Send and every worker card). */
+html[data-dream-view=nested].understand-open #main{display:none!important}
+html[data-dream-view=nested].understand-open #dream-nested-page{position:relative;inset:auto;flex:1 1 0;order:0}
+html[data-dream-view=nested] footer,html[data-dream-view=nested] .studio-foot{display:none!important}
+.nd *{box-sizing:border-box}
+.nd-num{font-variant-numeric:tabular-nums}
+.nd button{font:inherit;color:inherit;background:none;border:0;padding:0;min-height:0;cursor:pointer}
+.nd :is(button,textarea,summary,[tabindex]):focus-visible{outline:2px solid var(--nd-accent);outline-offset:2px}
+.nd-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.nd-muted{color:var(--nd-fg2);font-size:var(--nd-t12);margin:0}
+
+/* Top row: the title, one pip per worker, what needs the owner, the card controls */
+.nd-top{display:flex;flex-wrap:wrap;align-items:center;gap:var(--nd-s2) var(--nd-s4);padding:var(--nd-s2) var(--nd-s4);border-bottom:1px solid var(--nd-line);min-height:48px;flex:none;font-size:var(--nd-t12);color:var(--nd-fg2)}
+.nd-title{color:var(--nd-fg1);font-weight:600;font-size:var(--nd-t14)}
+.nd-pips{display:flex;flex-wrap:wrap;gap:var(--nd-s1)}
+.nd-spacer{flex:1}
+.nd-grp{display:flex;flex-wrap:wrap;align-items:center;gap:var(--nd-s1)}
+.nd-lanes{font-size:var(--nd-t12);color:var(--nd-fg2);white-space:nowrap}
+.nd-lanes:empty{display:none}
+/* P10 (DREAM-197): the Agents choice, a radio group styled like Customize's segments. */
+.nd-capw{display:inline-flex;align-items:center;gap:var(--nd-s2)}
+.nd-capw[hidden]{display:none}
+#nd-cap-grp{flex:none;flex-wrap:nowrap}   /* the group stays one row; a long note beside it wraps instead */
+.nd-cap-l{font-size:var(--nd-t12);color:var(--nd-fg2)}
+.nd .nd-seg button:disabled{opacity:.5;cursor:default}
+.nd .nd-seg[aria-busy=true]{opacity:.7}
+.nd .nd-seg[aria-busy=true] button{cursor:progress}
+.nd-cap-note:empty{display:none}
+.nd .nd-pip{width:24px;height:24px;border-radius:var(--nd-r-md);display:inline-grid;place-items:center;font-size:var(--nd-t12);font-weight:600;font-variant-numeric:tabular-nums;flex:none;background:var(--nd-pewter);color:var(--nd-on-pewter)}
+button.nd-pip{position:relative}
+button.nd-pip::before{content:"";position:absolute;inset:-4px}
+.nd .nd-pip.nd-working{background:var(--nd-ok);color:var(--nd-on-status)}
+.nd .nd-pip.nd-verifying{background:var(--nd-verify);color:var(--nd-on-status)}
+.nd .nd-pip.nd-needs{background:var(--nd-needs);color:var(--nd-on-accent)}
+.nd .nd-pip.nd-failed,.nd .nd-pip.nd-stopped{background:var(--nd-fail);color:var(--nd-on-status)}
+/* Hovered or focused, a pip keeps its state colour (a little brighter) and its readable text. */
+#dream-nested-page .nd-pip:hover,#dream-nested-page .nd-pip:focus-visible{background:var(--nd-pewter);color:var(--nd-on-pewter);filter:brightness(1.12)}
+#dream-nested-page .nd-pip.nd-working:hover,#dream-nested-page .nd-pip.nd-working:focus-visible{background:var(--nd-ok);color:var(--nd-on-status)}
+#dream-nested-page .nd-pip.nd-verifying:hover,#dream-nested-page .nd-pip.nd-verifying:focus-visible{background:var(--nd-verify);color:var(--nd-on-status)}
+#dream-nested-page .nd-pip.nd-needs:hover,#dream-nested-page .nd-pip.nd-needs:focus-visible{background:var(--nd-needs);color:var(--nd-on-accent)}
+#dream-nested-page .nd-pip.nd-failed:hover,#dream-nested-page .nd-pip.nd-stopped:hover,#dream-nested-page .nd-pip.nd-failed:focus-visible,#dream-nested-page .nd-pip.nd-stopped:focus-visible{background:var(--nd-fail);color:var(--nd-on-status)}
+.nd-attn{display:flex;gap:var(--nd-s1);font-size:var(--nd-t14);font-variant-numeric:tabular-nums}
+.nd .nd-attn button{min-height:32px;padding:0 var(--nd-s2);border-radius:var(--nd-r-md);background:none;border:0}
+#dream-nested-page .nd-attn button:hover,#dream-nested-page .nd-attn button:focus-visible{background:var(--nd-hover)}
+.nd-attn b{font-weight:600}
+.nd .nd-attn .nd-needs{color:var(--nd-needs)}
+.nd .nd-attn .nd-fail{color:var(--nd-fail)}
+.nd .nd-pill{height:32px;padding:0 var(--nd-s3);border-radius:var(--nd-r-md);border:1px solid var(--nd-line);background:none;display:inline-flex;align-items:center;gap:var(--nd-s2);color:var(--nd-fg2);white-space:nowrap;font-size:var(--nd-t14)}
+#dream-nested-page .nd-pill:hover,#dream-nested-page .nd-pill:focus-visible{background:none;color:var(--nd-fg1);border-color:var(--nd-line-strong)}
+.nd .nd-pill[aria-pressed=true],.nd .nd-pill[aria-expanded=true],#dream-nested-page .nd-pill[aria-pressed=true]:hover,#dream-nested-page .nd-pill[aria-expanded=true]:hover{color:var(--nd-fg1);background:var(--nd-select);border-color:var(--nd-line-strong)}
+.nd .nd-iconbtn{width:32px;height:32px;padding:0;border:0;border-radius:var(--nd-r-md);display:grid;place-items:center;color:var(--nd-fg2);background:none;flex:none;font-size:var(--nd-t18);line-height:1}
+#dream-nested-page .nd-iconbtn:hover,#dream-nested-page .nd-iconbtn:focus-visible{background:var(--nd-hover);color:var(--nd-fg1);border-color:transparent}
+
+/* The app: the orchestrator column, a resize edge, the workers; the column can sit on the right (DREAM-196) */
+.nd-app{flex:1;min-height:0;position:relative;overflow:hidden;display:grid;grid-template-rows:minmax(0,1fr);grid-template-columns:clamp(360px,var(--nd-orch-w,46%),calc(100% - 8px - 480px)) 8px minmax(0,1fr)}
+.nd-app[data-side=right]{grid-template-columns:minmax(0,1fr) 8px clamp(360px,var(--nd-orch-w,46%),calc(100% - 8px - 480px))}
+/* Explicit rows too: with the column on the right the three sit in DOM order 3, 2, 1 and sparse auto-placement would push them into new rows. */
+.nd-orch{grid-column:1;grid-row:1}.nd-h-orch{grid-column:2;grid-row:1}.nd-main{grid-column:3;grid-row:1}
+.nd-app[data-side=right] .nd-orch{grid-column:3;border-right:0;border-left:1px solid var(--nd-line)}
+.nd-app[data-side=right] .nd-main{grid-column:1}
+/* Resize edges: 8 px wide, a glow when hovered, dragged or focused; the arrow keys move them too. */
+.nd-handle{position:relative;cursor:col-resize;touch-action:none;min-width:8px}
+.nd-handle::after{content:"";position:absolute;inset:0 2px;border-radius:var(--nd-r-sm);transition:background-color 120ms linear}
+.nd-handle:hover::after,.nd-handle.nd-drag::after,.nd-handle:focus-visible::after{background:color-mix(in srgb,var(--nd-accent) 45%,transparent)}
+.nd-handle[hidden]{display:none}
+.nd-slot{display:contents}
+.nd-handle.nd-h-h{cursor:row-resize;min-height:8px}
+.nd-handle.nd-h-h::after{inset:2px 0}
+.nd-orch{display:flex;flex-direction:column;min-height:0;min-width:0;background:var(--nd-card);border-right:1px solid var(--nd-line)}
+/* The column's body -- the picture, the goal, Needs you, the conversation and the plan -- over the composer. */
+.nd-orch-body{flex:1;min-height:0;display:flex;flex-direction:column}
+/* The picture gives way first when the column is short (down to what keeps its ⇄ button), long before a request does. */
+.nd-hero{position:relative;height:128px;flex:0 40 auto;min-height:44px;overflow:hidden;background:#07060a}
+.nd-hero img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:68% 48%}
+.nd .nd-hero .nd-move{position:absolute;top:var(--nd-s2);right:var(--nd-s2);color:#fafafa;background:rgba(7,6,10,.55)}
+#dream-nested-page .nd-hero .nd-move:hover,#dream-nested-page .nd-hero .nd-move:focus-visible{background:rgba(7,6,10,.8);color:#fff}
+.nd-goal-wrap{flex:none;padding:var(--nd-s3) var(--nd-s4) 0}
+.nd-goal{margin:0;font:400 var(--nd-t14)/1.5 var(--nd-sans);color:var(--nd-fg1);text-wrap:pretty;overflow-wrap:anywhere}
+.nd-goal.nd-goal-cut{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;line-clamp:4;overflow:hidden}
+.nd .nd-goal-more{margin-top:var(--nd-s1)}
+.nd-goal-empty{font:600 var(--nd-t20)/1.4 var(--nd-sans);letter-spacing:-.02em;color:var(--nd-fg2)}
+/* The conversation keeps room for a few lines (about 120 px of its list) whatever waits above it (DREAM-194). */
+.nd-orch-scroll{flex:1;min-height:192px;overflow:auto;padding:var(--nd-s4);display:flex;flex-direction:column;gap:var(--nd-s4);scrollbar-gutter:stable}
+.nd-sec{margin:0;font-size:var(--nd-t14);font-weight:600;color:var(--nd-fg1)}
+.nd-convo{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--nd-s4);align-content:start}
+.nd-msg .nd-by{display:flex;gap:var(--nd-s2);font-size:var(--nd-t12);color:var(--nd-fg2)}
+.nd-msg .nd-by b{color:var(--nd-fg1);font-weight:600}
+.nd-msg p{margin:var(--nd-s1) 0 0;color:var(--nd-fg1)}
+.nd-text,.nd-stream,.nd-full{white-space:pre-wrap;overflow-wrap:anywhere}
+.nd-tool-msg{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--nd-s2);font-size:var(--nd-t12);color:var(--nd-fg2)}
+.nd-tool-name{font-family:var(--nd-mono);color:var(--nd-fg1);white-space:nowrap}
+.nd-tool-args{font-family:var(--nd-mono);min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nd-badge{font-size:var(--nd-t11);color:var(--nd-fg2);border:1px solid var(--nd-line);border-radius:var(--nd-r-sm);padding:0 var(--nd-s1);white-space:nowrap}
+.nd-think{border-left:2px solid var(--nd-rose);padding-left:var(--nd-s3)}
+.nd-think summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:var(--nd-s2);font-size:var(--nd-t12);color:var(--nd-rose);min-height:32px}
+.nd-think summary::-webkit-details-marker{display:none}
+.nd-think summary .nd-tail{color:var(--nd-fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}
+.nd-think[open] summary .nd-tail{display:none}
+.nd-think .nd-full{margin:0;color:var(--nd-fg2);font-size:var(--nd-t13)}
+
+/* The composer, under the orchestrator's box */
+.nd-composer{flex:none;padding:var(--nd-s2) var(--nd-s4) var(--nd-s3);border-top:1px solid var(--nd-line)}
+.nd-box{border:1px solid var(--nd-line-strong);border-radius:var(--nd-r-lg);background:var(--nd-raised)}
+.nd-box:focus-within{border-color:var(--nd-fg2)}
+.nd-box textarea{display:block;width:100%;min-height:48px;max-height:160px;margin:0;border:0;background:none;resize:none;padding:var(--nd-s2) var(--nd-s3);font:inherit;color:inherit}
+.nd-box textarea::placeholder{color:var(--nd-fg3)}
+.nd-box textarea:focus-visible{outline:none}
+.nd-row{display:flex;align-items:center;gap:var(--nd-s2);padding:0 var(--nd-s2) var(--nd-s2)}
+.nd-hint{flex:1;min-width:0;font-size:var(--nd-t12);color:var(--nd-fg2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nd .nd-send{height:32px;padding:0 var(--nd-s4);border:0;border-radius:calc(var(--nd-r-lg) - var(--nd-s2));background:var(--nd-accent);color:var(--nd-on-accent);font-weight:600;flex:none}
+#dream-nested-page .nd-send:hover,#dream-nested-page .nd-send:focus-visible{background:var(--nd-accent);color:var(--nd-on-accent);border-color:transparent;filter:brightness(1.08)}
+.nd .nd-send:disabled{cursor:default;opacity:.6}
+.nd-status{min-height:20px;margin:var(--nd-s1) 0 0;padding-left:var(--nd-s2);font-size:var(--nd-t12);color:var(--nd-fg2)}
+.nd-status[data-error=true]{color:var(--nd-fail)}
+
+/* The workers: two pinned windows over a resize edge, then the card row. A div, so the chat's main{} rules never reach it. */
+.nd-main{min-width:0;min-height:0;padding:0;overflow:visible;display:grid;grid-template-rows:clamp(30%,var(--nd-top-h,60%),80%) 8px minmax(0,1fr)}
+.nd-pinned{display:grid;grid-template-columns:clamp(25%,var(--nd-pin-split,50%),75%) 8px minmax(0,1fr);padding:var(--nd-s4) var(--nd-s4) 0;min-height:0;min-width:0}
+.nd-win{background:var(--nd-card);border:1px solid var(--nd-line);border-radius:var(--nd-r-lg);display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
+.nd-win.nd-failed,.nd-win.nd-stopped,.nd-card.nd-failed,.nd-card.nd-stopped{border-color:color-mix(in srgb,var(--nd-fail) 45%,transparent)}
+.nd-win.nd-over{border-color:var(--nd-accent)}
+.nd-win-empty{display:grid;place-items:center;border-style:dashed;padding:var(--nd-s4);text-align:center}
+.nd-empty{grid-column:1 / -1;display:grid;place-content:center;justify-items:center;gap:var(--nd-s2);text-align:center;border:1px dashed var(--nd-line-strong);border-radius:var(--nd-r-lg);padding:var(--nd-s8) var(--nd-s6);color:var(--nd-fg2)}
+.nd-empty h2{margin:0;font-size:var(--nd-t16);font-weight:600;color:var(--nd-fg1)}
+.nd-empty p{margin:0;max-width:52ch}
+.nd-provider-note{color:var(--nd-fg1);font-weight:600}
+.nd-whead{padding:var(--nd-s3) var(--nd-s4);border-bottom:1px solid var(--nd-line);display:grid;gap:var(--nd-s1)}
+.nd-wrow{display:flex;flex-wrap:wrap;align-items:center;gap:var(--nd-s2);min-width:0}
+.nd-nm{font-size:var(--nd-t16);font-weight:600;letter-spacing:-.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60%}
+.nd-md,.nd-ctx,.nd-rate{font-size:var(--nd-t12);color:var(--nd-fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+/* The state, the clock and the controls keep right; a narrow window or a larger text wraps them rather than clip. */
+.nd-rt{margin-left:auto;display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:var(--nd-s1) var(--nd-s3);flex:0 1 auto;min-width:0;max-width:100%;font-size:var(--nd-t12);color:var(--nd-fg2)}
+.nd-state{font-size:var(--nd-t12);color:var(--nd-fg2)}
+.nd-failed .nd-state,.nd-stopped .nd-state{color:var(--nd-fail)}
+.nd-headline,.nd-request{margin:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--nd-t13);color:var(--nd-fg1)}
+.nd-request{font-size:var(--nd-t12);color:var(--nd-fg2)}
+.nd-wbody{flex:1;min-height:0;overflow:auto;padding:var(--nd-s4);display:flex;flex-direction:column;gap:var(--nd-s3);scrollbar-gutter:stable}
+.nd-tools{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--nd-s1)}
+/* One line per tool call (name, its arguments cut with an ellipsis, the badge); the result below it. */
+.nd-tool{display:grid;grid-template-columns:auto minmax(0,1fr) auto;column-gap:var(--nd-s2);align-items:baseline;font-size:var(--nd-t12);color:var(--nd-fg2)}
+.nd-tool-out{grid-column:1 / -1;color:var(--nd-fg2);white-space:pre-wrap;overflow-wrap:anywhere;font:var(--nd-t12)/1.5 var(--nd-mono)}
+.nd-stream{margin:0;color:var(--nd-fg1)}
+.nd-belt{min-height:0;min-width:0;padding:var(--nd-s4);display:flex}
+.nd-track{flex:1;min-height:0;min-width:0;display:flex;gap:var(--nd-s4);overflow-x:auto;overflow-y:hidden;scroll-snap-type:x proximity;padding:var(--nd-s1);margin:0 calc(-1 * var(--nd-s1))}
+.nd-track.nd-auto{scroll-snap-type:none}
+.nd-card{flex:0 0 var(--nd-card-w);scroll-snap-align:start;background:var(--nd-card);border:1px solid var(--nd-line);border-radius:var(--nd-r-lg);display:flex;flex-direction:column;min-height:0;min-width:0;overflow:hidden}
+.nd-card:hover{border-color:var(--nd-line-strong)}
+.nd-card[draggable=true]{cursor:grab}
+.nd-chead{padding:var(--nd-s3) var(--nd-s3) var(--nd-s2);display:grid;gap:var(--nd-s1)}
+.nd-chead .nd-nm{font-size:var(--nd-t14);letter-spacing:0}
+.nd-cbody{flex:1;min-height:48px;overflow:hidden;padding:0 var(--nd-s3) var(--nd-s3);font-size:var(--nd-t12);color:var(--nd-fg2);white-space:pre-wrap;overflow-wrap:anywhere;display:flex;flex-direction:column;justify-content:flex-end}
+.nd-cbody .nd-th{color:var(--nd-rose)}
+.nd-cbody .nd-out{color:var(--nd-fg1)}
+.nd-cfoot{display:flex;align-items:center;justify-content:space-between;gap:var(--nd-s3);padding:var(--nd-s1) var(--nd-s1) var(--nd-s1) var(--nd-s3);font-size:var(--nd-t12);color:var(--nd-fg2)}
+.nd-belt-note{align-self:center}
+/* P5 controls (DREAM-192): two small pills per worker; off while a request is in flight and on a finished worker. A
+   refusal sits on its lane in the fail colour, wrapped; the top row carries Pause all's. */
+.nd-cleft{display:inline-flex;align-items:center;gap:var(--nd-s2);min-width:0}
+.nd-ctls{display:inline-flex;gap:var(--nd-s1);flex:none}
+.nd .nd-ctl{height:24px;padding:0 var(--nd-s2);font-size:var(--nd-t12)}
+.nd .nd-pill:disabled,.nd .nd-iconbtn:disabled{opacity:.5;cursor:default}
+#dream-nested-page .nd-pill:disabled:hover{color:var(--nd-fg2);border-color:var(--nd-line)}
+.nd-note{margin:0;font-size:var(--nd-t12);color:var(--nd-fail);white-space:normal;overflow-wrap:anywhere}
+.nd-ctl-note:empty{display:none}
+.nd .nd-pip.nd-pausing,.nd .nd-pip.nd-stopping{background:var(--nd-ok);color:var(--nd-on-status)}
+#dream-nested-page .nd-pip.nd-pausing:hover,#dream-nested-page .nd-pip.nd-stopping:hover,#dream-nested-page .nd-pip.nd-pausing:focus-visible,#dream-nested-page .nd-pip.nd-stopping:focus-visible{background:var(--nd-ok);color:var(--nd-on-status)}
+/* A worker still waiting for an engine lane is doing nothing yet: pewter, whatever its pause or stop says. */
+.nd .nd-pip.nd-q,#dream-nested-page .nd-pip.nd-q:hover,#dream-nested-page .nd-pip.nd-q:focus-visible{background:var(--nd-pewter);color:var(--nd-on-pewter)}
+
+/* P7 Needs you (DREAM-194): a worker waiting on the owner in the orange of the owner's rulings, with its waiting clock;
+   the stack sits above the conversation, outside its scroll, and scrolls itself past a share of the column. */
+.nd-win.nd-needs,.nd-card.nd-needs{border-color:color-mix(in srgb,var(--nd-needs) 55%,transparent)}
+.nd-needs .nd-state,.nd-wait{color:var(--nd-needs)}
+.nd-wait{font-size:var(--nd-t12);white-space:nowrap}
+.nd-needs-sec{flex:0 1 auto;padding:var(--nd-s3) var(--nd-s4) 0;display:flex;flex-direction:column;gap:var(--nd-s2)}
+/* Nothing waiting: the heading and its empty line share one row, and at a short height the line costs nothing. The
+   section gives way down to its heading and its first item, whose choices stay in view; the others scroll in their own
+   box, which gives way first. */
+.nd-needs-sec.nd-quiet{flex-direction:row;flex-wrap:wrap;align-items:baseline;column-gap:var(--nd-s3)}
+.nd-sec .nd-c{margin-left:var(--nd-s1);font-size:var(--nd-t12);font-weight:500;color:var(--nd-fg2)}
+.nd-stack{flex:0 1 auto;min-height:0;display:flex;flex-direction:column;gap:var(--nd-s2)}
+.nd-stack-first{flex:none;display:grid;gap:var(--nd-s2)}
+.nd-stack-rest{flex:0 1 auto;min-height:0;max-height:30vh;overflow:auto;display:grid;gap:var(--nd-s2);align-content:start}
+.nd-stack-rest:empty{display:none}
+.nd-ask-form .nd-state{margin-left:auto;font-size:var(--nd-t12);color:var(--nd-fg2)}
+.nd-retried{font-size:var(--nd-t12);color:var(--nd-fg2);align-self:center}
+.nd-stack-note:empty{display:none}
+.nd-ask{border:1px solid color-mix(in srgb,var(--nd-needs) 45%,transparent);background:var(--nd-card);border-radius:var(--nd-r-lg);padding:var(--nd-s3);display:grid;gap:var(--nd-s2);min-width:0}
+.nd-ask-fail{border-color:color-mix(in srgb,var(--nd-fail) 45%,transparent)}
+.nd-ask-fail .nd-state{margin-left:auto;font-size:var(--nd-t12);color:var(--nd-fail)}
+.nd-ask p{margin:0}
+.nd-who{display:flex;align-items:center;gap:var(--nd-s2);min-width:0;font-size:var(--nd-t12);color:var(--nd-fg2)}
+.nd-who b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--nd-t14);font-weight:600;color:var(--nd-fg1)}
+.nd-who .nd-wait{margin-left:auto}
+.nd-ask-tool{display:flex;align-items:baseline;gap:var(--nd-s2);min-width:0;font-size:var(--nd-t12);color:var(--nd-fg2)}
+.nd-ask-reason{white-space:pre-wrap;overflow-wrap:anywhere;font-size:var(--nd-t13);color:var(--nd-fg1)}
+.nd .nd-more{justify-self:start}
+.nd .nd-more[hidden]{display:none}
+.nd-opts{display:grid;gap:var(--nd-s1)}
+.nd .nd-opt{display:flex;align-items:center;gap:var(--nd-s3);min-height:32px;padding:var(--nd-s1) var(--nd-s3);border-radius:var(--nd-r-sm);background:var(--nd-raised);color:var(--nd-fg1);text-align:left;overflow-wrap:anywhere}
+#dream-nested-page .nd-opt:hover,#dream-nested-page .nd-opt:focus-visible{background:var(--nd-hover);color:var(--nd-fg1)}
+.nd .nd-opt:disabled{opacity:.5;cursor:default}
+#dream-nested-page .nd-opt:disabled:hover{background:var(--nd-raised)}
+.nd-k{font-size:var(--nd-t12);color:var(--nd-fg2)}
+.nd .nd-retry{height:auto;min-height:32px;padding:var(--nd-s1) var(--nd-s3);white-space:normal;text-align:left;justify-self:start;max-width:100%}
+.nd-dask{flex:none;max-height:45%;overflow:auto;padding:var(--nd-s3) var(--nd-s4);border-bottom:1px solid var(--nd-line);display:grid;gap:var(--nd-s2)}
+.nd-dask[hidden]{display:none}
+
+/* P6 per-lane composers (DREAM-193): one small box under each pinned window and at the foot of the drawer's detail. */
+.nd-say{flex:none;border-top:1px solid var(--nd-line);padding:var(--nd-s2) var(--nd-s3);display:grid;gap:var(--nd-s1)}
+.nd-say textarea{display:block;width:100%;min-height:32px;max-height:96px;margin:0;padding:var(--nd-s1) var(--nd-s2);resize:none;border:1px solid var(--nd-line-strong);border-radius:var(--nd-r-md);background:var(--nd-raised);color:var(--nd-fg1);font:inherit;font-size:var(--nd-t13)}
+.nd-say textarea::placeholder{color:var(--nd-fg3)}
+.nd-say.nd-off textarea{border-color:var(--nd-line);color:var(--nd-fg2)}
+.nd-say-row{display:flex;align-items:center;gap:var(--nd-s2);min-width:0;font-size:var(--nd-t12);color:var(--nd-fg2)}
+.nd-say-wait{margin-right:auto;white-space:nowrap}
+.nd-say-count{white-space:nowrap}
+.nd-say-count:empty{display:none}
+.nd-say-count.nd-over{color:var(--nd-fail)}
+.nd .nd-say-send{height:28px}
+/* its own refusal, apart from the lane's control note (.nd-note) in the same window */
+.nd-say-note{margin:0;font-size:var(--nd-t12);color:var(--nd-fail);white-space:normal;overflow-wrap:anywhere}
+.nd-say-note:empty{display:none}
+/* the Claude SDK's worker (DREAM-212): the reason its box is off is information, not a refusal */
+.nd-say.nd-ro .nd-say-note{color:var(--nd-fg2)}
+
+/* The All-agents drawer (DREAM-195): overlays the workers at full height, never pushes them; an open worker takes the
+   whole panel. Closed, it is inert and hidden. With the orchestrator on the right it opens from the left, over the
+   workers, never over the orchestrator. */
+.nd-drawer{position:absolute;top:0;right:0;bottom:0;width:min(560px,100%);background:var(--nd-raised);border-left:1px solid var(--nd-line);box-shadow:0 0 0 1px rgba(0,0,0,.4),0 24px 48px rgba(0,0,0,.55);
+  transform:translateX(104%);visibility:hidden;transition:transform 240ms cubic-bezier(.2,0,0,1),visibility 0s linear 240ms;display:flex;flex-direction:column;z-index:6}
+.nd-drawer.nd-open{transform:none;visibility:visible;transition-delay:0s}
+.nd-app[data-side=right] .nd-drawer{right:auto;left:0;border-left:0;border-right:1px solid var(--nd-line);transform:translateX(-104%)}
+.nd-app[data-side=right] .nd-drawer.nd-open{transform:none}
+.nd-dhead{padding:var(--nd-s2) var(--nd-s4);border-bottom:1px solid var(--nd-line);display:grid;gap:var(--nd-s2)}
+.nd-dhead h2{margin:0;font-size:var(--nd-t16);font-weight:600;letter-spacing:-.02em}
+.nd-dcount{font-size:var(--nd-t12);color:var(--nd-fg2)}
+.nd-dhead .nd-close,.nd-dtop .nd-close{margin-left:auto}
+.nd-filters{display:flex;gap:var(--nd-s1);flex-wrap:wrap}
+.nd .nd-filters button{height:32px;padding:0 var(--nd-s3);border:0;border-radius:var(--nd-r-md);font-size:var(--nd-t12);color:var(--nd-fg2);background:none;white-space:nowrap}
+#dream-nested-page .nd-filters button:hover,#dream-nested-page .nd-filters button:focus-visible{background:var(--nd-hover);color:var(--nd-fg1)}
+.nd .nd-filters button[aria-pressed=true],#dream-nested-page .nd-filters button[aria-pressed=true]:hover{color:var(--nd-fg1);background:var(--nd-select)}
+.nd-dlist{flex:1;min-height:0;overflow:auto}
+.nd-dlist[hidden],.nd-dhead[hidden],.nd-detail[hidden]{display:none}
+.nd .nd-item{width:100%;height:calc(56px * var(--nd-fz));display:grid;grid-template-columns:24px minmax(0,1fr) auto;grid-template-rows:calc(24px * var(--nd-fz)) calc(18px * var(--nd-fz));column-gap:var(--nd-s3);align-items:center;padding:var(--nd-s1) var(--nd-s4);text-align:left;border:0;border-bottom:1px solid var(--nd-line);border-radius:0;background:none;color:var(--nd-fg1)}
+#dream-nested-page .nd-item:hover,#dream-nested-page .nd-item:focus-visible{background:var(--nd-hover);color:var(--nd-fg1)}
+.nd-item .nd-pip{grid-row:1 / 3}
+.nd-l1{display:flex;align-items:baseline;gap:var(--nd-s2);min-width:0}
+.nd-l1 .nd-nm{font-size:var(--nd-t14);letter-spacing:0;max-width:none}
+.nd-imeta{display:flex;align-items:center;gap:var(--nd-s3);font-size:var(--nd-t12);color:var(--nd-fg2);font-variant-numeric:tabular-nums;white-space:nowrap}
+.nd-l2{grid-column:2 / -1;font-size:var(--nd-t12);color:var(--nd-fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nd-dempty{padding:var(--nd-s4)}
+.nd-detail{flex:1;min-height:0;display:flex;flex-direction:column}
+.nd-dtop{padding:var(--nd-s3) var(--nd-s4);border-bottom:1px solid var(--nd-line);display:grid;gap:var(--nd-s2)}
+.nd .nd-back{justify-self:start;height:32px;display:inline-flex;align-items:center;gap:var(--nd-s1);color:var(--nd-fg2);padding:0 var(--nd-s2) 0 0;border:0;border-radius:var(--nd-r-md);background:none}
+#dream-nested-page .nd-back:hover,#dream-nested-page .nd-back:focus-visible{color:var(--nd-fg1);background:none}
+.nd-dfacts{display:flex;flex-wrap:wrap;gap:var(--nd-s1) var(--nd-s4);font-size:var(--nd-t12);color:var(--nd-fg2);font-variant-numeric:tabular-nums}
+.nd-dfacts b{color:var(--nd-fg1);font-weight:500}
+.nd-dbody{flex:1;min-height:0;overflow:auto;padding:var(--nd-s4);display:flex;flex-direction:column;gap:var(--nd-s3);scrollbar-gutter:stable}
+.nd-entry{margin:0;overflow-wrap:anywhere}
+.nd-e-status,.nd-e-req{font-size:var(--nd-t12);color:var(--nd-fg2)}
+.nd-e-think{border-left:2px solid var(--nd-rose);padding-left:var(--nd-s3)}
+.nd-e-think .nd-think-label{font-size:var(--nd-t12);color:var(--nd-rose)}
+.nd-e-think .nd-full{margin:var(--nd-s1) 0 0;color:var(--nd-fg2);font-size:var(--nd-t13)}
+.nd-dacts{display:flex;flex-wrap:wrap;gap:var(--nd-s2);padding:var(--nd-s2) var(--nd-s4);border-top:1px solid var(--nd-line)}
+
+/* Customize (DREAM-200): a small dialog over the workers' corner; segmented choices, one checkbox. */
+.nd-custom{position:absolute;right:var(--nd-s4);top:var(--nd-s4);width:360px;max-width:calc(100% - 32px);max-height:calc(100% - 32px);overflow:auto;background:var(--nd-raised);border:1px solid var(--nd-line);border-radius:var(--nd-r-lg);box-shadow:0 0 0 1px rgba(0,0,0,.4),0 24px 48px rgba(0,0,0,.55);padding:var(--nd-s4);display:grid;gap:var(--nd-s4);z-index:7}
+.nd-custom[hidden]{display:none}
+/* With the orchestrator on the right the panel moves to the workers' side (wide layouts; a phone keeps its sheet). */
+@media (min-width:901px){.nd-app[data-side=right] .nd-custom{right:auto;left:var(--nd-s4)}}
+.nd-custom h2{margin:0;font-size:var(--nd-t16);font-weight:600;letter-spacing:-.02em}
+.nd-custom .nd-close{margin-left:auto}
+.nd-field{display:grid;gap:var(--nd-s2)}
+.nd-field>span{font-size:var(--nd-t12);color:var(--nd-fg2)}
+.nd-seg{display:inline-flex;flex-wrap:wrap;border:1px solid var(--nd-line);border-radius:var(--nd-r-md);justify-self:start}
+.nd .nd-seg button{height:32px;padding:0 var(--nd-s3);color:var(--nd-fg2);font-size:var(--nd-t12);background:none;border:0;border-radius:0}
+.nd .nd-seg button:first-child{border-radius:calc(var(--nd-r-md) - 1px) 0 0 calc(var(--nd-r-md) - 1px)}
+.nd .nd-seg button:last-child{border-radius:0 calc(var(--nd-r-md) - 1px) calc(var(--nd-r-md) - 1px) 0}
+.nd .nd-seg button+button{border-left:1px solid var(--nd-line)}
+#dream-nested-page .nd-seg button:hover,#dream-nested-page .nd-seg button:focus-visible{background:var(--nd-hover);color:var(--nd-fg1)}
+/* A checked or pressed segment keeps its fill under the pointer and the keyboard's focus; nothing clips the focus ring
+   (the end segments carry the group's rounded corners). */
+.nd .nd-seg button[aria-pressed=true],.nd .nd-seg button[aria-checked=true],#dream-nested-page .nd-seg button[aria-pressed=true]:is(:hover,:focus-visible),#dream-nested-page .nd-seg button[aria-checked=true]:is(:hover,:focus-visible){background:var(--nd-seg-on);color:var(--nd-on-seg)}
+.nd-check{display:flex;align-items:center;gap:var(--nd-s2);min-height:32px;font-size:var(--nd-t14);color:var(--nd-fg1)}
+.nd-check input{width:16px;height:16px;accent-color:var(--nd-accent);margin:0}
+
+/* A wide layout: when the column cannot hold everything, its body scrolls, and the composer (with the footer) stays at
+   its foot, outside the scroll box: typing never scrolls the body, and nothing in it can sit under the composer. A short
+   one: the quiet line costs nothing and a request and the composer take a little less room. */
+@media (min-width:901px){
+  .nd-orch-body{overflow-y:auto}
+}
+/* A window that is not tall lays a waiting request's choices out in columns where the column is wide enough, and a short
+   one shows its choices first and its reason after them in two lines, with a toggle for the whole (DREAM-194). */
+@media (max-height:1100px){
+  #nd-stack .nd-opts{grid-template-columns:repeat(auto-fill,minmax(min(100%,15rem),1fr))}
+}
+@media (max-height:800px){
+  .nd-needs-sec.nd-quiet{display:none}
+  .nd-ask{padding:var(--nd-s2) var(--nd-s3);gap:var(--nd-s1)}
+  #nd-stack .nd-ask[data-ask] .nd-ask-reason{order:1}
+  #nd-stack .nd-ask[data-ask] .nd-more{order:2}
+  #nd-stack .nd-ask[data-ask] .nd-ask-reason:not(.nd-whole){display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+  .nd-box textarea{min-height:32px;height:38px}
+  .nd-status:empty{min-height:0;margin:0}
+}
+/* A narrow window stacks the column over the workers and the page itself scrolls: nothing keeps a fixed height. */
+@media (max-width:900px){
+  #dream-nested-page{overflow:auto}
+  .nd-drawer{position:fixed;top:0;height:100dvh}
+  .nd-custom{position:fixed;left:var(--nd-s4);right:var(--nd-s4);top:auto;bottom:var(--nd-s4);width:auto;max-height:70dvh}
+  .nd-app{display:flex;flex-direction:column;flex:none;min-height:auto;overflow:visible}
+  .nd-orch{border-right:0;border-bottom:1px solid var(--nd-line)}
+  .nd-orch-scroll{max-height:320px}
+  .nd-handle{display:none}
+  .nd-main{display:flex;flex-direction:column;flex:none;overflow:visible}
+  .nd-pinned{display:flex;flex-direction:column;gap:var(--nd-s4)}
+  .nd-win{min-height:280px;flex:none}
+  .nd-track{height:280px}
+}
+/* On a phone Dream's nav is a 42 px bar across the top, stacked above this page (its z-index 20 beats the page's 5,
+   whatever the drawer's own): the drawer starts below it, so Close and Back stay reachable. */
+@media (max-width:700px){
+  .nd-drawer{top:42px;height:calc(100dvh - 42px)}
+}
+/* Reduced motion, scoped to this view (theme.css kills every transition and scroll-behavior under .dream-design,
+   which is fine here): the conveyor steps one card every 4 s from its own clock and never glides. */
+@media (prefers-reduced-motion:reduce){
+  .nd-track{scroll-behavior:auto}
+  .nd-drawer,.nd-handle::after,.nd-pip{transition:none}
+}

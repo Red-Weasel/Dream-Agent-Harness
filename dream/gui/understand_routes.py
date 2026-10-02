@@ -295,8 +295,8 @@ def routes(server):
         workspace = server._workspace()
         return Path(workspace).resolve() if workspace else None
 
-    def unauthorized(request):
-        return None if server._authorized(request) else JSONResponse({"error": "unauthorized"}, status_code=401)
+    def unauthorized(request, query=False):
+        return None if server._authorized(request, query=query) else JSONResponse({"error": "unauthorized"}, status_code=401)
 
     async def status_endpoint(request):
         if (denied := unauthorized(request)):
@@ -304,7 +304,7 @@ def routes(server):
         return JSONResponse(await run_in_threadpool(status, project()), headers={"Cache-Control": "no-store"})
 
     async def graph_endpoint(request):
-        if (denied := unauthorized(request)):
+        if (denied := unauthorized(request, query=True)):   # the dashboard sends ?token=, as upstream hard-codes it
             return denied
         root = project()
         if root is None:

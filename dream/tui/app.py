@@ -55,6 +55,14 @@ from .render import (
 # Slugs a recall tool-result reports (e.g. "(slug: user-loves-fast-local-inference, …)").
 _RECALL_SLUG_RE = re.compile(r"slug:\s*([a-z0-9][a-z0-9-]*)")
 
+# /review on the reviewer role's own backend (DREAM-145): the isolated reviewer's system prompt (the review prompt
+# itself carries the diff and the format) and how long one review may take. The session's own engine, used when no
+# roles.reviewer is set, has no such limit.
+_REVIEWER_SYSTEM = ("You are an independent code reviewer consulted by another AI agent. Review only the diff in the "
+                    "request, exactly as it asks, and answer in the format it names. You cannot run anything and must "
+                    "not edit any file.")
+_REVIEW_TIMEOUT_S = 600.0
+
 # /review severity → color. critical/high wear the renderer's alarm colors; the
 # rest stay in the brand's violet→cyan orbit so a low finding doesn't shout.
 _SEVERITY_COLOR = {
@@ -161,6 +169,7 @@ Commands:
   /help                 show this
   /status               effective profile, context, execution and extension state
   /profile [preset]     auto · lean · balanced · frontier; applies with /new
+  /preset [name]        skill preset (Default · Legal · Finance …): which skills and tools; applies with /new
   /extensions [verb]    list · enable <kind:name> · disable <kind:name>
   /learn [verb]         record/import a demonstration, analyze and draft a skill
   /red-team <dir> [min] scoped local exercise; /red-team off restores the workspace
@@ -177,7 +186,7 @@ Commands:
   /effort [level]       reasoning effort: med|high|xhigh|max|ultra
   /toolcalls [n|off]    tool-call budget per prompt (off = unlimited)
   /maxtokens [n]        output-token ceiling for the rest of this session (takes effect now; --save keeps it)
-  /settings [verb]      every setting with its source: show · get <key> · path · set <key> <value> · unset <key> · check
+  /settings [verb]      every setting with its source: show · get <key> · path · set <key> <value> [--project] · unset <key> [--project] · check
   /export [path]        write this session to markdown (--json, --full, --no-tools)
   /export library       file this session into the Library instead
   /library [verb]       your Library: list · search · open · folders · trash · undelete
@@ -194,7 +203,7 @@ Commands:
   /critique [cli] [note] ask claude|codex|gemini|grok to critique the latest render vs its reference
   /rewind [id]          list file checkpoints · roll one back (asks first)
   /review [--staged]    code-review the diff (or /review <base ref>)
-  /fresh                compact this conversation into a handoff now (between turns)
+  /handoff              rewrite this conversation as one Handoff now (between turns)
   /new                  consolidate this session and start fresh
   ctrl+t                toggle the tasks panel · shift+tab cycles mode
   /clear                clear the screen
@@ -212,6 +221,13 @@ class QueuedPrompt:
     workflow_version: int
     workspace: str
 
+
+
+def memory_label(text: str) -> str | None:
+    """The owner's label for a session's memory (DREAM-185): one line of printable text, at most 120 characters;
+    None when empty."""
+    label = " ".join("".join(ch if ch.isprintable() else " " for ch in (text or "")).split())[:120].strip()
+    return label or None
 
 class App(CouncilControls):
     def __init__(
@@ -253,6 +269,9 @@ class App(CouncilControls):
         # (the desktop close dialog asks it); None = ask at shutdown.
         self._exit_consolidate: bool | None = None
         self.workspace = Path(workspace).expanduser().resolve() if workspace else config.ROOT
+        # This workspace's .dream/settings.json is the session's project settings file (DREAM-146).
+        from ..core import settings as runtime_settings
+        runtime_settings.set_workspace(self.workspace)
         self.mode = "accept-edits"  # shift+tab cycles ask → accept-edits → auto → plan
         self.engine: Engine | None = None
         self._perm_lock = asyncio.Lock()  # one permission prompt at a time
@@ -610,10 +629,26 @@ class App(CouncilControls):
     def _always_key(self, tool_name: str, tool_input: dict) -> str:
         """The key a session-wide 'always' approval is remembered under. Shell is
         scoped to the exact command — approving `git status` once must never
-        greenlight a later `rm -rf …`. Everything else is keyed by tool name."""
+        greenlight a later `rm -rf …`. computer_action is scoped to its target as
+        observed -- the target and its identity: a browser target's page origin, a
+        desktop target's window with its owner (pid, WM_CLASS) -- so one "always" on
+        a canvas must not drive every window or page the model attaches to later,
+        nor the same target once it shows another origin or another window
+        (DREAM-187). Everything else is keyed by tool name."""
         if policy.capability(tool_name) == policy.SHELL:
             return f"{tool_name}\x00{tool_input.get('command', '')}"
+        if tool_name in {"computer_action", f"mcp__{config.MCP_SERVER_NAME}__computer_action"}:
+            target = str(tool_input.get('target_id', ''))
+            return f"{tool_name}\x00{target}\x00{self._target_identity(target)}"
         return tool_name
+
+    def _target_identity(self, target_id: str) -> str:
+        """The target as the session's computer last observed it (Computer.identity): a browser target's
+        page origin, a desktop target's window with its owner. 'unknown' when no owned target is behind
+        the ID -- such an action fails at the tool, so a grant keyed to it drives nothing."""
+        computer = getattr(getattr(getattr(self, "engine", None), "_tool_context", None), "computer", None)
+        identity = computer.identity(target_id) if computer is not None else None
+        return identity if identity is not None else "unknown"
 
     async def _permission(self, tool_name: str, tool_input: dict) -> bool:
         why: list[str] = []
@@ -771,6 +806,9 @@ class App(CouncilControls):
                          "uses your normal host access. A once choice does not remember approval. "
                          "Always choices remember only this exact command in this workspace for this session, "
                          "not other commands or future sessions.")
+            if tool_name in {"computer_action", f"mcp__{config.MCP_SERVER_NAME}__computer_action"}:
+                desc += ("\nAn always choice remembers only this target as it is now (this page origin, or this window and "
+                         "its owner) for this session; another window, another origin or a changed window asks again.")
             # The live footer owns the bottom of the screen; hand it back to
             # stdin for the duration of the question.
             self.renderer.live_pause()
@@ -878,10 +916,31 @@ class App(CouncilControls):
         await self._start_monitor()
         await self._start_studio()
         self._welcome()
+        self._settings_start_notes()
         try:  # seed the mind map with what's top-of-mind at wake-up (dim, not lit)
             self.mindmap.seed(self.engine.store.top_memories(limit=8))
         except Exception:
             pass
+
+    def _settings_start_notes(self) -> None:
+        """The settings notes at session start (DREAM-147): an ignored project file, roles this backend does not
+        apply. The OpenAI-compatible backend says them itself at its first request (role_notes at connect); the
+        Anthropic SDK and the CLI backends have no such moment, so the App says them here, the way it shows any
+        note of Dream's own: in the terminal and on Studio's bus. An unusable Council file (DREAM-148) is said here
+        on every backend: no backend says it, and before, the saved Council was just silently off."""
+        from ..core import moe, settings as runtime_settings
+        from ..core.backends.openai_compat import OpenAICompatBackend
+        from ..core.profiles import printable
+        notes = []
+        if not isinstance(getattr(self.engine, "backend", None), OpenAICompatBackend):
+            notes += runtime_settings.role_notes(self.engine.provider.key)
+        council = moe.config_note()
+        if council:
+            notes.append(f"Dream's own note: {council}.")
+        for note in notes:
+            note = printable(note)          # nothing from a settings file reaches the console or the pane raw
+            self.renderer.system(note)
+            self.bus.publish(Event("system", note))
 
     def _welcome(self) -> None:
         eng = self.engine
@@ -1289,8 +1348,12 @@ class App(CouncilControls):
 
     async def _review(self, arg: str) -> None:
         """`/review` — hand my own diff to an independent reader. Bare reviews the
-        working tree, `--staged` the index, anything else is a base ref."""
+        working tree, `--staged` the index, anything else is a base ref. With `roles.reviewer`
+        set (DREAM-145) the reader is that provider/model's own isolated review backend, the
+        one the loop's evaluator uses; otherwise, as before, the session's engine."""
         from ..core import review as review_mod
+        from ..core import settings as runtime_settings
+        from ..core import turn_origin
 
         c = self.renderer.console
         arg = arg.strip()
@@ -1300,20 +1363,36 @@ class App(CouncilControls):
             return
         base = None if (staged or not arg) else arg
 
-        async def ask(prompt: str) -> str:
-            # The same "prompt in, text out" reduction the autonomous loop drives
-            # its evaluator with — it's the one shape both backends share.
-            from ..core import turn_origin
+        try:
+            reviewer = runtime_settings.role("reviewer")
+        except ValueError as exc:      # an unusable settings file: no review ran, and it says which entry
+            self._render_review(review_mod.ReviewResult("unavailable", (), f"reviewer unavailable — {exc}", (), False))
+            return
+        who = None
+        if reviewer:
+            from dataclasses import replace
+            from ..core import evaluator
+            review_settings = replace(evaluator.ReviewSettings.resolve(self.engine, timeout=_REVIEW_TIMEOUT_S,
+                                                                       role="reviewer"), mode=self.mode)
+            backend = evaluator.review_backend(review_settings, [], _REVIEWER_SYSTEM, self.workspace)
+            who = f"{review_settings.provider.key} / {review_settings.model or 'provider default'}"
 
-            parts: list[str] = []
-            with turn_origin.generated(turn_origin.REVIEW):   # Dream's review prompt, not the owner's words
-                async for ev in self.engine.ask(prompt):
-                    if ev.kind == "assistant_done":
-                        parts.append(ev.data)
-            return "\n".join(parts)
+            async def ask(prompt: str) -> str:
+                with turn_origin.generated(turn_origin.REVIEW):   # Dream's review prompt, not the owner's words
+                    return await evaluator.collect_review(backend, prompt, review_settings.timeout)
+        else:
+            async def ask(prompt: str) -> str:
+                # The same "prompt in, text out" reduction the autonomous loop drives
+                # its evaluator with — it's the one shape both backends share.
+                parts: list[str] = []
+                with turn_origin.generated(turn_origin.REVIEW):   # Dream's review prompt, not the owner's words
+                    async for ev in self.engine.ask(prompt):
+                        if ev.kind == "assistant_done":
+                            parts.append(ev.data)
+                return "\n".join(parts)
 
         what = "the index" if staged else base or "the working tree"
-        self.renderer.system(f"reviewing {what}…")
+        self.renderer.system(f"reviewing {what}" + (f" with {who} (roles.reviewer)" if who else "") + "…")
         self._turn_t0 = time.monotonic()
         self.meter.turn_start()
         self.renderer.live_begin(self._footer)
@@ -1644,6 +1723,7 @@ class App(CouncilControls):
 
     def _studio_session_info(self) -> dict[str, Any]:
         inbox = getattr(self.engine, '_steering_inbox', None)
+        lanes = getattr(getattr(self.engine, 'backend', None), 'lanes_status', None)   # DREAM-191
         return {
             "session_id": self.engine.session_id,
             "provider": self.provider_label,
@@ -1652,6 +1732,8 @@ class App(CouncilControls):
             "vision": self.engine.vision_status(),   # the header's vision chip (DREAM-093)
             "workspace": str(self.workspace),
             "project_id": getattr(self, '_active_project_id', None),
+            # {served, busy, queued} worker lanes (DREAM-191); live changes arrive as `lanes` events.
+            'lanes': lanes() if callable(lanes) else None,
             'steering_target': ({'session_id': inbox.session, 'turn': inbox.turn}
                                 if inbox is not None and inbox.open else None),
             'steering_receipts': ([{**{k: v for k, v in r.items() if k != 'text'},
@@ -1684,19 +1766,13 @@ class App(CouncilControls):
                 learning=self._learning_status,
                 on_control=self._runtime_control,
                 follow_model_view=follow_default(),   # the pane follows the model's view (DREAM-104)
+                sleepwalk=True,                       # Sleepwalk schedules fire while Dream is open (DREAM-158)
             )
             url = await self.studio.start()
             set_studio(self.studio)
+            # Printed once, never handed to a browser: the URL carries the session token,
+            # which a browser's history and sync would keep (DREAM-187).
             self.renderer.system(f"Dream Studio → {url}")
-            if config.GUI_OPEN:
-                import webbrowser
-
-                try:
-                    if not webbrowser.open(url):
-                        self.renderer.system("Studio is ready; the browser did not open. Open the URL above.")
-                except Exception as e:
-                    self.renderer.system(f"Studio is ready; browser launch failed ({type(e).__name__}). "
-                                         "Open the URL above.")
         except Exception as e:
             set_studio(None)
             studio, self.studio = self.studio, None
@@ -1739,7 +1815,7 @@ class App(CouncilControls):
             # DREAM-113: never while a turn, a command, queued input or a Council action runs (the chat
             # pane disables its control then too).
             if self._council_busy():
-                raise ValueError("Fresh start waits until Dream is idle: let the current turn and any queued "
+                raise ValueError("Handoff waits until Dream is idle: let the current turn and any queued "
                                  "messages finish, then try again.")
             return self._fresh_start()
         if action == "interrupt":
@@ -1750,6 +1826,14 @@ class App(CouncilControls):
             if active:
                 target.cancel()
             return {"interrupted": active}
+        if action in {'agent_stop', 'agent_pause', 'agent_resume', 'agents_pause_all', 'agent_message'}:
+            # DREAM-192: the owner's Stop / Pause / Resume of one worker, or Pause all, on this session's backend;
+            # DREAM-193: a message to one worker.
+            control = getattr(getattr(getattr(self, 'engine', None), 'backend', None), 'worker_control', None)
+            if not callable(control):
+                raise ValueError('Worker controls are unavailable: this session has no backend with workers yet, or '
+                                 'its provider does not report its workers.')
+            return control(action, payload.get('run_id'), payload.get('text'))
         if action == 'reconcile_local_request':
             if payload.get('confirmed_idle') is not True:
                 raise ValueError('Confirm that the local server request is no longer active before reconciliation.')
@@ -1764,6 +1848,8 @@ class App(CouncilControls):
             from ..core.profiles import save_settings
             await asyncio.to_thread(save_settings, payload["profile"], payload.get("overrides"))
             return {"applies": "new sessions", "profile": payload["profile"]}
+        if action in ("settings_get", "settings_save"):
+            return await asyncio.to_thread(self._studio_settings, action, payload)
         if action == "performance":
             setter = getattr(getattr(getattr(self, "engine", None), "backend", None), "set_performance_mode", None)
             if not callable(setter):
@@ -1828,7 +1914,7 @@ class App(CouncilControls):
         raise ValueError("Unknown runtime action")
 
     def _fresh_start(self) -> dict:
-        """Fresh start (DREAM-113): the conversation becomes one handoff now. What it says reaches the
+        """Handoff (DREAM-113; Fresh start until DREAM-175): the conversation becomes one handoff now. What it says reaches the
         terminal and Studio through the one event funnel."""
         events = self.engine.fresh_start()
         for ev in events:
@@ -1905,10 +1991,19 @@ class App(CouncilControls):
                 or payload['_source_profile'] != self.engine.profile
                 or payload['draft']['workspace'] != str(self.workspace)):
             raise ValueError('Session, model or workspace changed before optimization. Review your draft and retry.')
-        # Explicit current-provider settings avoid evaluator environment overrides.
-        # No Engine is created, no main history is reused and no weights are loaded.
-        settings = ReviewSettings(provider=self.engine.provider, model=self.engine.model,
-                                  profile=self.engine.profile, timeout=120.0)
+        # The drafter is roles.evaluator when set (DREAM-145: its fields, the lead's for the rest), else exactly the
+        # lead's provider and model as before. The DREAM_EVALUATOR_* variables are deliberately not read here
+        # (role=None), the existing choice for this path. An unusable settings file raises: the optimization fails
+        # with that message, nothing falls back. No Engine is created, no main history is reused and no weights are
+        # loaded.
+        from ..core import settings as runtime_settings
+        role = runtime_settings.role("evaluator") or {}
+        if role:
+            settings = ReviewSettings.resolve(self.engine, provider=role.get("provider"), model=role.get("model"),
+                                              timeout=120.0, role=None)
+        else:
+            settings = ReviewSettings(provider=self.engine.provider, model=self.engine.model,
+                                      profile=self.engine.profile, timeout=120.0)
         fields = {k: v for k, v in payload['draft'].items() if k not in ('session_id', 'workspace')}
         return await optimize(fields, payload['files'], self.workspace, settings)
 
@@ -2112,6 +2207,9 @@ class App(CouncilControls):
                 "  Conversation is saved. Generate a summary and commit this session to long-term memory? "
                 "This optional model pass may take several minutes. [y/N] · ")
             commit = (ans or "").strip().lower() in ("y", "yes")
+            if commit and getattr(self, "_exit_label", None) is None:
+                self._exit_label = memory_label(await self._read_answer(
+                    "  Label this memory, e.g. 09.28.26 - rocket animation - day 2 (Enter to skip) · ") or "")
         if self.studio is not None:
             from ..tools.context import set_studio
 
@@ -2128,33 +2226,93 @@ class App(CouncilControls):
             return
         self.renderer.system("generating optional summary and memories…" if commit
                              else "closing with saved conversation; skipping memory consolidation…")
-        summary = await self.engine.stop(consolidate=commit)
+        label = getattr(self, "_exit_label", None) if commit else None
+        summary = await (self.engine.stop(consolidate=commit, label=label) if label
+                         else self.engine.stop(consolidate=commit))
         if summary:
             self.renderer.system(f"session summary: {summary}")
         self.renderer.info("Goodnight. 🌙")
 
     # --- slash commands ------------------------------------------------------
 
-    def _settings_command(self, arg: str) -> None:
-        """/settings (DREAM-142): the effective table with sources, and set/unset/check through the same
-        resolver and writer as `dream settings`. A changed vitals switch also applies to this session."""
+    def _settings_session(self) -> tuple[str, str | None, dict]:
+        """(provider, model, what this session knows) for settings.effective(): the /maxtokens override, the
+        local preset's max_tokens and the performance cap. Before a session starts: the requested provider/model."""
+        engine = self.engine
+        provider, model = (engine.provider.key, engine.model) if engine is not None else (self.provider, self.model)
+        session = {"roles.main": {"provider": provider, "model": model}}
+        if config.MAX_OUTPUT_TOKENS_OVERRIDE is not None:
+            session["output.max_tokens"] = config.MAX_OUTPUT_TOKENS_OVERRIDE
+        backend = getattr(engine, "backend", None)
+        if isinstance(getattr(backend, "_local_options", None), dict) and "max_tokens" in backend._local_options:
+            session["output.preset_max_tokens"] = backend._local_options["max_tokens"]
+        if isinstance(getattr(backend, "_active_performance", None), dict):
+            session["output.performance"] = backend._active_performance["output_tokens"]
+        return provider, model, session
+
+    def _studio_settings(self, action: str, payload: dict) -> dict:
+        """Studio's Settings tab (DREAM-143): `settings_get` is the view, `settings_save` changes one key through
+        the `dream settings` writer and returns the new view. A changed vitals switch also applies to this
+        session, as /settings does."""
         from ..core import settings
+        from ..gui import settings_panel
+        result = {}
+        if action == "settings_save":
+            key = payload.get("key")
+            result = settings_panel.save(key, payload.get("value"), scope=payload.get("scope", "global"))
+            backend = getattr(self.engine, "backend", None)
+            if key == "behaviour.vitals" and hasattr(backend, "vitals"):
+                backend.vitals = settings.vitals_enabled()
+            if key in settings.CONTEXT_SETTINGS and hasattr(backend, "apply_context_policy"):
+                backend.apply_context_policy()
+            if key == settings.NESTED_SETTING and hasattr(backend, "apply_worker_cap"):
+                backend.apply_worker_cap()       # DREAM-197: the running session's next reply
+            if isinstance(key, str) and key.startswith("council.advisor."):
+                result["applies"] += " " + self._apply_saved_council_advisor(key.removeprefix("council.advisor."))
+        provider, model, session = self._settings_session()
+        view = settings_panel.view(provider=provider, model=model, session=session, mode=self.mode,
+                                   running_max_tokens=config.MAX_OUTPUT_TOKENS)
+        return {**result, "settings": view} if action == "settings_save" else view
+
+    def _apply_saved_council_advisor(self, advisor: str) -> str:
+        """After the Settings tab saved a Council advisor's model or effort to moe.json (DREAM-145): the running
+        session takes that advisor's entries when its Council is the saved one (same main agent, that advisor a
+        member) -- the same assignment configure_council makes for an unchanged main -- and otherwise keeps the
+        Council set in the Council panel. Returns the sentence the tab shows."""
+        from dataclasses import replace
+        from ..core import moe
+        saved, live = moe.load_config(), getattr(self.engine, "_moe", None)
+        if saved is None or live is None or live.orchestrator != saved.orchestrator or advisor not in live.advisors:
+            return "Saved for new sessions; this session keeps the Council set in the Council panel."
+        models = {key: value for key, value in live.advisor_models.items() if key != advisor}
+        efforts = {key: value for key, value in live.advisor_efforts.items() if key != advisor}
+        if advisor in saved.advisor_models:
+            models[advisor] = saved.advisor_models[advisor]
+        if advisor in saved.advisor_efforts:
+            efforts[advisor] = saved.advisor_efforts[advisor]
+        cfg = replace(live, advisor_models=models, advisor_efforts=efforts)
+        self.engine._moe = cfg
+        context = getattr(self.engine, "_tool_context", None)
+        if context is not None:
+            context.moe_config = cfg
+        self.moe = cfg
+        return "Saved; this session's Council uses it from its next consult."
+
+    async def _settings_command(self, arg: str) -> None:
+        """/settings (DREAM-142): the effective table with sources, and set/unset/check through the same
+        resolver and writer as `dream settings`. A changed vitals switch also applies to this session. `check` asks
+        the local engine for model names (DREAM-148) from a worker thread, so a slow engine never freezes the
+        session or Studio."""
+        from ..core import settings
+        from ..core.profiles import printable    # DREAM-147: no text from a settings file reaches the console raw
         c = self.renderer.console
         verb, _, rest = arg.partition(" ")
         verb, rest = verb or "show", rest.strip()
         try:
             if verb in ("show", "get"):
-                provider, model = self.engine.provider.key, self.engine.model
-                session = {"roles.main": {"provider": provider, "model": model}}
-                if config.MAX_OUTPUT_TOKENS_OVERRIDE is not None:
-                    session["output.max_tokens"] = config.MAX_OUTPUT_TOKENS_OVERRIDE
-                backend = self.engine.backend
-                if isinstance(getattr(backend, "_local_options", None), dict) and "max_tokens" in backend._local_options:
-                    session["output.preset_max_tokens"] = backend._local_options["max_tokens"]
-                if isinstance(getattr(backend, "_active_performance", None), dict):
-                    session["output.performance"] = backend._active_performance["output_tokens"]
+                provider, model, session = self._settings_session()
                 rows = settings.effective(provider=provider, model=model, session=session)
-                c.print(f"resolved for provider {provider}, model {model or '(provider default)'}",
+                c.print(printable(f"resolved for provider {provider}, model {model or '(provider default)'}"),
                         style="dim", markup=False, highlight=False)
                 if verb == "get":
                     if rest not in rows:
@@ -2163,29 +2321,40 @@ class App(CouncilControls):
                     rows = {rest: rows[rest]}
                 from rich.markup import escape
                 for key, row in rows.items():
-                    c.print(f"{escape(key):<36} {escape(str(row.value)):<40} [dim]{escape(row.source)}[/dim]",
+                    c.print(printable(f"{escape(key):<36} {escape(str(row.value)):<40} [dim]{escape(row.source)}[/dim]"),
                             highlight=False)
             elif verb == "path":
                 for name, where in settings.paths().items():
-                    c.print(f"{name:<14} {where}", highlight=False)
+                    # markup off: a workspace named "notes [draft]" or "x[link=...]y" is shown as it is (DREAM-147)
+                    c.print(printable(f"{name:<14} {where}"), markup=False, highlight=False)
             elif verb == "check":
-                report = settings.check(provider=self.engine.provider.key, model=self.engine.model)
-                c.print(json.dumps(report, indent=2, ensure_ascii=False), markup=False, highlight=False)
+                report = await asyncio.to_thread(settings.check, provider=self.engine.provider.key,
+                                                 model=self.engine.model, ask_engine=True)
+                c.print(printable(json.dumps(report, indent=2, ensure_ascii=False)), markup=False, highlight=False)
             elif verb in ("set", "unset"):
+                # A trailing --project writes this workspace's .dream/settings.json (DREAM-146).
+                scope = "project" if rest == "--project" or rest.endswith(" --project") else "global"
+                rest = rest.removesuffix("--project").strip()
                 key, _, value = rest.partition(" ")
                 if not key or (verb == "set" and not value.strip()):
-                    c.print(f"usage: /settings {verb} <key>" + (" <value>" if verb == "set" else ""))
+                    c.print(f"usage: /settings {verb} <key>" + (" <value>" if verb == "set" else "") + " [--project]")
                     return
-                note = settings.set_value(key, value.strip()) if verb == "set" else settings.unset_value(key)
+                note = (settings.set_value(key, value.strip(), scope=scope) if verb == "set"
+                        else settings.unset_value(key, scope=scope))
                 if key == "behaviour.vitals" and hasattr(self.engine.backend, "vitals"):
                     self.engine.backend.vitals = settings.vitals_enabled()
-                c.print(f"{key}: {note}", style="green", markup=False, highlight=False)
+                if key in settings.CONTEXT_SETTINGS and hasattr(self.engine.backend, "apply_context_policy"):
+                    self.engine.backend.apply_context_policy()
+                if key == settings.NESTED_SETTING and hasattr(self.engine.backend, "apply_worker_cap"):
+                    self.engine.backend.apply_worker_cap()       # DREAM-197: the running session's next reply
+                c.print(printable(f"{key}: {note}"), style="green", markup=False, highlight=False)
                 for warning in settings.role_notes(self.engine.provider.key) if key.startswith("roles.") else ():
-                    c.print(warning, style="yellow", markup=False, highlight=False)
+                    c.print(printable(warning), style="yellow", markup=False, highlight=False)
             else:
-                c.print("usage: /settings [show | get <key> | path | set <key> <value> | unset <key> | check]")
+                c.print("usage: /settings [show | get <key> | path | set <key> <value> [--project] | "
+                        "unset <key> [--project] | check]")
         except (ValueError, OSError) as exc:
-            c.print(f"settings: {exc}", style="red", markup=False, highlight=False)
+            c.print(printable(f"settings: {exc}"), style="red", markup=False, highlight=False)
 
     async def _command(self, line: str) -> bool:
         """Return True to quit."""
@@ -2198,8 +2367,11 @@ class App(CouncilControls):
         c = self.renderer.console
 
         if cmd in ("quit", "exit", "q"):
-            if arg in ("save", "nosave"):
-                self._exit_consolidate = arg == "save"
+            word, _, label = arg.partition(" ")
+            if word in ("save", "nosave"):
+                self._exit_consolidate = word == "save"
+                # DREAM-185: the owner's label for this session's memory ("/quit save 09.28.26 rocket animation")
+                self._exit_label = memory_label(label) if word == "save" else None
             return True
         if cmd == "help":
             c.print(HELP)
@@ -2233,6 +2405,21 @@ class App(CouncilControls):
                 c.print(f"Invalid {cmd} command: {exc}")
             if cmd == "profile" and arg:
                 self.renderer.system("Profile saved. /new applies it to a fresh session.")
+        elif cmd == "preset":
+            from .. import presets
+            listed = presets.listing()
+            try:
+                if arg:
+                    name = next((n for n in listed["names"] if n.casefold() == arg.casefold()), arg)
+                    await asyncio.to_thread(presets.set_active, name)
+                    self.renderer.system(f"Skill preset '{name}' saved. /new applies it to a fresh session.")
+                else:
+                    c.print(Text(f"Skill preset: {self.engine.preset} this session, {listed['active']} next. "
+                                 f"Available: {' · '.join(listed['names'])}. /preset <name> chooses."))
+                    if listed["error"]:
+                        self.renderer.error(listed["error"])
+            except ValueError as exc:
+                self.renderer.error(str(exc))
         elif cmd == "resume":
             await self._resume(arg)
         elif cmd == "runs":
@@ -2424,13 +2611,13 @@ class App(CouncilControls):
                     c.print(f"[green]max output tokens: {n:,} for the rest of this "
                             "session[/green]")
                     if not save:
-                        c.print("[dim]keep it for new sessions with /maxtokens <n> --save[/dim]")
+                        c.print("[dim]keep it for the next Dream start with /maxtokens <n> --save[/dim]")
                     else:
                         import os
                         from ..core.settings import set_value
                         try:
                             set_value("output.max_tokens", str(n))
-                            c.print("[green]saved as output.max_tokens for new sessions[/green]"
+                            c.print("[green]saved as output.max_tokens for the next Dream start[/green]"
                                     + (" [dim](DREAM_MAX_TOKENS in the environment still wins at start)[/dim]"
                                        if "DREAM_MAX_TOKENS" in os.environ else ""))
                         except (ValueError, OSError) as exc:
@@ -2446,7 +2633,7 @@ class App(CouncilControls):
                 c.print("usage: /maxtokens <n> [--save]")
 
         elif cmd == "settings":
-            self._settings_command(arg)
+            await self._settings_command(arg)
 
         elif cmd == "toolcalls":
             if not arg:
@@ -2534,7 +2721,7 @@ class App(CouncilControls):
                 for i, (source, text) in enumerate(shown, 1):
                     c.print(f"[red]{i}. {source}[/red]")
                     c.print(f"[dim]{text}[/dim]")
-        elif cmd == "fresh":
+        elif cmd in ("handoff", "fresh"):     # /fresh: the name before DREAM-175
             try:
                 self._fresh_start()
             except ValueError as exc:

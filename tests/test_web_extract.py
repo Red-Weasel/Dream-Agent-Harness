@@ -24,14 +24,14 @@ def test_slug():
 
 
 class _ShotBrowser:
-    async def fetch(self, url, screenshot=False, wait_selector=None):
+    async def fetch(self, url, screenshot=False, wait_selector=None, allowed=frozenset()):
         return {"url": url, "final_url": url, "status": 200, "title": "T",
                 "text": "body", "screenshot": "/var/shot.png"}
 
 
 def _ctx_with(multimodal: bool) -> None:
     set_context(ToolContext(
-        store=SimpleNamespace(), working=SimpleNamespace(),
+        store=SimpleNamespace(recent_user_turns=lambda session_id: []), working=SimpleNamespace(),
         browser=_ShotBrowser(), session_id="s", multimodal=multimodal,
     ))
 

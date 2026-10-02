@@ -1,0 +1,11 @@
+{
+  "format": "dream-skill/v1",
+  "name": "reconciliation",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "read_file",
+    "run_bash",
+    "write_file"
+  ]
+}

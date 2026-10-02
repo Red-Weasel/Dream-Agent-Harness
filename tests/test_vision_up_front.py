@@ -199,7 +199,7 @@ async def test_the_header_chip_shows_it(monkeypatch, tmp_path, vision, text):
         async with async_playwright() as p:
             browser = await p.chromium.launch(args=['--disable-gpu'])
             page = await browser.new_page(viewport={'width': 1400, 'height': 900})
-            await page.goto(url + '&companion=1')
+            await page.goto(url.replace('/#', '/?companion=1#'))
             chip = page.locator('#dream-vision')
             await expect(chip).to_have_text(text, timeout=6000)
             if vision is not None:

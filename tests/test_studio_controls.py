@@ -155,7 +155,7 @@ async def controls(tmp_path, monkeypatch):
             api = API()
             for pattern in ("**/api/runtime", "**/api/extensions", "**/api/extensions/*/source", "**/api/learning", "**/api/learning/*/draft", "**/api/control"):
                 await page.route(pattern, api.route)
-            yield server, page, api, url + "&companion=1", errors
+            yield server, page, api, url.replace("/#", "/?companion=1#"), errors
             await browser.close()
     finally:
         await server.stop()
@@ -332,10 +332,12 @@ async def test_scoped_red_team_expiry_and_keyboard_external_mode(controls, tmp_p
     await page.keyboard.press("ArrowRight")
     await expect(page.get_by_role("tab", name="Extensions", exact=True)).to_be_focused()
     await page.keyboard.press("End")
+    await expect(page.get_by_role("tab", name="Settings", exact=True)).to_be_focused()
+    await page.keyboard.press("ArrowLeft")
     await expect(page.get_by_role("tab", name="Learn", exact=True)).to_be_focused()
     await page.keyboard.press("Escape")
     await page.set_viewport_size({"width": 1280, "height": 900})
-    await page.goto(url.replace("&companion=1", ""))
+    await page.goto(url.replace("?companion=1", ""))
     await expect(page.locator("#input")).to_be_visible()
     await page.locator("#dream-controls-open").click()
     await expect(page.get_by_role("dialog", name="Studio controls")).to_be_visible()

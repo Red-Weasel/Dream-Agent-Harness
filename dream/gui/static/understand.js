@@ -37,7 +37,7 @@
     + 'Run its helper scripts with run_bash from $UA_SKILLS (the plugin is installed and built; skip locating it). '
     + "Exclude Dream's own state folders: pass --exclude \".dream/**,.remember/**\" to its status command.";
   let tab = 'map', graph = null, analyzedAt = null, timer = null, loadingChanges = false, workspaceKey = null;
-  const token = () => typeof TOKEN === 'string' ? TOKEN : (new URLSearchParams(location.search).get('token') || '');
+  const token = () => dreamToken();
   async function read(path) {
     const r = await fetch(path, { headers: { 'X-Dream-Token': token() }, cache: 'no-store' });
     const data = await r.json().catch(() => ({}));

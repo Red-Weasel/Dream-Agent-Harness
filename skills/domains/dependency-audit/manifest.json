@@ -1,0 +1,15 @@
+{
+  "format": "dream-skill/v1",
+  "name": "dependency-audit",
+  "version": "1.0.0",
+  "portable": true,
+  "capabilities": [
+    "list_dir",
+    "read_file",
+    "run_bash",
+    "web_search",
+    "browse",
+    "grep",
+    "write_file"
+  ]
+}

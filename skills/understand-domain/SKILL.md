@@ -12,7 +12,7 @@ Helpers:
 - The plugin's one script runs with run_bash from the workspace: `python3 "$UA_SKILLS/understand-domain/extract-domain-context.py" "$PWD"`. `$UA_SKILLS` is the plugin's skills folder, readable in the sandbox; never cd, ls or edit it.
 
 ## 1. Prepare
-- `skill_open(name="understand-domain")` prints `Directory: <dir>`. Copy the glue from the sibling `understand` skill, even when `.ua/tmp/ua_glue.py` exists (it may be older): `copy_files(files=[{"src": "<dir>/../understand/glue.py", "dest": ".ua/tmp/ua_glue.py"}])`. Without copy_files: `skill_file(name="understand", path="glue.py")` and write_file its text (after the `understand/glue.py:` line) to `.ua/tmp/ua_glue.py`.
+- `skill_open(name="understand-domain")` prints `Directory: <dir>`. Copy the glue from the sibling `understand` skill, even when `.ua/tmp/ua_glue.py` exists (it may be older): `copy_files(files=[{"src": "<dir>/../understand/glue.py", "dest": ".ua/tmp/ua_glue.py"}])`. Without copy_files, run_bash: `mkdir -p .ua/tmp && cp "$DREAM_SKILLS/understand/glue.py" .ua/tmp/ua_glue.py` (never from skill_file: it shortens long files).
 
 ## 2. Gather
 - list_dir `.ua`. If it lists `knowledge-graph.json`, the map `.ua/knowledge-graph.json` exists: skip the scan.

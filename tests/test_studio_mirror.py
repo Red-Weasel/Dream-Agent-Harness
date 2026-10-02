@@ -271,7 +271,7 @@ async def test_the_follow_route_toggles_the_server_flag_and_broadcasts(tmp_path)
     srv = StudioServer(EventBus(), on_prompt=lambda p: None, session={"workspace": str(tmp_path)})
     assert srv.follow_model_view is True
     with srv.bus.subscribe() as sub:
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://test") as c:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://127.0.0.1") as c:
             assert (await c.post("/api/follow", json={"on": False})).status_code == 401
             r = await c.post("/api/follow", json={"on": False}, headers={"X-Dream-Token": srv.token})
             assert r.status_code == 200 and r.json() == {"ok": True, "on": False}
@@ -293,14 +293,14 @@ def test_a_connecting_pane_learns_the_mirror_is_off_after_the_retained_show(monk
     srv = StudioServer(EventBus())
     show = {"op": "show", "path": "latest.html", "content": "<p>x</p>"}
     srv.retain_show(Event("studio", show))
-    with TestClient(srv.app) as client:
-        with client.websocket_connect(f"/ws?token={srv.token}") as ws:
+    with TestClient(srv.app, base_url="http://127.0.0.1") as client:
+        with client.websocket_connect(f"ws://127.0.0.1/ws?token={srv.token}") as ws:
             assert ws.receive_json()["kind"] == "hello"
             assert ws.receive_json() == {"kind": "studio", "data": show}
             srv.bus.publish(Event("system", "live"))
             assert ws.receive_json() == {"kind": "system", "data": "live"}, "on by default: no extra message"
         srv.follow_model_view = False
-        with client.websocket_connect(f"/ws?token={srv.token}") as ws:
+        with client.websocket_connect(f"ws://127.0.0.1/ws?token={srv.token}") as ws:
             assert ws.receive_json()["kind"] == "hello"
             assert ws.receive_json() == {"kind": "studio", "data": show}
             assert ws.receive_json() == {"kind": "studio", "data": {"op": "follow", "on": False}}
@@ -369,9 +369,9 @@ def test_mirrored_shows_are_retained_for_replay_but_never_count_as_handoffs(monk
                              "source": "mirror", "size": 3, "stamp": 9})
     srv.retain_show(image)
     assert srv._show_sequence == 1
-    with TestClient(srv.app) as client:
-        assert client.get(f"/api/desktop?token={srv.token}").json()["show_sequence"] == 1
-        with client.websocket_connect(f"/ws?token={srv.token}") as ws:
+    with TestClient(srv.app, base_url="http://127.0.0.1") as client:
+        assert client.get("/api/desktop", headers={"X-Dream-Token": srv.token}).json()["show_sequence"] == 1
+        with client.websocket_connect(f"ws://127.0.0.1/ws?token={srv.token}") as ws:
             assert ws.receive_json()["kind"] == "hello"
             assert ws.receive_json() == {"kind": "studio", "data": image.data}, "still replayed on reconnect"
     # the shown file deleted: the retained show goes, so a reconnect does not replay a ghost
@@ -513,7 +513,7 @@ async def test_the_pane_follows_show_html_reloads_on_edit_and_shows_a_screenshot
             browser = await p.chromium.launch(headless=True, args=["--disable-gpu"])
             page = await browser.new_page(viewport={"width": 2554, "height": 1338}, reduced_motion="reduce")
             page.set_default_timeout(8000)
-            await page.goto(url + "&companion=1", wait_until="load")
+            await page.goto(url.replace("/#", "/?companion=1#"), wait_until="load")
             await page.wait_for_function("document.getElementById('stat').textContent !== 'connecting'")
             await expect(page.locator("#artbody iframe")).to_have_count(0)
             view = "document.documentElement.dataset.dreamView"

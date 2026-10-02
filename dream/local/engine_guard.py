@@ -14,7 +14,7 @@ crash, SIGKILL, or SIGHUP when the desktop window that hosts its terminal dies -
   lives exactly as long as the process.
 * A watchdog process (this file, run as a script) waits on pidfds of the owner and the engine. When
   the owner goes first it sends SIGTERM itself if the parent-death signal was not armed, waits
-  DREAM_ENGINE_KILL_GRACE_S (default 10 s, the grace stop_owned gives) and SIGKILLs an engine that is
+  DREAM_ENGINE_KILL_GRACE_S (default 120 s, the grace stop_owned gives) and SIGKILLs an engine that is
   still running. It leaves as soon as the engine exits.
 
 `keep_hot` spawns untied: that engine is meant to outlive Dream. Standard library only: the watchdog
@@ -33,7 +33,7 @@ from pathlib import Path
 
 PR_SET_PDEATHSIG = 1
 GRACE_ENV = "DREAM_ENGINE_KILL_GRACE_S"
-DEFAULT_GRACE_S = 10.0
+DEFAULT_GRACE_S = 120.0
 
 _prctl = None
 
@@ -78,17 +78,20 @@ def _grace_s(log_path) -> float:
     return DEFAULT_GRACE_S
 
 
-def spawn(command, *, keep_hot: bool = False, log_path=None, **popen_kwargs):
+def spawn(command, *, keep_hot: bool = False, log_path=None, grace_s: float | None = None, **popen_kwargs):
     """`subprocess.Popen` for an engine this process owns. Unless `keep_hot`, the engine gets the
     parent-death signal and a watchdog; `proc.dream_watchdog` is the watchdog's Popen (None when
-    untied). The watchdog notes what it does in `log_path` (the engine log)."""
+    untied). The watchdog notes what it does in `log_path` (the engine log). `grace_s` is how long the
+    watchdog gives the engine after SIGTERM before SIGKILL (default: DREAM_ENGINE_KILL_GRACE_S or 120 s);
+    a supervisor (`ie supervise`, DREAM-144) is given its own shutdown time, because a killed supervisor
+    leaves its children on the cards."""
     arm = None if keep_hot else _parent_death_signal()
     proc = subprocess.Popen(command, preexec_fn=arm, **popen_kwargs)
-    proc.dream_watchdog = None if keep_hot else _watch(proc, term=arm is None, log_path=log_path)
+    proc.dream_watchdog = None if keep_hot else _watch(proc, term=arm is None, log_path=log_path, grace_s=grace_s)
     return proc
 
 
-def _watch(proc, *, term: bool, log_path):
+def _watch(proc, *, term: bool, log_path, grace_s: float | None = None):
     """Start the watchdog for our own child `proc`. A pid that is not our child is never watched,
     let alone signalled: the guard is noted as not armed in the log instead."""
     try:
@@ -103,7 +106,8 @@ def _watch(proc, *, term: bool, log_path):
         log = open(log_path, "ab") if log_path is not None else None
         watchdog = subprocess.Popen(
             [sys.executable, "-I", str(Path(__file__).resolve()), str(owner), str(engine),
-             str(_grace_s(log_path)), "1" if term else "0", str(os.getpid()), str(proc.pid)],
+             str(_grace_s(log_path) if grace_s is None else float(grace_s)), "1" if term else "0",
+             str(os.getpid()), str(proc.pid)],
             pass_fds=(owner, engine), stdin=subprocess.DEVNULL,
             stdout=log if log is not None else subprocess.DEVNULL, stderr=subprocess.STDOUT,
             start_new_session=True)               # no terminal signal of the owner's reaches it

@@ -29,7 +29,7 @@ def backend(provider="machx", *, provider_metadata=None):
     ("temperature", "nan"), ("temperature", "inf"), ("temperature", "-1"),
     ("top_k", "1.5"), ("top_k", "1025"), ("top_p", "0"), ("min_p", "1.01"),
     ("repeat_penalty", "0"), ("repeat_last_n", "513"), ("presence_penalty", "3"),
-    ("threads", "0"), ("parallel", "5"), ("max_tokens", "0"), ("slot_ctx", "8"),
+    ("threads", "0"), ("parallel", "17"), ("max_tokens", "0"), ("slot_ctx", "8"),      # DREAM-201: parallel is 1-16
     ("context_overflow", "shift"), ("stop", '"END"'), ("stop", '[""]'),
     ("stop", '[1]'), ("stop", '["a","b","c","d","e"]'),
 ])

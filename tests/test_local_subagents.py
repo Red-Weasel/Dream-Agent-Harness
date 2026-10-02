@@ -337,6 +337,8 @@ async def test_subagent_history_is_compacted_inside_the_window():
 
     b = _backend([_tool("web_search", h), _tool("recall", h)], _researcher())
     b.n_ctx = 8192
+    # A sub-agent compacts when behaviour.subagent_overflow says so; the owner's default is return (DREAM-177).
+    b.apply_context_policy({"subagent_overflow": "compact"})
     b._client = _FakeClient(
         post_scripts=[_sub_toolcall("web_search", {"q": "x"})] * 6 + [_sub_final("DONE")]
     )

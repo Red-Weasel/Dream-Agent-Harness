@@ -8,6 +8,7 @@ import pytest
 
 from dream.desktop import startup
 from dream.local import machx
+from lease_isolation import isolated_load_lock_dir  # noqa: F401  (DREAM-206: the launch lock under tmp_path, shared with children)
 
 
 @pytest.fixture
@@ -221,9 +222,12 @@ except ValueError as exc:
 
 
 @pytest.mark.parametrize('unsafe', ['symlink', 'hardlink', 'permissions'])
-def test_load_lock_rejects_unsafe_files(tmp_path, unsafe):
+def test_load_lock_rejects_unsafe_files(tmp_path, unsafe, isolated_load_lock_dir):
     import os
-    path = Path('/tmp') / f'dream-machx-load-{os.getuid()}-{machx.PORT}.lock'
+    from dream.local import load_lock
+    assert load_lock.lock_root() == isolated_load_lock_dir     # the product looks where the entries are planted
+    isolated_load_lock_dir.mkdir(mode=0o700)
+    path = isolated_load_lock_dir / f'dream-machx-load-{os.getuid()}-{machx.PORT}.lock'
     target = tmp_path/'target'
     target.write_text('preserve')
     target.chmod(0o600)

@@ -3,6 +3,8 @@ import asyncio
 
 import httpx
 import pytest
+
+from lease_isolation import isolated_lease_dir  # noqa: F401  (DREAM-205: leases under tmp_path, never the live folder)
 from playwright.async_api import async_playwright, expect
 
 from dream.core.backends.base import Event
@@ -23,7 +25,7 @@ async def chat(monkeypatch):
             browser = await p.chromium.launch(args=['--disable-gpu'])
             page = await browser.new_page(viewport={'width': 1100, 'height': 800})
             page.set_default_timeout(3000)
-            await page.goto(url + '&companion=1')
+            await page.goto(url.replace('/#', '/?companion=1#'))
             await expect(page.locator('#stat')).to_have_text('Ready')
             yield srv, page, prompts, controls
             await browser.close()
@@ -92,7 +94,7 @@ async def test_stop_and_permission_are_available_in_chat(chat):
 
 async def test_missing_or_async_prompt_handler_has_truthful_result():
     srv = StudioServer(EventBus())
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://test') as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://127.0.0.1') as client:
         response = await client.post('/api/prompt', headers={'X-Dream-Token': srv.token}, json={'prompt': 'hello'})
         assert response.status_code == 503
         async def reject(text):
@@ -185,7 +187,7 @@ async def test_skills_page_adds_to_draft_without_sending(chat):
     await page.route('**/api/skills', lambda r: r.fulfill(json={'skills':[skill]}))
     await page.route('**/api/skills/verifying', lambda r: r.fulfill(json=skill))
     await page.get_by_role('button', name='Go to Skills', exact=True).click()
-    await page.locator('#dream-skills-page .library-list button').click()
+    await page.locator('#dream-skills-page .library-list [data-key=verifying]').click()   # DREAM-171: a row also has its preset toggle
     await expect(page.get_by_label('Skill Markdown', exact=True)).to_have_value('Full verification instructions.')
     await page.get_by_role('button', name='Use in chat', exact=True).click()
     await expect(page.locator('#input')).to_have_value('Use the verifying skill.')

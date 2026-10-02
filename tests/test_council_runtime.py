@@ -161,7 +161,7 @@ async def test_explicit_council_gets_fresh_attributed_budget(app, monkeypatch, t
 
 async def test_council_endpoint_requires_authentication(app):
     srv = StudioServer(app.bus, on_control=app._runtime_control)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://test') as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url='http://127.0.0.1') as client:
         denied = await client.post('/api/control', json={'action': 'council_configure', 'config': {}})
         assert denied.status_code == 401
         assert app._gui_prompts.empty()
