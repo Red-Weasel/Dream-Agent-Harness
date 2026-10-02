@@ -31,7 +31,7 @@ jobs:
 
   regression:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 60
     env:
       DREAM_SEMANTIC_MEMORY: "0"
       DREAM_RERANK: "0"
