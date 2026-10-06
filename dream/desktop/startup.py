@@ -90,14 +90,11 @@ def model_settings(path):
         memory_notes = ['Memory: this model uses GPU slots, bounded pinned RAM and disk-backed weights. '
                         'The full checkpoint need not fit in RAM. The engine keeps 40 GiB of host RAM '
                         'available and sizes expert slots from free GPU memory. It uses all visible Arc GPUs '
-                        + ('and serves as many requests at once as its lanes: Settings engine.parallel, else its '
-                           'parallel below ' + ('(2 or more need two cards).' if caps.get('architecture') == 'deepseek_v41'
-                                                else '(images need 1).')      # DREAM-154: V4.1 keeps its images
+                        + ('and serves as many requests at once as its parallel below '
+                           + ('(2 or more need two cards).' if caps.get('architecture') == 'deepseek_v41'
+                              else '(images need 1).')      # DREAM-154: V4.1 keeps its images
                            if caps.get('architecture') in LANE_ARCHITECTURES
                            else 'and serves one request at a time (parallel = 1).')]
-    if 'parallel' in selection['options']:                    # DREAM-151: what replaces it at launch, when set
-        from ..local.settings import engine_parallel_source
-        sources['parallel'] = engine_parallel_source(caps.get('architecture'), sources.get('parallel', ''))
     return dict(selection=selection, recommended={k: rec[k] for k in ('gpus', 'ctx', 'options')},
                 sources=sources, recommended_sources=rec['sources'], notes=memory_notes + rec['notes'] + caps.get('notes', []),
                 context_limit=rec['context_limit'], max_gpus=rec['gpus'] or caps.get('max_gpus'),
@@ -293,11 +290,11 @@ async def run(request, status_path):
             publish(status_path, 'starting', preflight)
             if machx.is_serving() or model_key(path) != settings['identity']:
                 raise ValueError('Server or model state changed during preflight. Refresh before trying again.')
-            # DREAM-151: the owner's engine lanes for a model that serves lanes; the preset keeps its own choices.
+            # DREAM-151: the model's own lanes (its parallel and sub-agent context, the load screen's) for a model that
+            # serves lanes; the preset saves the selection as chosen.
             from ..local.settings import engine_lanes, lanes_report
             options, lanes, lanes_note = engine_lanes(selection['options'], settings.get('architecture'),
                                                       ctx=selection['ctx'], gpus=selection['gpus'])
-            machx.lanes_queue(options)      # DREAM-209: an unusable worker cap refuses a lanes launch before "Loading"
             if lanes_note:
                 publish(status_path, 'starting', lanes_note)
             session_capabilities = settings.get('capabilities')

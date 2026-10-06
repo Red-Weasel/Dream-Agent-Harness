@@ -43,9 +43,9 @@ async def test_a_question_form_in_chat_is_pointed_to_from_the_stack(studio):
         page = await open_nested(s)
         lanes(s, 2, {})
         await expect(page.locator('#nd-stack')).to_have_text('Nothing is waiting on you.')
-        # the Agents control's read on opening the view (P10) is answered and rendered: from here only the chat's form
+        # the Max agents read on opening the view (once the Agents control's, P10) is answered and rendered: from here only the chat's form
         # can bring its pointer (the gate's N05 went unseen while that read's render came a moment after the form)
-        await expect(page.locator('#nd-cap-note')).to_have_text('Runtime controls are unavailable')
+        await expect(page.locator('#nd-max-note')).to_have_text('Runtime controls are unavailable')   # now Max agents' read (it replaced the Agents control)
         # and nothing is still to render: a late render (the first item's ResizeObserver after the lanes' layout, 10 ms
         # after the form) drew the pointer without the form observer, and N05 lived in one of this round's mutant runs
         assert await s.page.evaluate(QUIET)
@@ -419,8 +419,10 @@ async def test_a_retry_whose_message_fails_can_be_asked_again(studio):
 
 async def test_the_column_stays_where_the_owner_scrolled_it(studio):
     """Gate P7 r2 #3 (mutant N15): at a short height the column shows the first waiting request; once the owner scrolls
-    the column, renders leave it where the owner put it for a few seconds (a streaming reply renders twice a second)."""
-    async with studio(width=1920, height=600) as s:
+    the column, renders leave it where the owner put it for a few seconds (a streaming reply renders twice a second).
+    (380 px: since DREAM-239 the column has the height the page's bars took, and at 600 px the first request is in view
+    without a scroll.)"""
+    async with studio(width=1920, height=380) as s:
         page = await open_nested(s)
         busy(s)
         await expect(page.locator('#nd-stack .nd-ask[data-ask]')).to_have_count(7)
@@ -462,18 +464,27 @@ async def test_the_rest_box_scrolls_its_items_and_never_spills(studio, w, h):
 async def test_every_item_of_the_stack_can_be_seen_and_reached_from_the_keyboard(studio, w, h):
     """Gate P7 r3 #1: with one real request and the turn's two failures, the rest box gave way to 0-1 px: the failures
     and their Retry buttons were invisible yet in the Tab order, and Enter on the next Tab stop sent a retry the owner
-    could not see. The rest box keeps about one item (6rem, or all of it when less); every Retry can be scrolled into
-    view and hit; every Tab stop from the request's last choice to the composer is on screen, above the composer, as
-    it takes the focus; and Enter acts on the one the owner sees."""
+    could not see. The rest box keeps about one item (6rem; its first item or all of it when that is less); every
+    Retry can be scrolled into view and hit; every Tab stop from the request's last choice to the composer is on screen,
+    above the composer, as it takes the focus; and Enter acts on the one the owner sees.
+
+    2026-10-02 (the owner's "expand or collapse more"): a failed worker is one row of about 3rem, so "one item" is that
+    row; and a short window starts the failed workers folded, so the owner opens them first (Show failed or stopped)."""
     async with studio(width=w, height=h) as s:
         page = await open_nested(s)
         working_turn(s, 6, {'r-5': 'failed', 'r-6': 'interrupted'})
         shell_request(s)
-        await expect(page.locator('#nd-stack .nd-ask')).to_have_count(3)
         await expect(page.locator('#nd-needs-c')).to_have_text('3')
+        fold = page.locator('#nd-needs-fold')
+        if h <= 800:
+            await expect(page.locator('#nd-stack .nd-ask')).to_have_count(1)         # the request alone: the failures are folded
+            await expect(fold).to_have_attribute('aria-expanded', 'false')
+            await fold.click()
+        await expect(fold).to_have_attribute('aria-expanded', 'true')
+        await expect(page.locator('#nd-stack .nd-ask')).to_have_count(3)
         await s.page.wait_for_timeout(300)
         rest = page.locator('#nd-stack-rest')
-        room = await rest.evaluate('r => [r.getBoundingClientRect().height, Math.min(r.scrollHeight, 96)]')
+        room = await rest.evaluate('r => [r.getBoundingClientRect().height, Math.min(r.scrollHeight, 96, r.firstElementChild.offsetHeight)]')
         assert room[0] >= room[1] - 0.5, (w, h, room)
         retries = page.locator('#nd-stack .nd-ask-fail .nd-retry')
         await expect(retries).to_have_count(2)

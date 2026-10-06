@@ -8,6 +8,7 @@ Scripted HTTP fixtures only: no engine, no model, no GPU.
 """
 import copy
 import json
+import os
 import time
 
 from dream.agent_activity import bounded_agent_activity
@@ -255,21 +256,42 @@ def test_ordinary_prose_code_urls_and_short_runs_are_not_redacted():
 # characters 0.9 s, 100,000 22.6 s), and _text redacts the whole value on the event loop for every row; a worker's
 # tool_result row carries up to 200,000 characters (`base64 -w0`, a JSON blob), so one row froze the session. The
 # pattern starts a block only at the start of a line now. CPU time of this thread: a busy machine cannot fail it.
+# A slower one could: the public CI runner took 79 ms where the ceiling is 50 (run 36980971824; 35 ms here). So the
+# claim, linear time, is measured as a ratio that holds on any machine, and the 50 ms ceiling (measured on the owner's
+# machine) is scaled by DREAM_TEST_TIME_SCALE, which the CI workflow sets; unset, it is 50 ms as before.
+_TIME_SCALE = float(os.environ.get('DREAM_TEST_TIME_SCALE', '1'))
+
 
 def _cpu_ms(value):
+    """The best of five runs; a run of a second or more is not repeated (a quadratic pattern takes minutes)."""
     from dream.agent_activity import _text
-    started = time.thread_time()
-    _text(value, 20_000)
-    return (time.thread_time() - started) * 1000
+    best = float('inf')
+    for _ in range(5):
+        started = time.thread_time()
+        _text(value, 20_000)
+        took = (time.thread_time() - started) * 1000
+        best = min(best, took)
+        if took >= 1000:
+            break
+    return best
 
 
 def test_redacting_a_long_unbroken_run_takes_linear_time():
     from dream.agent_activity import _text
-    assert _cpu_ms('A' * 20_000) < 50                         # the unanchored pattern: ~900 ms
-    assert _cpu_ms('A' * 200_000) < 50                        # ... and ~90 s
+    # Linear on any machine: four times the text costs about four times the CPU -- under eight. The unanchored
+    # pattern was quadratic (sixteen times): ~900 ms at 20,000 characters, ~14 s at 80,000.
+    for shape in (lambda n: 'A' * n,                                       # one unbroken run, no newline
+                  lambda n: 'x\n' * (n // 8) + 'A' * n,                    # short lines, then the run
+                  lambda n: '\n'.join(['QUJD' * 14 + 'QUJ'] * (n // 60))): # lines of 59: never a block
+        small, large = _cpu_ms(shape(20_000)), _cpu_ms(shape(80_000))
+        assert large < 8 * small, (small, large)
+    # And fast enough for the event loop, on the machine the ceiling was measured on (scaled elsewhere).
+    ceiling = 50 * _TIME_SCALE
+    assert _cpu_ms('A' * 20_000) < ceiling                    # the unanchored pattern: ~900 ms
+    assert _cpu_ms('A' * 200_000) < ceiling                   # ... and ~90 s
     assert _text('A' * 200_000, 20_000) == '[Long unbroken value omitted]'
-    assert _cpu_ms('x\n' * 25_000 + 'A' * 200_000) < 50       # 25,000 short lines, then the run
-    assert _cpu_ms('\n'.join(['QUJD' * 14 + 'QUJ'] * 20_000)) < 50   # 20,000 lines of 59: never a block
+    assert _cpu_ms('x\n' * 25_000 + 'A' * 200_000) < ceiling  # 25,000 short lines, then the run
+    assert _cpu_ms('\n'.join(['QUJD' * 14 + 'QUJ'] * 20_000)) < ceiling   # 20,000 lines of 59: never a block
 
 
 def test_a_wrapped_block_starts_at_its_first_whole_line():

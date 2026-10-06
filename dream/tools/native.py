@@ -27,15 +27,17 @@ def _resolve(raw: str) -> Path:
 @tool(
     "read_file",
     "Read text or PDF/DOCX/XLSX/PPTX extracts. Images: metadata; ZIP/TAR: listings. "
-    "No OCR, macros or transcription. Use query for keyword excerpts with source "
-    "locations. Defaults: 12000 characters, 10 PDF pages. Follow offset hints for more. "
-    "Offsets are CHARACTERS; start_line/line_count read lines. No approval needed.",
+    "No OCR, macros or transcription. To read LINES, use start_line and line_count (the "
+    "first 200 lines: start_line=1, line_count=200). offset and limit count CHARACTERS, "
+    "never lines: limit=200 returns 200 characters. Use query for keyword excerpts with "
+    "source locations. Defaults: 12000 characters, 10 PDF pages. Follow offset hints for "
+    "more. No approval needed.",
     {"type": "object", "properties": {
         "path": {"type": "string"},
-        "offset": {"type": "integer", "minimum": 0, "description": "CHARACTERS, not lines; default 0."},
-        "limit": {"type": "integer", "minimum": 1, "maximum": 50000, "description": "CHARACTERS, not lines; default 12000."},
-        "start_line": {"type": "integer", "minimum": 1, "description": "First line, 1-based."},
-        "line_count": {"type": "integer", "minimum": 1, "maximum": 2000, "description": "Lines; default 200."},
+        "offset": {"type": "integer", "minimum": 0, "description": "A position in CHARACTERS, not a line number; default 0. For lines: start_line."},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50000, "description": "A number of CHARACTERS, not lines; default 12000. For lines: line_count."},
+        "start_line": {"type": "integer", "minimum": 1, "description": "First LINE to read, 1-based; default 1."},
+        "line_count": {"type": "integer", "minimum": 1, "maximum": 2000, "description": "Number of LINES to read; default 200."},
         "page_start": {"type": "integer", "minimum": 1, "description": "First PDF page; default 1."},
         "page_count": {"type": "integer", "minimum": 1, "maximum": 50, "description": "PDF page count; default 10."},
         "sheet": {"type": "string", "description": "Exact XLSX sheet; default up to 50."},
@@ -85,7 +87,8 @@ def _read_lines(p, start_line: int, line_count: int) -> str:
 @tool(
     "write_file",
     "Write (create or overwrite) a text file; `append` adds to its end (write big "
-    "files in ~300-line parts). For a design deliverable, `asset` registers it as a "
+    "files in ~300-line parts). An .html, .svg or .md you write opens in the user's preview panel. "
+    "For a design deliverable, `asset` registers it as a "
     "version of that named asset (see register_assets); omit for support files.",
     {
         "type": "object",

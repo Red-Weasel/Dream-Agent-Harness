@@ -90,6 +90,10 @@ def test_it_ships_as_a_small_curated_package(curated, skill_text):
     assert skill.curated and skill.root == SKILL
     assert skill.description.startswith("Use when") and "knowledge graph" in skill.description
     assert len(skill_text) <= 8000, len(skill_text)                     # whole even on a 16k window (guidance_budget = 9,830)
+    # Where the cap comes from (2026-10-02): the loader reads a SKILL.md up to BODY_MAX_CHARS, but a session is GIVEN
+    # 15 % of its window in characters (selection.guidance_budget) and a longer workflow is cut with "[Workflow
+    # shortened.". 8,000 is this skill's own budget (DREAM-102) and must stay inside the smallest window's share.
+    assert 8000 < guidance_budget(16384) < loader.BODY_MAX_CHARS
     manifest = json.loads((SKILL / "manifest.json").read_text())
     assert manifest["format"] == "dream-skill/v1" and manifest["name"] == "understand" and manifest["portable"] is True
     assert {"run_bash", "read_file", "write_file", "skill_file"} <= set(manifest["capabilities"])
@@ -117,15 +121,17 @@ def test_the_pipeline_is_imperative_and_names_every_script_and_result(skill_text
     # numbered steps a local model follows in order, and every glue command the dry run uses
     steps = re.findall(r"^## (\d+)\. ", body, re.M)
     assert steps == [str(i) for i in range(1, len(steps) + 1)] and len(steps) >= 8, steps
-    for command in ("status", "imports-input", "scan-result", "batch-inputs", "structure", "draft", "nodes", "assemble",
-                    "finish"):
+    for command in ("status", "imports-input", "scan-result", "batch-inputs", "structure", "tasks", "brief", "draft",
+                    "nodes", "assemble", "finish"):
         assert f"`{command}" in body or f"ua_glue.py {command}" in body, command
     # no confirmation pauses, no gate that stops, no shell trip into the plugin folder
     assert not re.search(r"wait for (?:the user'?s? )?confirmation|confirm to continue|ask (?:the user )?(?:whether|if) ", body, re.I)
     assert not re.search(r"\b(?:cd|ls|find)\b[^\n]*(?:\.understand-anything|SKILL_DIR|PLUGIN_ROOT)", body)
     assert re.search(r"over 100 files", body, re.I)
-    # gate note 7: no hand-off to the plugin's file-analyzer (its prompt shells into the plugin dir and emits `step:` nodes)
-    assert "file-analyzer" not in body and "analyses every batch itself" in body
+    # gate note 7: no hand-off to the plugin's file-analyzer (its prompt shells into the plugin dir and emits `step:` nodes).
+    # Owner decision 2026-10-01: the analysis goes to Dream's own workers, as the upstream skill runs its analyzers in
+    # parallel (test_step_4_sends_every_worker_task_in_one_reply has the dispatch).
+    assert "file-analyzer" not in body and "analyses every batch itself" not in body
     assert "parts" in body or "part-" in body                          # long batches are split, never edited in place
     assert "legacy" in body and ".understand-anything/" in body        # gate note 5: the legacy data folder is explained
 
@@ -309,6 +315,309 @@ def test_the_domain_check_uses_the_domain_types(glue):
     assert any("type 'file'" in p for p in glue.check_graph(_graph(layers=[], tour=[]), glue.DOMAIN_NODES, glue.DOMAIN_EDGES, layered=False))
 
 
+# ---- step 4: the analysis goes to workers ----------------------------------------------------------------------------
+# Owner, 2026-10-02: the skill mapped a project with ONE agent ("The lead analyses every batch itself; no subagents.").
+# What the owner's runs of 2026-10-02 showed (the engine's and Dream's runtime logs): the lead sent 2-5 `task` calls a
+# reply where it had sent 15 the night before; five workers that answered with their whole analysis ran into the
+# 16,384-token reply cap after ~265 s each and came back "treat as incomplete". So: the glue cuts the batches into
+# tasks that fit a worker's lane, the lead's `task` prompts are one line each (all of them fit one reply), a worker
+# writes its own batch file and answers three lines, and `tasks` names what is still missing.
+
+LANE_TOKENS = 32768        # a worker's context on a local engine: the lane size (engine.slot_ctx's default)
+REPLY_TOKENS = 16384       # the reply cap the engine logged for every worker request
+TRIGGER = 0.80             # behaviour.context_trigger's default: past it a worker stops and returns its report
+# Estimates, not measurements: a source line as read_file returns it, a node with its edges as compact JSON, and the
+# worker's system text with its tool schemas (1,159 to 1,720 tokens in the owner's runs).
+TOKENS_PER_LINE, TOKENS_PER_NODE, WORKER_BASE_TOKENS, CHARS_PER_TOKEN = 12, 170, 2000, 3
+
+
+def _hand_project(root: Path, batches: list[list[dict]]) -> None:
+    """A project as the scripts of steps 2 to 4 leave it before the workers start, hand-written so the plugin is not
+    needed. A file is {"path", "lines", "symbols": [(kind, name, start, end)], "imports", "category", "language"}."""
+    files = [f for b in batches for f in b]
+    for f in files:
+        p = root / f["path"]
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(f.get("bytes") or b"x = 1\n" * f["lines"])
+
+    def entry(f):
+        return {"path": f["path"], "language": f.get("language", "python"), "sizeLines": f["lines"],
+                "fileCategory": f.get("category", "code")}
+    inter, tmp = root / ".ua" / "intermediate", root / ".ua" / "tmp"
+    inter.mkdir(parents=True)
+    tmp.mkdir(parents=True)
+    (inter / "scan-result.json").write_text(json.dumps({
+        "name": "hand", "description": "d", "languages": ["python"], "frameworks": [], "totalFiles": len(files),
+        "files": [entry(f) for f in files], "importMap": {f["path"]: f.get("imports", []) for f in files}}))
+    (inter / "batches.json").write_text(json.dumps({"totalFiles": len(files), "totalBatches": len(batches), "batches": [
+        {"batchIndex": i, "files": [entry(f) for f in b], "neighborMap": {},
+         "batchImportData": {f["path"]: f.get("imports", []) for f in b}} for i, b in enumerate(batches, 1)]}))
+    for i, b in enumerate(batches, 1):
+        (tmp / f"extract-out-{i}.json").write_text(json.dumps({"results": [
+            {"path": f["path"], "totalLines": f["lines"], "exports": [],
+             "functions": [{"name": n, "startLine": a, "endLine": z, "params": []}
+                           for kind, n, a, z in f.get("symbols", []) if kind == "function"],
+             "classes": [{"name": n, "startLine": a, "endLine": z, "methods": ["get", "put"]}
+                         for kind, n, a, z in f.get("symbols", []) if kind == "class"]}
+            for f in b if not f.get("bytes")]}))
+    shutil.copy(GLUE, tmp / "ua_glue.py")
+
+
+def _plan(root: Path) -> list[dict]:
+    return json.loads((root / ".ua/tmp/tasks.json").read_text())["tasks"]
+
+
+def _size(task: dict) -> tuple[int, int, int]:
+    """(lines a worker reads, nodes it writes, files it touches) for one task of the plan."""
+    lines = sum(z - a + 1 for u in task["units"] for a, z in u["reads"])
+    nodes = sum((1 if u["head"] else 0) + len(u["symbols"]) for u in task["units"])
+    return lines, nodes, len(task["units"])
+
+
+def _part(task: dict, extra_edges=()) -> dict:
+    """A task's batch file exactly as its brief tells the worker to write it: the file nodes that are this task's, a
+    node per listed symbol with its line range, `contains` for each, one `imports` edge per listed target."""
+    nodes, edges = [], []
+    for u in task["units"]:
+        if u["head"]:
+            nodes.append({"id": u["node"], "type": u["node"].split(":", 1)[0], "name": Path(u["path"]).name,
+                          "filePath": u["path"], "summary": f"Fixture summary of {u['path']}: what it does and its role.",
+                          "tags": ["fixture", "rocketlog", "test" if u["path"].startswith("tests/") else "source"],
+                          "complexity": "simple" if u["lines"] < 50 else "moderate" if u["lines"] <= 200 else "complex"})
+            edges += [{"source": u["node"], "target": t, "type": "imports", "direction": "forward", "weight": 0.7}
+                      for t in u["imports"]]
+        for s in u["symbols"]:
+            nodes.append({"id": s["id"], "type": s["kind"], "name": s["name"], "filePath": u["path"],
+                          "lineRange": s["lines"], "summary": f"Fixture {s['kind']} {s['name']}.",
+                          "tags": ["fixture", s["kind"], "python"], "complexity": "simple"})
+            edges.append({"source": u["node"], "target": s["id"], "type": "contains", "direction": "forward", "weight": 1.0})
+    written = {n["id"] for n in nodes}
+    edges += [{"source": a, "target": b, "type": t, "direction": "forward", "weight": w}
+              for a, b, t, w in extra_edges if a in written]
+    return {"nodes": nodes, "edges": edges}
+
+
+def _write_part(root: Path, task: dict, extra_edges=()) -> None:
+    (root / task["file"]).write_text(json.dumps(_part(task, extra_edges), separators=(",", ":")))
+
+
+BIG = [  # batch 1: twenty small modules; batch 2: one long module of 120 functions; batch 3: a document and a binary
+    [{"path": f"pkg/mod_{k:02d}.py", "lines": 90, "symbols": [("function", "load", 5, 30), ("class", "Box", 40, 80)],
+      "imports": [f"pkg/mod_{(k + 1) % 20:02d}.py"]} for k in range(20)],
+    [{"path": "pkg/long.py", "lines": 2400, "symbols": [("function", f"step_{k:03d}", 1 + 20 * k, 18 + 20 * k) for k in range(120)],
+      "imports": ["pkg/mod_00.py"]}],
+    [{"path": "README.md", "lines": 30, "category": "docs", "language": "markdown"},
+     {"path": "pkg/logo.bin", "lines": 1, "bytes": b"\x00\x01\x02binary"}],
+]
+
+
+def test_tasks_cut_every_batch_to_fit_a_worker_lane(tmp_path, glue):
+    _hand_project(tmp_path, BIG)
+    _glue(tmp_path, "tasks")
+    plan = _plan(tmp_path)
+    assert len(plan) > len(BIG)                                          # batches of 20 files and 2,400 lines are cut
+    for task in plan:
+        lines, nodes, files = _size(task)
+        assert lines <= glue.WORKER_LINES and nodes <= glue.WORKER_NODES and files <= glue.WORKER_FILES, task["id"]
+        assert all(z - a + 1 <= 200 for u in task["units"] for a, z in u["reads"])      # one read_file call each
+        # the lane: the brief, what it reads, the JSON it writes -- and once more for a rewrite after a failed check
+        brief = _glue(tmp_path, "brief", task["id"])
+        assert len(brief) <= config.TOOL_RESULT_CAP // 2                 # one run_bash result, never clamped
+        written = nodes * TOKENS_PER_NODE
+        assert written <= REPLY_TOKENS // 2, (task["id"], written)       # one write_file call inside the reply cap
+        fill = WORKER_BASE_TOKENS + len(brief) // CHARS_PER_TOKEN + lines * TOKENS_PER_LINE + 2 * written
+        assert fill <= TRIGGER * LANE_TOKENS, (task["id"], fill)
+    # nothing is lost or written twice: every file's node in exactly one task, every node-worthy symbol in one
+    heads = [u["node"] for task in plan for u in task["units"] if u["head"]]
+    assert sorted(heads) == sorted([f"file:pkg/mod_{k:02d}.py" for k in range(20)]
+                                   + ["file:pkg/long.py", "document:README.md", "file:pkg/logo.bin"])
+    symbols = [s["id"] for task in plan for u in task["units"] for s in u["symbols"]]
+    assert len(symbols) == len(set(symbols)) == 20 * 2 + 120
+    assert all(s["lines"][1] - s["lines"][0] >= 9 or s["kind"] == "class" for t in plan for u in t["units"] for s in u["symbols"])
+    # the long file: its first task has the node and the head, the later ones only their own run of symbols
+    long_units = [u for task in plan for u in task["units"] if u["path"] == "pkg/long.py"]
+    assert len(long_units) >= 4 and [u["head"] for u in long_units] == [True] + [False] * (len(long_units) - 1)
+    assert long_units[0]["reads"][0][0] == 1 and long_units[1]["reads"][0][0] > 1
+    binary = next(u for task in plan for u in task["units"] if u["path"] == "pkg/logo.bin")
+    assert binary["reads"] == [] and binary["binary"]
+    # the names are the merge's: batch-<i>.json for a batch that is one task, else parts 1..n
+    by_batch: dict[int, list[str]] = {}
+    for task in plan:
+        assert glue.BATCH_NAME.match(Path(task["file"]).name), task["file"]
+        by_batch.setdefault(task["batch"], []).append(Path(task["file"]).name)
+    assert by_batch[3] == ["batch-3.json"]
+    for i in (1, 2):
+        assert by_batch[i] == [f"batch-{i}-part-{k}.json" for k in range(1, len(by_batch[i]) + 1)] and len(by_batch[i]) > 1
+    assert [task["id"] for task in plan] == [f"{task['batch']}-{k}" for i in (1, 2, 3)
+                                             for k, task in enumerate([t for t in plan if t["batch"] == i], 1)]
+
+
+def test_the_task_listing_has_the_lead_send_every_task_in_one_reply(tmp_path):
+    _hand_project(tmp_path, BIG)
+    out = _glue(tmp_path, "tasks")
+    plan = _plan(tmp_path)
+    assert f"{len(plan)} worker tasks" in out
+    assert "ONE reply" in out and "only `task` calls" in out and f"ALL {len(plan)}" in out
+    assert 'subagent_type "coder"' in out                                # the worker writes a file and runs the check
+    assert "queues the rest" in out and "Do not send a few and wait" in out
+    # the prompt is one line, so every call fits the lead's one reply; the ids are on one line, not a line each
+    prompt = next(line.strip() for line in out.splitlines() if "ua_glue.py brief <id>" in line)
+    assert len(prompt) < 120 and "run_bash" in prompt
+    ids = next(line for line in out.splitlines() if line.startswith("ids:"))
+    assert ids.split()[1:] == [task["id"] for task in plan]
+    assert len(out.splitlines()) <= 8 and "rerun glue tasks" in out
+    assert len(plan) * (len(prompt) + 80) // CHARS_PER_TOKEN < REPLY_TOKENS // 4    # all the calls, a quarter of a reply
+
+
+def test_a_brief_is_the_workers_whole_instruction(tmp_path, glue):
+    _hand_project(tmp_path, BIG)
+    _glue(tmp_path, "tasks")
+    plan = _plan(tmp_path)
+    first = plan[0]
+    brief = _glue(tmp_path, "brief", first["id"])
+    assert f"task {first['id']}" in brief and first["file"] in brief
+    # what to read, by LINE: the owner's runs read with `limit`, which counts characters
+    assert "start_line=1 line_count=90" in brief and "never offset or limit" in brief
+    for u in first["units"]:
+        assert u["path"] in brief and u["node"] in brief
+        assert all(target in brief for target in u["imports"])
+        assert all(f"{s['kind']} {s['name']} [{s['lines'][0]}, {s['lines'][1]}]" in brief for s in u["symbols"])
+    # what to write, how to check it, what to answer
+    assert "write_file" in brief and "ONE call" in brief and '{"nodes": [...], "edges": [...]}' in brief
+    assert f"python3 .ua/tmp/ua_glue.py check {first['id']}" in brief
+    assert "three lines" in brief and "never the JSON" in brief
+    assert f"task {first['id']}: {first['file']}" in brief and "\ncheck: " in brief and "\nnotes: " in brief
+    # the rules are the schema's: every edge type the brief names is one the check accepts
+    named = set(re.findall(r"\b([a-z_]+) \d\.\d\b", brief))
+    assert {"contains", "imports", "calls", "tested_by", "documents"} <= named <= set(glue.EDGE_TYPES)
+    assert all(f"`{t}`" in brief or f'"{t}"' in brief for t in ("simple", "moderate", "complex"))
+    # a later run of a long file: its own lines only, and the file's node is not its to write
+    later = next(task for task in plan if task["units"][0]["path"] == "pkg/long.py" and not task["units"][0]["head"])
+    text = _glue(tmp_path, "brief", later["id"])
+    a, z = later["units"][0]["reads"][0][0], later["units"][0]["reads"][-1][1]
+    assert f"lines {a}-{z} of 2400" in text and "start_line=1 " not in text
+    assert "another task writes" in text and "file:pkg/long.py" in text
+    # the binary is never read
+    assert "do not read it" in _glue(tmp_path, "brief", plan[-1]["id"])
+    rc, out, err = _glue_rc(tmp_path, "brief", "9-9")
+    assert rc == 1 and "Traceback" not in err and "no task 9-9" in out and plan[0]["id"] in out
+
+
+def test_the_check_passes_a_part_written_as_briefed_and_names_what_is_wrong(tmp_path):
+    _hand_project(tmp_path, BIG)
+    _glue(tmp_path, "tasks")
+    plan = _plan(tmp_path)
+    task, path = plan[0], tmp_path / plan[0]["file"]
+    rc, out, _ = _glue_rc(tmp_path, "check", task["id"])
+    assert rc == 1 and "no " + task["file"] in out                       # nothing written yet
+    _write_part(tmp_path, task)
+    lines, nodes, files = _size(task)
+    out = _glue(tmp_path, "check", task["id"])
+    assert out.strip().splitlines()[-1].startswith(f"ok: {task['file']}") and f"{nodes} nodes" in out
+    good = json.loads(path.read_text())
+
+    def broken(change) -> str:
+        part = json.loads(json.dumps(good))
+        change(part)
+        path.write_text(json.dumps(part))
+        rc, out, err = _glue_rc(tmp_path, "check", task["id"])
+        assert rc == 1 and "Traceback" not in err and "ok:" not in out, out
+        assert "write the whole file again" in out
+        return out
+    head = task["units"][0]["node"]
+    dropped = broken(lambda p: p["nodes"].pop(0))
+    assert head in dropped and "is missing" in dropped
+    stray = broken(lambda p: p["nodes"].append(dict(p["nodes"][0], id="file:pkg/mod_19.py", filePath="pkg/mod_19.py")))
+    assert "file:pkg/mod_19.py is not this task's" in stray
+    assert "lacks summary" in broken(lambda p: p["nodes"][0].__setitem__("summary", ""))
+    assert "type 'uses'" in broken(lambda p: p["edges"][0].__setitem__("type", "uses"))
+    assert "function:nowhere.py:f is not a node" in broken(lambda p: p["edges"][0].__setitem__("target", "function:nowhere.py:f"))
+    # an edge may name any scanned file's node or any symbol another task writes: the merge joins the parts
+    other = plan[-1]["units"][0]["node"]
+    path.write_text(json.dumps(dict(good, edges=good["edges"] + [
+        {"source": head, "target": other, "type": "related", "direction": "forward", "weight": 0.5},
+        {"source": head, "target": "function:pkg/long.py:step_119", "type": "calls", "direction": "forward", "weight": 0.8}])))
+    assert "ok:" in _glue(tmp_path, "check", task["id"])
+    path.write_text(json.dumps(good)[: len(json.dumps(good)) // 2])     # a reply cut at the token limit
+    rc, out, err = _glue_rc(tmp_path, "check", task["id"])
+    assert rc == 1 and "not valid JSON" in out and "Traceback" not in err
+
+
+def test_tasks_names_what_is_missing_then_once_more_then_do_it_yourself(tmp_path):
+    _hand_project(tmp_path, BIG)
+    first = _glue(tmp_path, "tasks")
+    plan = _plan(tmp_path)
+    missing, bad = plan[1], plan[-1]
+    for task in plan:
+        if task is not missing:
+            _write_part(tmp_path, task)
+    (tmp_path / bad["file"]).write_text('{"nodes": [], "edges": []}')     # a worker that wrote an empty file
+    second = _glue(tmp_path, "tasks")
+    assert f"{len(plan) - 2} of {len(plan)} tasks done" in second
+    assert f"{missing['id']} (no file)" in second and f"{bad['id']} (" in second and "is missing" in second
+    assert "once more" in second and "ONE reply" in second and "ua_glue.py brief <id>" in second
+    assert first != second and "yourself" not in second
+    third = _glue(tmp_path, "tasks")                                      # still missing after the second round
+    assert f"{missing['id']} (no file)" in third and "yourself" in third and f"brief {missing['id']}" in third
+    assert "once more" not in third
+    _write_part(tmp_path, missing)
+    _write_part(tmp_path, bad)
+    done = _glue(tmp_path, "tasks")
+    assert f"all {len(plan)} tasks done" in done and "merge (step 5)" in done
+    # the next run starts over: batch-inputs clears the batch files and the rounds, and the parser's old output is
+    # not taken for the new batches'
+    _glue(tmp_path, "batch-inputs")
+    assert not (tmp_path / ".ua/tmp/tasks.json").exists() and not (tmp_path / missing["file"]).exists()
+    rc, out, err = _glue_rc(tmp_path, "tasks")
+    assert rc == 1 and "older than" in out and "extract-structure.mjs" in out and "Traceback" not in err
+    for i in (1, 2, 3):
+        os.utime(tmp_path / f".ua/tmp/extract-out-{i}.json", None)        # the parser run again
+    assert f"ALL {len(plan)}" in _glue(tmp_path, "tasks")
+
+
+def test_tasks_before_the_parser_names_the_missing_step(tmp_path):
+    _hand_project(tmp_path, BIG)
+    (tmp_path / ".ua/tmp/extract-out-2.json").unlink()
+    rc, out, err = _glue_rc(tmp_path, "tasks")
+    assert rc == 1 and "Traceback" not in err and "extract-out-2.json" in out and "extract-structure.mjs" in out
+    for command in (("check",), ("brief",)):
+        rc, out, err = _glue_rc(tmp_path, *command)
+        assert rc == 2 and "Traceback" not in err
+    rc, out, err = _glue_rc(tmp_path, "check", "1-1")
+    assert rc == 1 and "glue tasks" in out and "Traceback" not in err     # no plan yet
+
+
+def test_step_4_sends_every_worker_task_in_one_reply(skill_text, glue):
+    body = _body(skill_text)
+    step3, step4 = body.split("## 3.", 1)[1].split("## 4.", 1)[0], body.split("## 4.", 1)[1].split("## 5.", 1)[0]
+    # (a) every task in ONE reply; the extra calls wait their turn (the settings redo of 2026-10-01), none is refused
+    assert "`tasks`" in step4 and "ONE reply" in step4 and "only `task` calls" in step4 and "EVERY task" in step4
+    assert "queues the rest" in step4 and re.search(r"not a few at a time", step4, re.I)
+    # (b) a worker fits its lane: few files, its own batch file, three lines back -- and it can write: `coder`
+    assert "`coder`" in step4 and "`explorer`" not in step4             # the explorer has no write_file and no run_bash
+    assert "three lines" in step4 and "never the analysis" in step4 and "its own" in step4
+    assert re.search(r"32[K,]", step4)
+    # (c) a failed or incomplete task goes out once more, then the lead does it
+    assert "once more" in step4 and "yourself" in step4 and "`brief <id>`" in step4
+    # the big-repo path's key-file summaries go to workers the same way (its lines are the glue's `draft` output)
+    assert "`draft`" in step3 and "`explorer`" in step3 and "ONE reply" in step3
+    # the node and edge rules have one home, the brief: the lead does not carry them for workers that never see them
+    assert "**Nodes.**" not in body and "tested_by" not in body and "tested_by 0.5" in glue.RULES
+    from dream.core.subagents import local_subagents
+    tools = local_subagents()
+    assert {"read_file", "write_file", "run_bash"} <= set(tools["coder"].tool_names)
+    assert "write_file" not in tools["explorer"].tool_names
+
+
+def test_the_draft_sends_each_key_file_to_a_worker(glue):
+    text = glue.KEY_NEXT % {"todo": 7, "after": "then the merge (step 5)"}
+    assert "ONE reply" in text and "only `task` calls" in text and 'subagent_type "explorer"' in text
+    assert "start_line=1, line_count=200" in text and "never offset or limit" in text
+    assert "ONLY 1-2 specific sentences" in text and "summaries.json" in text and "rerun glue draft" in text
+    assert "once more" in text and "yourself" in text and "queues the rest" in text
+    assert not re.search(r"^\s+\S+ \(", text, re.M)                      # no line reads as a key file's own line
+
+
 # ---- (4) the dry run: every deterministic step, the SKILL.md's own commands, the real run_bash sandbox --------------
 
 FIXTURE = {
@@ -380,57 +689,11 @@ def _glue(root: Path, *args: str) -> str:
     return run.stdout
 
 
-def _node_type(entry: dict) -> str:
-    """The skill's category -> type rule, as the model applies it."""
-    cat, path = entry["fileCategory"], entry["path"]
-    if cat == "config":
-        return "config"
-    if cat == "docs":
-        return "document"
-    if cat == "infra":
-        return "pipeline" if "workflows" in path or path.endswith("Jenkinsfile") else "resource" if path.endswith(".tf") else "service"
-    if cat == "data":
-        return "schema" if path.endswith((".graphql", ".proto", ".prisma")) else "table"
-    return "file"
-
-
-def _simulate_batches(root: Path, batches: dict, structures: dict[int, dict]) -> None:
-    """Write batch-<i>.json exactly as step 4 tells the model to: one node per file, function/class nodes with line
-    ranges from the parser, `contains` for each, one `imports` edge per import target, and a few non-code edges."""
-    for b in batches["batches"]:
-        i = b["batchIndex"]
-        results = {r["path"]: r for r in structures[i]["results"]}
-        nodes, edges = [], []
-        for f in b["files"]:
-            ntype = _node_type(f)
-            fid = f"{ntype}:{f['path']}"
-            lines = f["sizeLines"]
-            nodes.append({"id": fid, "type": ntype, "name": Path(f["path"]).name, "filePath": f["path"],
-                          "summary": f"Fixture summary of {f['path']}: what it does and its role.",
-                          "tags": ["fixture", "rocketlog", "test" if f["path"].startswith("tests/") else "source"],
-                          "complexity": "simple" if lines < 50 else "moderate" if lines <= 200 else "complex"})
-            r = results.get(f["path"], {})
-            for fn in r.get("functions") or []:
-                nid = f"function:{f['path']}:{fn['name']}"
-                nodes.append({"id": nid, "type": "function", "name": fn["name"], "filePath": f["path"],
-                              "lineRange": [fn["startLine"], fn["endLine"]], "summary": f"Fixture function {fn['name']}.",
-                              "tags": ["fixture", "function", "python"], "complexity": "simple"})
-                edges.append({"source": fid, "target": nid, "type": "contains", "direction": "forward", "weight": 1.0})
-            for cls in r.get("classes") or []:
-                nid = f"class:{f['path']}:{cls['name']}"
-                nodes.append({"id": nid, "type": "class", "name": cls["name"], "filePath": f["path"],
-                              "lineRange": [cls["startLine"], cls["endLine"]], "summary": f"Fixture class {cls['name']}.",
-                              "tags": ["fixture", "class", "python"], "complexity": "simple"})
-                edges.append({"source": fid, "target": nid, "type": "contains", "direction": "forward", "weight": 1.0})
-            for target in b["batchImportData"].get(f["path"]) or []:
-                edges.append({"source": fid, "target": f"file:{target}", "type": "imports", "direction": "forward", "weight": 0.7})
-            extra = {"Dockerfile": ("deploys", "file:rocketlog/cli.py", 0.7), "README.md": ("documents", "file:rocketlog/__init__.py", 0.5),
-                     "pyproject.toml": ("configures", "file:rocketlog/__init__.py", 0.6),
-                     "rocketlog/store.py": ("tested_by", "file:tests/test_store.py", 0.5)}
-            if f["path"] in extra:
-                etype, target, weight = extra[f["path"]]
-                edges.append({"source": fid, "target": target, "type": etype, "direction": "forward", "weight": weight})
-        (root / ".ua" / "intermediate" / f"batch-{i}.json").write_text(json.dumps({"nodes": nodes, "edges": edges}, indent=1))
+# the model's own edges in the fixture: a node of the task (first) to any scanned file's node
+EXTRA_EDGES = (("service:Dockerfile", "file:rocketlog/cli.py", "deploys", 0.7),
+               ("document:README.md", "file:rocketlog/__init__.py", "documents", 0.5),
+               ("config:pyproject.toml", "file:rocketlog/__init__.py", "configures", 0.6),
+               ("file:rocketlog/store.py", "file:tests/test_store.py", "tested_by", 0.5))
 
 
 @pytest.fixture(scope="module")
@@ -477,14 +740,23 @@ def mapped(tmp_path_factory, skill_text):
     batch_listing = _glue(root, "batch-inputs")
     log.append(batch_listing)
     batches = json.loads((root / ".ua/intermediate/batches.json").read_text())
-    # step 4 -- structure per batch, then the model's batch files (simulated)
-    structures, structure_text = {}, ""
+    # step 4 -- the parser per batch, then the worker tasks. Each worker is simulated (_part writes what its brief
+    # lists); its two run_bash calls, the brief and the check, run in the real sandbox as a `coder` worker's do.
+    structure_text = ""
     for b in batches["batches"]:
         i = b["batchIndex"]
         log.append(_ua("understand", "extract-structure.mjs", [root / f".ua/tmp/extract-in-{i}.json", root / f".ua/tmp/extract-out-{i}.json"], root))
-        structures[i] = json.loads((root / f".ua/tmp/extract-out-{i}.json").read_text())
         structure_text += _glue(root, "structure", str(i))
-    _simulate_batches(root, batches, structures)
+    tasks_text = _glue(root, "tasks")
+    briefs, checks = {}, {}
+    for task in _plan(root):
+        for command, kept in (("brief", briefs), ("check", checks)):
+            if command == "check":
+                _write_part(root, task, EXTRA_EDGES)
+            ran = _sh(f"python3 .ua/tmp/ua_glue.py {command} {task['id']}", root)
+            kept[task["id"]] = ran.output.decode("utf-8", "replace")
+            assert ran.returncode == 0, kept[task["id"]]
+    tasks_done = _glue(root, "tasks")
     # step 5 -- merge
     merge = _ua("understand", "merge-batch-graphs.py", [root], root)
     log.append(merge)
@@ -523,7 +795,8 @@ def mapped(tmp_path_factory, skill_text):
     log.append(finish)
     return {"root": root, "head": head, "log": log, "scan_line": scan_line, "batch_listing": batch_listing,
             "structure_text": structure_text, "node_listing": node_listing, "merge": merge, "assemble": assemble,
-            "finish": finish, "batches": batches}
+            "finish": finish, "batches": batches, "tasks_text": tasks_text, "tasks_done": tasks_done, "briefs": briefs,
+            "checks": checks}
 
 
 @needs_plugin
@@ -554,6 +827,22 @@ def test_batches_and_structure_give_the_model_what_it_writes_from(mapped):
     assert re.search(r"function record lines \d+-\d+ params name, stage", text)
     assert re.search(r"class Launch lines \d+-\d+ methods", text) and "as_dict" in text
     assert "UNREADABLE" not in text
+
+
+@needs_plugin
+def test_the_workers_tasks_cover_the_fixture_and_pass_their_checks(mapped):
+    """Step 4 on the real parser's output: one task per small batch, each brief names its files' reads and import
+    targets, each part passes its check, and the second `tasks` sends the lead on to the merge."""
+    plan = _plan(mapped["root"])
+    assert [task["id"] for task in plan] == ["1-1", "2-1", "3-1"]
+    assert [Path(task["file"]).name for task in plan] == ["batch-1.json", "batch-2.json", "batch-3.json"]
+    assert "ALL 3" in mapped["tasks_text"] and "all 3 tasks done" in mapped["tasks_done"]
+    briefs = "".join(mapped["briefs"].values())
+    for path in ("README.md", "pyproject.toml", "rocketlog/launch.py", "tests/test_store.py", "Dockerfile"):
+        assert f"- {path} (" in briefs, path
+    assert "imports: file:rocketlog/store.py" in briefs and re.search(r"function record \[\d+, \d+\]", briefs)
+    assert "service:Dockerfile" in briefs and "document:README.md" in briefs and "config:pyproject.toml" in briefs
+    assert all(text.strip().splitlines()[-1].startswith("ok: ") for text in mapped["checks"].values())
 
 
 @needs_plugin

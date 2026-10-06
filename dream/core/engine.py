@@ -397,13 +397,18 @@ class Engine:
 
         if self.provider.kind not in ("anthropic", "cli"):
             names = ", ".join(self._local_subs)
-            # DREAM-151: a local engine with lanes runs several sub-agents at once; the model is told so. How many, per
-            # reply and at once, is the `task` tool's to say (DREAM-197), so this text stays put when either changes.
-            # openai and xai at a remote address send one reply's calls together, up to Parallel workers
-            # (profile.max_parallel); at a loopback address they run one at a time. That is the `task` tool's source
+            # DREAM-151: a local engine with lanes runs several sub-agents at once; the model is told so. How many run at
+            # once is the `task` tool's to say (the owner's max agents and the lanes), so this text stays put when
+            # either changes. openai and xai at a remote address send one reply's calls together, up to max agents
+            # (none: no limit); at a loopback address they run one at a time. That is the `task` tool's source
             # (OpenAICompatBackend.concurrent_tasks), and its words: "on this provider", else "on this engine".
             lanes = self._prompt_lanes = self._subagent_lanes()
             remote = concurrent_provider(self.provider)
+            from .settings import max_agents
+            try:
+                limit = max_agents()
+            except ValueError:            # an unusable settings section: the file's problem is reported elsewhere
+                limit = None
             stable.append(
                 "\n## Delegating (subagents)\nYou can hand a scoped, self-contained "
                 f"subtask to a specialist via the `task` tool ({names}). It runs in its "
@@ -412,10 +417,10 @@ class Engine:
                 "own context stays lean. "
                 + ("Several `task` calls in one reply run at the same time on this "
                    "provider; independent subtasks can go out together."
-                   if remote and self.profile.max_parallel > 1 else
+                   if remote and limit != 1 else
                    "Subagents run one at a time on this provider, not in parallel." if remote else
-                   "Several subagents can run at the same time on this engine; the `task` tool says how many per "
-                   "reply. Independent subtasks can go out together in one reply." if lanes > 1 else
+                   "Several subagents can run at the same time on this engine; the `task` tool says how many at "
+                   "once. Independent subtasks can go out together in one reply." if lanes > 1 else
                    "Subagents run one at a time on this engine, not in parallel.")
             )
 
@@ -438,21 +443,21 @@ class Engine:
     async def _local_helper_tool(self):
         """DREAM-213: delegate_local, for a Claude-led session on a computer with the local engine (MachX installed);
         None for every other session. Its description names the model the engine serves now, when it answers, the
-        owner's worker limit and the local sub-agents."""
+        owner's max agents and the local sub-agents."""
         if self.provider.kind != "anthropic":
             return None
         from ..local import machx
         if not machx.available():
             return None
         from ..tools.delegate_tools import delegate_local_tool
-        from .settings import MAX_WORKERS_DEFAULT, nested_max_workers
+        from .settings import max_agents
         from .subagents import local_subagents
         try:
-            cap = nested_max_workers()
+            limit = max_agents()
         except ValueError:            # an unusable settings section: the file's problem is reported elsewhere
-            cap = MAX_WORKERS_DEFAULT
+            limit = None
         model = await asyncio.to_thread(machx.served_model_id)
-        return delegate_local_tool(model=model, cap=cap, names=sorted(local_subagents()))
+        return delegate_local_tool(model=model, limit=limit, names=sorted(local_subagents()))
 
     def _attach_local_helpers(self, built) -> None:
         """DREAM-213: the session's local helpers, once delegate_local is among its built tools (a skill preset may

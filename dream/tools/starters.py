@@ -109,7 +109,7 @@ async def copy_starter_component(args: dict[str, Any]) -> dict[str, Any]:
             return err(f"Could not copy three.js: {type(e).__name__}: {e}")
         base = f"{directory}/" if directory else ""
         return ok(f"Copied three — {_WHAT[kind]}.\n  {dest_dir / 'vendor' / 'three'}/\n\n"
-                  "Load it as an ES module through an import map (file:// works in the preview):\n"
+                  "Load it as an ES module through an import map (the preview inlines these local modules):\n"
                   + THREE_TAGS.replace("{base}", base))
     src = STARTERS_DIR / kind
     if not src.is_file():

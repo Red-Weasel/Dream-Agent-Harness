@@ -519,13 +519,15 @@ async def test_the_pane_follows_show_html_reloads_on_edit_and_shows_a_screenshot
             view = "document.documentElement.dataset.dreamView"
             assert await page.evaluate(view) == "chat", "the default view"
 
-            # (1) show_html: the page the model loads privately appears in the owner's pane;
-            #     the FIRST mirrored show of a session brings Studio up once from the default view
+            # (1) show_html: the page the model loads privately appears in the owner's pane -- in the Chat view
+            #     with room beside the chat, in the panel there, and the view stays Chat (DREAM-235: there is no
+            #     Studio tab for the first mirrored show to bring up)
             res = await show_html.handler({"path": "page.html"})
             assert not res.get("is_error"), _text(res)
             frame = page.frame_locator("#artbody iframe")
             await expect(frame.locator("#h")).to_have_text("Hello")
-            await page.wait_for_function(f"{view} === 'studio'")
+            assert await page.evaluate(view) == "chat"
+            assert await page.evaluate("document.body.classList.contains('chat-art')"), "the panel beside the chat"
             await expect(page.locator("#artfollowbox")).to_be_checked()
             await expect(page.locator("#artname")).to_have_text("page.html")
 
@@ -560,8 +562,10 @@ async def test_the_pane_follows_show_html_reloads_on_edit_and_shows_a_screenshot
             assert await page.evaluate(view) == "files"
             await expect(page.locator("#dream-files-page")).to_be_visible()
             await page.screenshot(path=str(shots / "studio-mirror-files-view-2554x1338.png"))
-            # the owner comes back to Studio themselves and finds the capture
+            # the owner goes to the Artifacts tab themselves and finds the capture in its list
             await page.click("#dream-nav-studio")
+            await expect(page.locator("#art-home-list .art-row")).to_have_count(2)       # page.html and the capture
+            await page.locator("#art-home-list .art-row", has_text="cap.png").get_by_role("button", name="Open", exact=True).click()
             await expect(img).to_be_visible()
             await page.wait_for_function("(i => i.complete && i.naturalWidth > 0)(document.querySelector('#artbody img'))")
             assert await img.evaluate("i => i.naturalWidth") == 1280, "the hidden frame's 1280x800 capture"

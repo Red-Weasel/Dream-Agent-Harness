@@ -28,9 +28,11 @@ consult or backend, so they apply whatever the session runs on.
 
 Storage stays where it is (design 3.1): the global file is data/runtime-settings.json, read and written through
 core/profiles (validation, lock, atomic write, unknown sections kept). This module owns its `roles`, `output`,
-`behaviour` and `engine` sections and validates them whenever it reads or writes them. `engine` (DREAM-151: the
-engine's parallel lanes, parallel and slot_ctx) is the global file's only and applies when Dream next starts the
-local engine (local/settings.engine_lanes).
+`behaviour` and `nested` sections and validates them whenever it reads or writes them. `nested.max_agents` (the
+owner's settings plan of 2026-10-01) is the global file's only. The retired keys -- `nested.max_workers` (DREAM-197)
+and the `engine` section (DREAM-151's engine.parallel / engine.slot_ctx; a model's lanes are its own launch settings
+now, set on the load screen) -- are accepted as they are, read by nothing, and dropped by the next save of this
+module's writer.
 """
 from __future__ import annotations
 
@@ -55,6 +57,9 @@ PROJECT_SECTIONS = {"version", "roles", "output", "behaviour"}   # what a projec
 _WORKSPACE: Path | None = None                       # the session's workspace; None = no project file is read
 NOT_APPLIED = "not applied on this backend"
 INHERIT = "same as main"
+# The source of a reply budget the loaded model's launch sets: its max_tokens, the load screen's "max tokens" field
+# (the Recommended settings card's "Max output"), saved per model in model-presets.json.
+LOAD_SCREEN = "from this model's load screen (max tokens; Max output on its card)"
 MIN_MAX_TOKENS = 256
 # The roles this version applies (design 3.3; S1 = DREAM-142, S4 = DREAM-145) and what each may hold:
 # name -> (providers it may name, model required, provider required, why the provider list is what it is).
@@ -88,24 +93,19 @@ _AGENT = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 # Sections of the global file that someone reads; `check` lists any other as unknown (it is still kept).
 _KNOWN_SECTIONS = {"version", "profile", "overrides", "models", "roles", "output", "behaviour", "blender", "studio",
                    "engine", "nested"}
-# DREAM-151: the engine's parallel lanes, used when Dream starts `ie serve` (local/settings.engine_lanes) for a model
-# whose engine serves requests in lanes. The global file only: a project file may not set `engine` (PROJECT_SECTIONS).
-# parallel = the engine's --parallel (1-16: DREAM-201, the engine's range since v0.2.0; its first lanes build took 4);
-# slot_ctx = its --slot-ctx, the context of every lane after the first (0 = the engine's own size). Unset, each
-# model's own launch setting stands, as before.
-ENGINE_SETTINGS = ("engine.parallel", "engine.slot_ctx")
-MAX_LANES = 16
-MAX_SLOT_CTX = 2**31 - 1
-ENGINE_PARALLEL_DEFAULT = "each model's own launch setting (1 unless changed)"
-ENGINE_SLOT_CTX_DEFAULT = "the engine's own (32,768 tokens per extra lane; Qwen3.8-27B: 65,536)"
-# DREAM-197: how many workers (the lead's sub-agents) one reply may start; its task calls past that are refused. The
-# Nested view's 4 / 8 / 12 / 16 control counts the orchestrator, so the values are 3, 7, 11 and 15; unset, 7 (sixteen
-# agents is the owner's opt-in). The global file only: a cloned repository's project file may not raise it.
-NESTED_SETTING = "nested.max_workers"
-MAX_WORKERS = (3, 7, 11, 15)
-MAX_WORKERS_DEFAULT = 7
-_MAX_WORKERS_TEXT = "nested.max_workers must be 3, 7, 11 or 15 (with the orchestrator: 4, 8, 12 or 16 agents)"
-_NESTED_SHAPE_TEXT = "nested must be an object holding only max_workers"
+# Max agents (the owner's settings plan of 2026-10-01): how many sub-agents run AT THE SAME TIME, with every provider.
+# Past it a sub-agent waits in line and starts when one finishes; none is refused for count. Unset = no limit, the
+# default. On the local engine what runs at once is the smaller of its lanes and this. It replaces DREAM-197's
+# nested.max_workers (a per-reply cap that refused extra task calls) and Parallel workers (overrides.max_parallel, the
+# cloud at-once cap). The global file only: a cloned repository's project file may not set it.
+NESTED_SETTING = "nested.max_agents"
+MAX_AGENTS = MAX_OVERRIDE_NUMBER
+_MAX_AGENTS_TEXT = "nested.max_agents must be a whole number of 1 or more; remove it for no limit"
+_NESTED_SHAPE_TEXT = "nested must be an object holding max_agents"
+# Retired, still accepted in the file and read by nothing: nested.max_workers (replaced by nested.max_agents) and the
+# engine section's parallel / slot_ctx (DREAM-151; a model's parallel and sub-agent context are its own launch settings,
+# set on the load screen). The next global save through this module's writer drops them (_retire).
+_RETIRED_NESTED = "max_workers"
 
 
 class Effective(NamedTuple):
@@ -246,34 +246,34 @@ def _validate_output(raw: dict) -> dict:
     return output
 
 
-def _validate_engine(raw: dict) -> dict:
-    engine = raw.get("engine", {})
-    if not isinstance(engine, dict):
-        raise ValueError("engine must be an object holding parallel and slot_ctx")
-    unknown = sorted(set(engine) - {"parallel", "slot_ctx"})
-    if unknown:
-        raise ValueError(f"engine has unknown keys ({', '.join(shown(k) for k in unknown)}); it holds parallel and "
-                         "slot_ctx")
-    if "parallel" in engine and (type(engine["parallel"]) is not int or not 1 <= engine["parallel"] <= MAX_LANES):
-        raise ValueError(f"engine.parallel must be an integer from 1 to {MAX_LANES} (the engine's --parallel)")
-    slot_ctx = engine.get("slot_ctx", 0)
-    if type(slot_ctx) is not int or not (slot_ctx == 0 or 9 <= slot_ctx <= MAX_SLOT_CTX):
-        raise ValueError(f"engine.slot_ctx must be 0 (the engine's own size) or an integer from 9 to {MAX_SLOT_CTX}")
-    return engine
-
-
 def _validate_nested(raw: dict) -> dict:
+    """The nested section: max_agents, an integer of 1 or more; the retired max_workers is accepted whatever it holds."""
     nested = raw.get("nested", {})
-    if not isinstance(nested, dict) or set(nested) - {"max_workers"}:
+    if not isinstance(nested, dict) or set(nested) - {"max_agents", _RETIRED_NESTED}:
         raise ValueError(_NESTED_SHAPE_TEXT)
-    if "max_workers" in nested and (type(nested["max_workers"]) is not int or nested["max_workers"] not in MAX_WORKERS):
-        raise ValueError(_MAX_WORKERS_TEXT)
+    if "max_agents" in nested and (type(nested["max_agents"]) is not int
+                                   or not 1 <= nested["max_agents"] <= MAX_AGENTS):
+        raise ValueError(_MAX_AGENTS_TEXT)
     return nested
 
 
+def _retire(saved: dict) -> dict:
+    """`saved` without the retired keys: nested.max_workers and the engine section (see _RETIRED_NESTED)."""
+    saved = dict(saved)
+    saved.pop("engine", None)
+    nested = saved.get("nested")
+    if isinstance(nested, dict) and _RETIRED_NESTED in nested:
+        nested = {key: value for key, value in nested.items() if key != _RETIRED_NESTED}
+        if nested:
+            saved["nested"] = nested
+        else:
+            del saved["nested"]
+    return saved
+
+
 def validate(raw: dict) -> dict:
-    """Check `roles`, `output`, `behaviour`, `engine` and `nested`; the other sections are core/profiles' or kept as
-    they are. Unknown role names are not errors (see unknown_roles)."""
+    """Check `roles`, `output`, `behaviour` and `nested`; the other sections are core/profiles' or kept as they are
+    (the retired `engine` section among them). Unknown role names are not errors (see unknown_roles)."""
     roles = raw.get("roles", {})
     if not isinstance(roles, dict):
         raise ValueError("roles must be an object")
@@ -289,7 +289,6 @@ def validate(raw: dict) -> dict:
             _role(value, f"roles.{name}", name)
     _validate_output(raw)
     _validate_behaviour(raw)
-    _validate_engine(raw)
     _validate_nested(raw)
     return raw
 
@@ -683,18 +682,10 @@ def vitals_enabled() -> bool:
     return _own_section(_validate_behaviour).get("vitals", True)
 
 
-def engine_launch() -> dict:
-    """The owner's engine lanes for the next `ie serve` Dream starts (DREAM-151): {"parallel"?: n, "slot_ctx"?: c},
-    {} when neither is set. The global file only -- a project file may not set the engine -- and of it only this
-    section, so a problem elsewhere in the file does not stop a model from loading. An unusable engine section
-    raises, naming the file; nothing falls back to another value."""
-    return dict(_checked(_validate_engine, read_settings()))
-
-
-def nested_max_workers() -> int:
-    """nested.max_workers (DREAM-197): how many workers one reply of the lead may start, 7 when unset. The global file
+def max_agents() -> int | None:
+    """nested.max_agents: how many sub-agents may run at the same time, None (no limit) when unset. The global file
     only, and of it only this section; an unusable section raises, naming the file."""
-    return _checked(_validate_nested, read_settings()).get("max_workers", MAX_WORKERS_DEFAULT)
+    return _checked(_validate_nested, read_settings()).get("max_agents")
 
 
 def apply_saved_output() -> None:
@@ -745,7 +736,9 @@ def effective(*, provider: str = "machx", model: str | None = None, session: dic
     holds what a running session knows: "output.max_tokens" (/maxtokens), "output.preset_max_tokens" (the local
     model preset's), "output.performance" (the performance mode's output cap), "roles.main"; the CLI has none.
     A value the project file sets has source "project" (DREAM-146); the global file's, "global". `strict` False
-    (the Settings tab) shows the global values when the project file is unusable, as the runtime does."""
+    (the Settings tab) shows the global values when the project file is unusable, as the runtime does. With a preset
+    max_tokens, "overrides.output_tokens" is the value in effect for the main agent's replies and its source
+    (LOAD_SCREEN, or /maxtokens), naming the profile's value that is not used."""
     _, project, saved = layers(strict=strict)
     session = session or {}
     env = os.environ
@@ -760,7 +753,8 @@ def effective(*, provider: str = "machx", model: str | None = None, session: dic
     field_envs = {field: name for field, (name, _) in PROFILE_ENVS.items()}
     field_envs.update(vision="DREAM_VISION", vision_helper="DREAM_VISION_HELPER")
     model_saved = saved.get("models", {}).get(f"{provider}:{model}", {}) if model else {}
-    for field in sorted(_OVERRIDE_FIELDS):
+    # max_parallel is not a setting any more (Parallel workers, replaced by nested.max_agents): no row.
+    for field in sorted(_OVERRIDE_FIELDS - {"max_parallel"}):
         value = getattr(resolved, field)
         if field in field_envs and field_envs[field] in env:
             row = _env_row(field_envs[field], value)
@@ -783,8 +777,23 @@ def effective(*, provider: str = "machx", model: str | None = None, session: dic
     configured = rows["output.max_tokens"]
     preset = session.get("output.preset_max_tokens")
     if preset is not None:
-        ceiling = (configured if session.get("output.max_tokens") is not None
-                   else Effective(preset, "global (local model preset)"))
+        # The loaded model's launch sets max_tokens (the load screen's field): every request of the main agent asks
+        # for it (or for /maxtokens, which replaces it), and the profile's output_tokens is not consulted
+        # (_base_max_tokens). Its row shows what is in effect and names the value that is not used, so a saved
+        # number that caps nothing is not shown as the cap (the owner's 60,000 beside a 16,384 launch, 2026-10-02).
+        unused = rows["overrides.output_tokens"]
+        whose = ("the saved" if unused.source.startswith("global")
+                 else unused.source.removeprefix("env ") + "'s" if unused.source.startswith("env ")
+                 else "the profile's")
+        tail = (f"; {whose} {unused.value:,} applies only where no launch sets it (another provider, or an engine "
+                "that was already running)")
+        if session.get("output.max_tokens") is not None:
+            ceiling = configured
+            rows["overrides.output_tokens"] = Effective(
+                configured.value, f"session (/maxtokens, in place of the load screen's {preset:,})" + tail)
+        else:
+            ceiling = Effective(preset, LOAD_SCREEN)
+            rows["overrides.output_tokens"] = Effective(preset, LOAD_SCREEN + tail)
     else:
         cap = rows["overrides.output_tokens"]
         ceiling = (Effective(cap.value, f"{cap.source} (profile output_tokens)") if cap.value < configured.value
@@ -821,16 +830,10 @@ def effective(*, provider: str = "machx", model: str | None = None, session: dic
                  "continue" if env["DREAM_SINGLE_SLOT_VERIFIER"].strip().lower() == "continue" else "skip")
         if "DREAM_SINGLE_SLOT_VERIFIER" in env else Effective("skip", "default"))
 
-    # DREAM-151: always the global file's (a project file may not set the engine).
-    engine = saved.get("engine", {})
-    rows["engine.parallel"] = (Effective(engine["parallel"], "global") if "parallel" in engine
-                               else Effective(ENGINE_PARALLEL_DEFAULT, "default"))
-    rows["engine.slot_ctx"] = (Effective(engine["slot_ctx"], "global") if "slot_ctx" in engine
-                               else Effective(ENGINE_SLOT_CTX_DEFAULT, "default"))
-    # DREAM-197: the global file's too (a project file may not set it).
+    # Max agents: always the global file's (a project file may not set it); None = no limit.
     nested = saved.get("nested", {})
-    rows[NESTED_SETTING] = (Effective(nested["max_workers"], "global") if "max_workers" in nested
-                            else Effective(MAX_WORKERS_DEFAULT, "default"))
+    rows[NESTED_SETTING] = (Effective(nested["max_agents"], "global") if "max_agents" in nested
+                            else Effective(None, "default"))
 
     roles = saved.get("roles", {})
     agents = roles.get("subagents", {})
@@ -888,17 +891,14 @@ def paths() -> dict[str, str]:
 SETTABLE = ("output.max_tokens", "behaviour.vitals", STYLE_SETTING, *CONTEXT_SETTINGS, "roles.main.model|provider",
             "roles.subagents.<agent>.model|provider",
             "roles.verifier.model|provider", "roles.filer.model|provider", "roles.critic.provider|model",
-            "roles.evaluator.model|provider", "roles.reviewer.model|provider", *ENGINE_SETTINGS, NESTED_SETTING)
+            "roles.evaluator.model|provider", "roles.reviewer.model|provider", NESTED_SETTING)
 _APPLIES = {"output": "the next Dream start (DREAM_MAX_TOKENS still wins); /maxtokens <n> changes the running one",
-            "nested": "new sessions, and the running session from its next reply when set in Studio or with /settings; "
-                      "the local engine's queue (--max-queue) from the engine's next start, and a running engine keeps "
-                      "its queue",
+            "nested": "new sessions, and the running session from its next reply when set in Studio or with /settings "
+                      "(a Claude-led session when it starts)",
             "behaviour": "new sessions, and this one when set with /settings",
             "roles": "the next run of that job: a sub-agent, the verifier or the filer, /critique, the loop's "
                      "evaluator, the prompt optimizer or /review",
-            "roles.main": "the next time Dream attaches to a local endpoint that lists several models",
-            "engine": "the next time Dream starts the local engine (a model loaded from the picker or the desktop); "
-                      "a running engine keeps its lanes"}
+            "roles.main": "the next time Dream attaches to a local endpoint that lists several models"}
 
 
 def _applies(key: str) -> str:
@@ -932,13 +932,6 @@ def _role_key(key: str) -> tuple[tuple[str, ...], str | None]:
 
 
 def _parse(key: str, text: str) -> Any:
-    if key in ENGINE_SETTINGS:
-        digits = text.strip().replace("_", "").replace(",", "")
-        if not digits.isdigit():
-            raise ValueError(f"{key} must be a whole number, not {text!r}")
-        value = int(digits)
-        _validate_engine({"engine": {key.split(".")[1]: value}})
-        return value
     if key == "output.max_tokens":
         digits = text.replace("_", "").replace(",", "")
         if not digits.isdigit():
@@ -968,24 +961,17 @@ def _parse(key: str, text: str) -> Any:
     if key == NESTED_SETTING:
         digits = text.strip()
         if not (digits.isascii() and digits.isdigit()):
-            raise ValueError(_MAX_WORKERS_TEXT)
+            raise ValueError(_MAX_AGENTS_TEXT)
         value = int(digits)
-        _validate_nested({"nested": {"max_workers": value}})
+        _validate_nested({"nested": {"max_agents": value}})
         return value
     raise AssertionError(key)
 
 
-def _engine_global_only(key: str, scope: str) -> None:
-    """engine.* lives in the global file only (DREAM-151): the project scope is refused before anything is opened."""
-    if key in ENGINE_SETTINGS and scope != "global":
-        raise ValueError(f"{key}: a project file may not set the engine; it is set on this computer, in the global "
-                         f"file {shown_path(settings_path())} (run it without --project)")
-
-
 def _nested_global_only(key: str, scope: str) -> None:
-    """nested.max_workers too (DREAM-197): a cloned repository's project file may not raise the worker cap."""
+    """nested.max_agents lives in the global file only: a cloned repository's project file may not change it."""
     if key == NESTED_SETTING and scope != "global":
-        raise ValueError(f"{key}: a project file may not set nested.max_workers; it is set on this computer, in the "
+        raise ValueError(f"{key}: a project file may not set nested.max_agents; it is set on this computer, in the "
                          f"global file {shown_path(settings_path())} (run it without --project)")
 
 
@@ -1018,7 +1004,7 @@ def _write(change, scope: str) -> None:
     merge that no longer works."""
     target = _scope_target(scope)
     if target is None:
-        update_settings(lambda saved: validate(change(saved)))
+        update_settings(lambda saved: validate(_retire(change(saved))))
         return
     saved = read_global()
 
@@ -1064,10 +1050,8 @@ def set_value(key: str, text: str, *, scope: str = "global") -> str:
     """Save one setting through the runtime-settings writer, to the global file or (`scope` "project") the
     workspace's project file, which takes model names only; returns when it applies. Refused values write
     nothing."""
-    _engine_global_only(key, scope)
     _nested_global_only(key, scope)
-    if key in ("output.max_tokens", "behaviour.vitals", STYLE_SETTING, *CONTEXT_SETTINGS, *ENGINE_SETTINGS,
-               NESTED_SETTING):
+    if key in ("output.max_tokens", "behaviour.vitals", STYLE_SETTING, *CONTEXT_SETTINGS, NESTED_SETTING):
         section, name = key.split(".")
         value = _parse(key, text)
         if name in _CONTEXT_RANGES:
@@ -1132,10 +1116,8 @@ def unset_value(key: str, *, scope: str = "global") -> str:
     """Remove one setting from the global file or (`scope` "project") the project file; an emptied section or
     role goes too. Removing a field the role requires (a sub-agent's, the verifier's or the filer's model; the
     critic's provider) removes the role."""
-    _engine_global_only(key, scope)
     _nested_global_only(key, scope)
-    if key in ("output.max_tokens", "behaviour.vitals", STYLE_SETTING, *CONTEXT_SETTINGS, *ENGINE_SETTINGS,
-               NESTED_SETTING):
+    if key in ("output.max_tokens", "behaviour.vitals", STYLE_SETTING, *CONTEXT_SETTINGS, NESTED_SETTING):
         section, name = key.split(".")
         trail = [(section,), (section, name)]
     elif key.startswith("roles."):
@@ -1280,45 +1262,13 @@ def _model_names(rows: dict[str, Effective], provider: str) -> tuple[str, list[s
     return f"checked against {shown_path(url)}: {len(listed)} served ({served})", warnings
 
 
-def _engine_lanes(rows: dict[str, Effective]) -> tuple[str, list[str]]:
-    """(the report's `engine_lanes` line, warnings), DREAM-151: the lanes the running local engine serves -- its
-    /props total_slots -- against engine.parallel. Asked only when an engine setting is saved (DREAM-148's rule:
-    nothing configured asks nothing); an engine that does not answer is the line, never an error."""
-    parallel, slot_ctx = rows["engine.parallel"], rows["engine.slot_ctx"]
-    if parallel.source != "global" and slot_ctx.source != "global":
-        return "engine.parallel is not set; nothing to check", []
-    from ..local import machx
-    root = machx.BASE_URL.removesuffix("/v1")
-    answer = _engine_get(root + "/props", "answer")
-    if isinstance(answer, str):
-        head = "engine not running" if answer.startswith("nothing answered") else "the engine did not answer /props"
-        return f"{head}; lanes not checked ({answer})", []
-    status, body = answer
-    try:
-        props = json.loads(body) if status == 200 else None
-    except (ValueError, RecursionError):
-        props = None
-    slots = props.get("total_slots") if isinstance(props, dict) else None
-    served = slots if type(slots) is int and slots >= 1 else None
-    doing = (f"serves {served} lane{'' if served == 1 else 's'}" if served is not None
-             else "does not report its lanes")
-    line = f"the running engine at {shown_path(root)} {doing}" + (
-        " (its /props total_slots)" if served is not None else f" (HTTP {status}, no /props total_slots)")
-    warnings = []
-    if parallel.source == "global" and served != parallel.value:
-        from ..local.models import LANE_MODELS_LISTED
-        warnings.append(f"engine.parallel: {parallel.value} lanes are set, but the running engine {doing}; the "
-                        "setting applies the next time Dream starts the engine, and only to a model that serves "
-                        f"lanes ({LANE_MODELS_LISTED})")
-    return line, warnings
-
-
 def check(*, provider: str = "machx", model: str | None = None, ask_engine: bool = False) -> dict:
     """Is the file usable, what does it hold that nothing reads, which values does the environment override,
     which roles are set, and what to watch. The saved Council file (var/moe.json) is checked too: unusable, it is a
     warning naming it and its entry (DREAM-148). `ask_engine` (`dream settings check`, /settings check) also asks
-    the local engine's /v1/models whether each role model it runs is served (_model_names) and, when an engine setting
-    is saved, its /props how many lanes it serves (_engine_lanes, DREAM-151); without it nothing is asked."""
+    the local engine's /v1/models whether each role model it runs is served (_model_names); without it nothing is
+    asked. The retired keys (nested.max_workers, the engine section) are neither errors nor warnings: nothing reads
+    them."""
     from . import moe
     project = project_path()
     report: dict[str, Any] = {"ok": True, "file": str(settings_path()),
@@ -1347,9 +1297,6 @@ def check(*, provider: str = "machx", model: str | None = None, ask_engine: bool
     if ask_engine:
         report["model_names"], warnings = _model_names(rows, provider)
         report["warnings"] += warnings
-        report["engine_lanes"], warnings = _engine_lanes(rows)
-        report["warnings"] += warnings
     else:
         report["model_names"] = "not checked here (dream settings check and /settings check ask the local engine)"
-        report["engine_lanes"] = "not checked here (dream settings check and /settings check ask the local engine)"
     return report

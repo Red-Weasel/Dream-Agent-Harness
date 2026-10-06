@@ -11,6 +11,7 @@ from playwright.async_api import async_playwright, expect
 
 from dream.gui.bus import EventBus
 from dream.gui.server import StudioServer
+from chat_more import more
 
 
 STATUS = {
@@ -93,7 +94,7 @@ async def council(tmp_path, monkeypatch):
 
 
 async def open_council(page):
-    await page.get_by_role("button", name="Council", exact=True).click()
+    await more(page, "dream-council-open")           # Chat shows no bars (DREAM-240): Council is under More
     await expect(page.get_by_label("Main provider")).to_have_value("openai")
 
 
@@ -115,7 +116,7 @@ async def test_configuration_is_explicit_and_reload_reads_applied_choices(counci
         "orchestrator_effort": None, "advisor_efforts": {}}}
     assert all(h.get("x-dream-token") == server.token for h in api.headers)
     await page.reload()
-    await page.get_by_role("button", name="Council", exact=True).click()
+    await more(page, "dream-council-open")
     await expect(page.get_by_label("Main provider")).to_have_value("codex")
     await expect(page.get_by_label("Main model", exact=True)).to_have_value("new-main")
     await expect(page.get_by_label("Enable Local HTTP")).to_be_checked()
@@ -136,7 +137,7 @@ async def test_failed_save_and_refresh_preserve_draft_and_question(council):
     await expect(page.get_by_label("Main model", exact=True)).to_have_value("draft-main")
     await expect(page.get_by_label("Question for advisors")).to_have_value("Keep this question")
     await page.get_by_role("button", name="Close Council").click()
-    await page.get_by_role("button", name="Council", exact=True).click()
+    await more(page, "dream-council-open")
     await expect(page.get_by_label("Main model", exact=True)).to_have_value("draft-main")
     await page.get_by_role("button", name="Use current configuration").click()
     await expect(page.get_by_label("Main model", exact=True)).to_have_value("main-model")
@@ -190,7 +191,7 @@ async def test_keyboard_mobile_and_status_failure_recovery(council):
     page, api, _, errors = council
     await page.set_viewport_size({"width": 390, "height": 844})
     api.fail["council_status"] = (401, "Expired")
-    await page.get_by_role("button", name="Council", exact=True).click()
+    await more(page, "dream-council-open")
     await expect(page.get_by_role("alert")).to_contain_text("token")
     del api.fail["council_status"]
     await page.get_by_role("button", name="Refresh Council").click()
@@ -198,7 +199,7 @@ async def test_keyboard_mobile_and_status_failure_recovery(council):
     assert await page.locator("#dream-council").evaluate("e => e.scrollWidth <= e.clientWidth")
     await page.screenshot(path="/tmp/dream-council-mobile.png")
     await page.keyboard.press("Escape")
-    await expect(page.get_by_role("button", name="Council", exact=True)).to_be_focused()
+    await expect(page.locator("#chat-menu > summary")).to_be_focused()            # back to where it was opened from
     assert not errors
 
 
@@ -217,7 +218,7 @@ async def test_effort_choices_propagate_without_inventing_unknown_levels(council
     await page.locator(".council-scroll").evaluate("e => { e.scrollTop = 0; }")
     await page.screenshot(path="/tmp/dream-council-desktop.png")
     await page.reload()
-    await page.get_by_role("button", name="Council", exact=True).click()
+    await more(page, "dream-council-open")
     await expect(page.get_by_label("Main effort", exact=True)).to_have_value("high")
     await expect(page.get_by_label("Claude member effort")).to_have_value("max")
     await page.get_by_label("Main provider").select_option("openai")
@@ -262,7 +263,7 @@ async def test_same_provider_advisor_preserves_independent_model_and_effort(coun
     api.status["config"].update(orchestrator="codex", advisors=["codex"],
                                 advisor_models={"codex": "reviewer-model"},
                                 advisor_efforts={"codex": "xhigh"})
-    await page.get_by_role("button", name="Council", exact=True).click()
+    await more(page, "dream-council-open")
     await expect(page.get_by_label("Enable Codex")).to_be_checked()
     await expect(page.get_by_label("Codex member model", exact=True)).to_have_value("reviewer-model")
     await expect(page.get_by_label("Codex member effort")).to_have_value("xhigh")

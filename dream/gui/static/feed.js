@@ -9,8 +9,25 @@
     return el;
   };
   const stringify = value => typeof value === 'string' ? value : JSON.stringify(value ?? {}, null, 2);
+  // A tool row names the one thing the call touched (a path, a command, a query) and carries the kind of call for its
+  // icon, as the Nested view's rows do (nested.js: the same keys in the same order); any other input shows as given.
+  const DELEGATE = new Set(['task', 'Task', 'Agent']);
+  const toolKind = n => { const t = String(n).split('__').pop().toLowerCase();
+    return /^(read|read_file|read_many_files|view|cat|open_file|notebookread)$/.test(t) ? 'read' : /(write|edit|replace|patch|create_file|notebookedit)/.test(t) ? 'edit'
+      : /(bash|shell|exec|terminal|command)/.test(t) ? 'run' : /(search|grep|glob|find|fetch|browse|web)/.test(t) ? 'search' : 'tool'; };
+  function target(name, v) {
+    const cut = s => { s = s.trim().replace(/\s+/g, ' '); return s.length > 160 ? s.slice(0, 160) + '…' : s; };
+    if(v && typeof v === 'object' && !Array.isArray(v)) {
+      if(DELEGATE.has(String(name).split('__').pop())) { const what = [v.description, v.prompt].find(x => typeof x === 'string' && x.trim()); if(what) return cut((typeof v.subagent_type === 'string' && v.subagent_type ? v.subagent_type + ': ' : '') + what); }
+      for(const k of ['path', 'file_path', 'filePath', 'file', 'notebook_path', 'command', 'cmd', 'query', 'pattern', 'url']) if(typeof v[k] === 'string' && v[k].trim()) return cut(v[k]);
+    }
+    const args = stringify(v ?? {});
+    return args.slice(0, 110) + (args.length > 110 ? '…' : '');
+  }
   function mount(stream) {
-    let mode = 'detailed';
+    // The desktop's Chat reads as the Nested view does (the owner, 2026-10-04): thinking and tool calls are one line
+    // each until opened, so its starting choice is Compact; the plain browser page starts Detailed. A saved choice wins.
+    let mode = typeof COMPANION !== 'undefined' && COMPANION ? 'compact' : 'detailed';
     try { const saved = localStorage.getItem('dream.feed.detail'); if(modes.has(saved)) mode = saved; } catch {}
     const toolbar = node('div', '', 'feed-toolbar');
     const label = node('label', 'Feed detail '), select = document.createElement('select');
@@ -37,19 +54,34 @@
       el.textContent = state.text + (state.total > limit ? `\n[Display truncated at ${limit.toLocaleString()} characters; ${state.total.toLocaleString()} received.]` : '');
     }
     function thinking(parent) {
-      const el = detail('think', 'Thinking · reported by the model');
-      el.querySelector('summary').append(node('span', '', 'think-live'));
-      el.append(node('div', '')); parent.append(el); return el;
+      // The summary: the label, where the text comes from, the latest line (.think-live) and the END of the whole text
+      // (.think-tail, the collapsed line of the desktop's Chat: chat-nested.css shows it instead of the latest line).
+      const el = detail('think', ''), tail = node('span', '', 'think-tail');
+      tail.append(node('bdi', ''));
+      el.querySelector('summary').append(node('span', 'Thinking', 'think-label'), node('span', ' · reported by the model', 'think-src'), node('span', '', 'think-live'), tail);
+      el.append(node('div', ''));
+      // Opened while its text still arrives (the desktop's Chat starts it as one line), the box shows its newest line
+      // and follows from there; a finished block opens at its beginning, to be read.
+      el.addEventListener('toggle', () => { if(el.open && performance.now() - (el._at || 0) < 3000) { const body = el.querySelector('div'); body.scrollTop = body.scrollHeight; } });
+      parent.append(el); return el;
     }
     // Append reasoning and show its latest line on the summary, so a collapsed
     // block still shows the model working (Dream fix #21).
+    // The box is capped and scrolls by itself (feed.css): it follows its newest line while the reasoning
+    // streams, so the reader always sees the text being written -- unless they scrolled up inside it to
+    // read, then it stays put until they return to the end (the owner, 2026-10-03).
     function thought(el, delta) {
       const body = el.querySelector('div');
+      el._at = performance.now();
+      const atEnd = body.scrollHeight - body.scrollTop - body.clientHeight <= 24;
       appendText(body, delta);
+      if(atEnd) body.scrollTop = body.scrollHeight;
       const text = (textState.get(body) || {text: ''}).text;
       const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
       const live = el.querySelector('summary .think-live');
       if(live) live.textContent = lines.length ? ' · ' + lines[lines.length - 1].slice(-160) : '';
+      const tail = el.querySelector('summary .think-tail bdi');
+      if(tail) tail.textContent = text.slice(-1200).replace(/\s+/g, ' ').trim().slice(-600);
     }
     function inspectable(parent, label, raw, preview = false) {
       const value = stringify(raw), retained = value.slice(0, MAX_TOOL), truncated = value.length > MAX_TOOL;
@@ -68,8 +100,9 @@
     function tool(parent, data) {
       const el = detail('tool', '');
       const summary = el.querySelector('summary');
-      const args = stringify(data.input ?? {});
-      summary.append(node('span', String(data.name || 'tool'), 'tname'), node('span', args.slice(0, 110) + (args.length > 110 ? '…' : ''), 'targ'), node('span', 'Running', 'badge'));
+      const args = stringify(data.input ?? {}), name = String(data.name || 'tool');
+      el.dataset.kind = toolKind(name);
+      summary.append(node('span', name, 'tname'), node('span', target(name, data.input), 'targ'), node('span', 'Running', 'badge'));
       inspectable(el, 'Inspect arguments', args);
       parent.append(el); return el;
     }

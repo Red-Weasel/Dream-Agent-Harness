@@ -39,6 +39,24 @@ box.council-startup { padding: 12px 0; }
 checkbutton:focus, expander:focus { outline-color: #AA94FF; outline-offset: 2px; }
 checkbutton:disabled { color: #718095; }
 label.headline { font-size: 29px; font-weight: 600; color: @dream_fg; }
+/* The load screen (the owner's plan of 2026-10-01): readable field names and sources, and the Recommended settings card
+   to the right of the fields. */
+label.field-name { font-size: 14px; color: @dream_fg; }
+label.source { font-size: 12px; color: @dream_dim; }
+box.rec-card { background: @dream_panel; border: 1px solid @dream_line; border-radius: 14px; padding: 18px 20px 20px 20px; }
+label.rec-title { font-size: 18px; font-weight: 600; color: @dream_fg; }
+label.rec-source { font-size: 12px; color: @dream_faint; }
+box.rec-mode { background: @dream_bg2; border: 1px solid @dream_line; border-radius: 10px; padding: 12px 14px 14px 14px; }
+box.rec-mode.active { background: #1E1A33; border-color: #8F7BE0; }
+label.rec-mode-name { font-size: 12px; font-weight: 700; letter-spacing: 1.4px; color: @dream_dim; }
+box.rec-mode.active label.rec-mode-name { color: #D6CBFF; }
+label.rec-pill { font-size: 11px; font-weight: 600; color: #1A1426; background-color: #AA94FF; border-radius: 9px; padding: 1px 9px; }
+label.rec-when { font-size: 13px; color: @dream_dim; }
+label.rec-key { font-size: 14px; color: @dream_dim; }
+label.rec-value { font-size: 14px; font-weight: 600; color: @dream_fg; }
+label.rec-heading { font-size: 13px; font-weight: 700; letter-spacing: 0.4px; color: @dream_fg; }
+label.rec-level { font-size: 13px; font-weight: 600; color: #F6A06A; }
+label.rec-text { font-size: 13px; color: @dream_dim; }
 label.description { font-size: 14px; color: @dream_dim; }
 label.kicker { font-size: 12px; color: #F6A06A; }
 label.shortcut { font-family: monospace; color: @dream_dim; background: @dream_raised; border-radius: 5px; padding: 4px 8px; }

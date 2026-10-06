@@ -42,7 +42,8 @@ def test_the_pane_labels_every_still_and_offers_the_way_back():
     paint = ui[ui.index("function paintArtifact"):]
     image = paint[paint.index("if(a.kind === 'image'){"):paint.index("lastLive = artOpen;")]
     assert "'Still image: ' + a.path" in image and "'Back to live page · ' + live.title" in image
-    assert "openArtifact(lastLive)" in image and "not the running page" in image
+    # the way back keeps the panel where the still was showing: beside the chat stays beside the chat (DREAM-235)
+    assert "openArtifact(lastLive, {chat: artChat})" in image and "not the running page" in image
     assert ".stillbar{" in ui and ".stilltag{" in ui
     assert "Still image · ${a.path}" in (UI / "companion.js").read_text()
 

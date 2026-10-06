@@ -14,9 +14,19 @@ async def _saved_compact(page):
     await expect(page.get_by_label('Feed detail')).to_have_value('compact')
 
 
-async def test_detailed_default_preserves_reasoning_choice_and_inspectable_tools(chat, tmp_path):
-    server, page, prompts, _ = chat
+async def _saved_detailed(page):
+    """Detailed the way a returning user has it: the desktop starts Compact since DREAM-240 (one line per item, as the
+    Nested view), and Detailed is the saved choice."""
+    await expect(page.get_by_label('Feed detail')).to_have_value('compact')
+    await page.evaluate("localStorage.setItem('dream.feed.detail', 'detailed')")
+    await page.reload()
+    await expect(page.locator('#stat')).to_have_text('Ready')
     await expect(page.get_by_label('Feed detail')).to_have_value('detailed')
+
+
+async def test_detailed_preserves_reasoning_choice_and_inspectable_tools(chat, tmp_path):
+    server, page, prompts, _ = chat
+    await _saved_detailed(page)
     server.bus.publish(Event('thinking_delta', 'I will inspect the supplied file.'))
     thinking = page.locator('#stream > .think')
     await expect(thinking).to_have_attribute('open', '')
@@ -63,6 +73,7 @@ async def test_compact_setting_persists_and_replay_is_display_only(chat):
 
 async def test_display_bounds_large_reasoning_args_and_results(chat):
     server, page, _, _ = chat
+    await _saved_detailed(page)
     server.bus.publish(Event('thinking_delta', 'r' * 80000))
     await expect(page.locator('.think')).to_contain_text('Display truncated')
     assert len(await page.locator('.think div').text_content()) < 66000
@@ -121,6 +132,7 @@ async def test_failed_tool_opens_with_readable_error_in_compact(chat):
 
 async def test_worker_report_labels_nonstream_reasoning_and_real_reconnect(chat):
     server, page, prompts, _ = chat
+    await _saved_detailed(page)
     report = {'run_id':'verifier-run', 'agent':'Verifier', 'phase':'subagent', 'round':1}
     server.bus.publish(Event('agent_activity', {**report, 'kind':'status','status':'running'}))
     server.bus.publish(Event('agent_activity', {**report, 'kind':'request','request_index':1}))

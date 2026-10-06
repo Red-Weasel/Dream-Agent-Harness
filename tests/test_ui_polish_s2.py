@@ -58,19 +58,15 @@ async def test_round_actions_and_pills_are_one_family_and_the_gutter_holds(libra
         assert gap['pad'] >= 10 and gap['clear'] >= 10, (width, gap)     # an overlay scrollbar lands in the gutter
         assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth'), width
         assert await page.locator('#dream-skills-page').evaluate('e => e.scrollWidth <= e.clientWidth'), width
+    # DREAM-242: no view shows the page's bars; their pill family is the row of chips under the composer now.
+    await page.locator('#dream-nav-chat').click()
     await page.set_viewport_size({'width': 2549, 'height': 1337})
-    pills = page.locator('#dream-workbar button:visible')
+    pills = page.locator('footer .hint :is(#chat-mode, #read-twice, #fresh-start, .cn-chip):visible')
     shapes = [await pills.nth(i).evaluate(PILL) for i in range(await pills.count())]
     assert len(shapes) >= 5 and all(s == shapes[0] for s in shapes), shapes
-    # Gate S2 round 3: the narrow Tools menu never shows at desktop widths; at phone width it shows with its chevron.
-    summary = page.locator('#dream-workspace-tools>summary')
-    for width, height in [(2549, 1337), (1100, 800)]:
+    for width, height in [(2549, 1337), (1100, 800), (390, 844)]:
         await page.set_viewport_size({'width': width, 'height': height})
-        await expect(summary).to_be_hidden()
-    header = ['#dream-controls-open', '#dream-council-open', '#dream-create-open']
-    shapes = [[v for i, v in enumerate(await page.locator(sel).evaluate(PILL)) if i not in (2, 3)] for sel in header]
-    assert all(s == shapes[0] for s in shapes), shapes          # one pill shape for the top row; colour marks the role
-    await page.set_viewport_size({'width': 390, 'height': 844})
-    await expect(summary).to_be_visible()
-    assert await summary.evaluate("s => getComputedStyle(s, '::after').content") == '"▾"'
+        for bar in ('body > header', '#dream-workbar', '#dream-workspace-tools>summary'):
+            await expect(page.locator(bar)).to_be_hidden()
+        assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth'), width
     assert prompts == []

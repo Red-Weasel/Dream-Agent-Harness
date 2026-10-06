@@ -14,3 +14,9 @@
 .companion .composer:focus-within { border-color:var(--cyan); }
 .incomplete-answer { color:#e9c983; }
 .incomplete-answer button { margin-left:8px; }
+
+/* A file dragged over the window: the whole page is the drop target (attachments.js). The veil sits above the
+   preview frame so the drop reaches this page, not the frame. */
+.file-drag-page::after { content:"Drop files to attach"; position:fixed; inset:0; z-index:60; display:grid; place-items:center;
+  font:600 18px/1.4 var(--sans); color:var(--fg); background:color-mix(in srgb, var(--bg0) 74%, transparent);
+  outline:2px dashed var(--cyan); outline-offset:-14px; }

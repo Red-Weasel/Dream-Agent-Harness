@@ -1,6 +1,7 @@
 """Workspace navigation keeps the current session and unsent work intact."""
 from test_desktop_chat import chat
 from playwright.async_api import expect
+from chat_more import more
 
 async def test_home_palette_and_navigation_preserve_draft(chat):
     _, page, prompts, controls = chat
@@ -37,6 +38,9 @@ async def test_output_compare_does_not_overwrite_or_send(chat):
     for text in ['first preserved version','second preserved version']:
         srv.bus.publish(Event('studio',{'op':'show','path':'rocket.html','content':'<!doctype html><h1>'+text+'</h1>'}))
         await expect(page.frame_locator('#artbody iframe').locator('h1')).to_have_text(text)
+    # Compare is the Artifacts tab's tool (DREAM-235): the panel beside the chat hands the page over to it
+    await page.locator('#artmore').click()
+    await page.locator('#artstudio').click()
     await page.locator('#dream-output-compare').click()
     await expect(page.locator('#dream-compare')).to_contain_text('first preserved version')
     await expect(page.locator('#dream-compare')).to_contain_text('second preserved version')
@@ -57,7 +61,7 @@ async def test_home_and_chat_visual_fixtures(chat):
 async def test_classic_switch_preserves_unsent_draft_without_reload(chat):
     _,page,prompts,_=chat
     await page.locator('#input').fill('Keep this draft across presentation changes')
-    await page.locator('#dream-inspect-toggle').click()
+    await more(page,'dream-inspect-toggle')
     await page.get_by_role('button',name='Use classic presentation',exact=True).click()
     await expect(page.locator('#dream-nav')).to_be_hidden()
     await expect(page.locator('#input')).to_have_value('Keep this draft across presentation changes')
@@ -69,10 +73,10 @@ async def test_council_activity_reconnect_does_not_repeat_work(chat):
     from dream.core.backends.base import Event
     srv,page,prompts,_=chat
     srv.bus.publish(Event('council_activity',{'task_id':'task-a','member':'codex','state':'completed','model':'fixture','ownership':'sequential workspace writer'}))
-    await page.locator('#dream-inspect-toggle').click()
+    await more(page,'dream-inspect-toggle')
     await expect(page.locator('#dream-council-activity')).to_contain_text('completed')
     await page.reload()
-    await page.locator('#dream-inspect-toggle').click()
+    await more(page,'dream-inspect-toggle')
     await expect(page.locator('#dream-council-activity')).to_contain_text('completed')
     assert prompts==[]
 
@@ -80,7 +84,7 @@ async def test_context_overlay_cannot_hide_new_approval(chat):
     import asyncio
     srv,page,_,_=chat
     await page.set_viewport_size({'width':390,'height':844})
-    await page.locator('#dream-inspect-toggle').click()
+    await more(page,'dream-inspect-toggle')
     pending=asyncio.create_task(srv.request_permission('run_bash',{'command':'pwd'},'Fixture approval',{'y':'Allow once','n':'Deny'}))
     try:
         await expect(page.locator('#dream-inspector')).to_be_hidden()

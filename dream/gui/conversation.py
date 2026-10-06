@@ -11,7 +11,7 @@ import threading
 class Conversation:
     KINDS = {'user', 'text_delta', 'thinking_delta', 'assistant_done',
              'tool_use', 'tool_result', 'system', 'error', 'result', 'turn_start', 'turn_end',
-             'turn_timing', 'background_work', 'agent_activity', 'council_activity', 'plan'}
+             'turn_timing', 'background_work', 'agent_activity', 'council_activity', 'plan', 'artifact'}
 
     def __init__(self, max_chars=2_000_000, max_events=2000):
         self.events = deque()

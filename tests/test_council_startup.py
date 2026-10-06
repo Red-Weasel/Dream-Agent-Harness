@@ -277,13 +277,14 @@ def test_catalog_returns_saved_advanced_settings_and_advisor_metadata(monkeypatc
 
 @pytest.mark.parametrize('fields', [{'thinking': (Mock(), {})}, {}])
 def test_native_load_screen_says_when_a_model_has_no_recommendation(onboarding_class, fields):
-    # DREAM-180: an uncarded model (or an engine `recommended: null`) keeps the snapshot's place with one muted line;
-    # the Mode/Effort row stays hidden.
+    # DREAM-180: an uncarded model (or an engine `recommended: null`) has no Mode/Effort row. Since the owner's plan of
+    # 2026-10-01 the Recommended settings card says so (protocol.recommended_card), in the place the snapshot had.
+    from dream.desktop.protocol import recommended_card
     panel = onboarding_class.__new__(onboarding_class)
-    panel.settings, panel.fields = {'modes': None}, fields
-    order = Mock()
-    panel.mode_box, panel.mode_row, panel.snapshot = order.box, order.row, order.snapshot
+    panel.settings, panel.fields = {'modes': None, 'notes': []}, fields
+    panel.mode_box, rendered = Mock(), []
+    panel.render_card = lambda: rendered.append(recommended_card(panel.modes, panel.settings['notes']))
     panel.fill_mode()
-    panel.snapshot.set_text.assert_called_once_with('Recommendations not available for this model')
-    names = [name for name, *_ in order.mock_calls]
-    assert names.index('box.show_all') < names.index('row.hide')
+    panel.mode_box.hide.assert_called_once()
+    assert [card['empty'] for card in rendered] == [
+        "This model's card gives no recommended settings, so the fields show the engine's own defaults."]

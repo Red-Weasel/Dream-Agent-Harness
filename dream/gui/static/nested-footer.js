@@ -5,7 +5,8 @@
    and clicks them, so there is one request path and one truth, never a second copy of the state. The numbers come
    from real `stats` events, computed as the chat's perf() does (index.html), and stay blank until one arrives. The
    tabs follow the ARIA tabs pattern (roving tabindex, the arrows, Home and End) over the workers area nested.js
-   renders and the Workflows panel of nested-workflows.js. Own containers only; nested.js is not touched. */
+   renders and the Workflows panel of nested-workflows.js; they open the orchestrator column's header row, as in the v2
+   mockup. Own containers only; nested.js is not touched. */
 (() => {
   'use strict';
   if(!COMPANION) return;
@@ -17,6 +18,9 @@
   const foot=document.createElement('div'); foot.className='nd-foot'; foot.id='nd-foot';
   foot.innerHTML='<button type="button" class="nd-chip" id="nd-mode" aria-live="polite" title="Permission mode. Click to cycle to the next mode." hidden></button>'
     +'<button type="button" class="nd-chip" id="nd-read-twice" aria-pressed="false" title="Read ×2: the model reads each message you type twice (only your words, never the history) (applies to the chat composer for now)">Read ×2</button>'
+    +'<button type="button" class="nd-chip" id="nd-effort" title="Reasoning effort for this session. Click to open Controls." hidden></button>'
+    +'<button type="button" class="nd-chip" id="nd-vision" title="Image input for this session. Click to open Controls." hidden></button>'
+    +'<button type="button" class="nd-chip nd-rec" id="nd-recording" hidden></button>'
     +'<span class="nd-perf" id="nd-perf" title="Last request: prompt reading speed, generation speed, and how full the context window is"></span>';
   const modeChip=foot.querySelector('#nd-mode'), readChip=foot.querySelector('#nd-read-twice'), perfEl=foot.querySelector('#nd-perf');
   function mountFoot(){
@@ -57,6 +61,18 @@
   if(chatRead){ new MutationObserver(syncRead).observe(chatRead,{attributes:true,attributeFilter:['aria-pressed']}); syncRead(); }
   else readChip.hidden=true;
   readChip.onclick=()=>chatRead?.click();
+  // Effort and Vision: the work bar's two chips (workspace.js), mirrored here because that bar is not shown in this view
+  // (DREAM-239). The text is the bar's own, read whenever it changes; a click is a click on the bar's chip.
+  for(const [mine,theirs] of [['nd-effort','dream-effort'],['nd-vision','dream-vision']]){
+    const chip=foot.querySelector('#'+mine), source=$(theirs); if(!source) continue;
+    const sync=()=>{ chip.textContent=source.textContent; chip.hidden=/unreported$/i.test(source.textContent); if(source.dataset.state) chip.dataset.state=source.dataset.state; };
+    new MutationObserver(sync).observe(source,{childList:true,characterData:true,subtree:true,attributes:true,attributeFilter:['data-state']}); sync();
+    chip.onclick=()=>source.click();
+  }
+  // A screen recording in progress: the header's indicator (controls.js), mirrored for the same reason (DREAM-240).
+  { const chip=foot.querySelector('#nd-recording'), source=$('dream-recording');
+    if(source){ const sync=()=>{ chip.textContent=source.textContent; chip.hidden=source.hidden; chip.title=source.title; };
+      new MutationObserver(sync).observe(source,{childList:true,characterData:true,subtree:true,attributes:true}); sync(); chip.onclick=()=>source.click(); } }
   // The last request's speed and context use, as the chat's perf() computes them: prefill over the tokens really read
   // (prompt minus cached), decode over the generated ones, context as prompt / window. Nothing until a stats event.
   const num=v=>typeof v==='number'&&Number.isFinite(v)?v:0;
@@ -80,8 +96,8 @@
   const VIEWS=['agents','workflows']; let view='agents';
   function mountTabs(){
     if(tabs.isConnected) return true;
-    const top=page.querySelector('.nd-top'); if(!top) return false;
-    const title=top.querySelector('.nd-title'); if(title) title.after(tabs); else top.prepend(tabs);
+    const head=page.querySelector('.nd-orch .nd-head'); if(!head) return false;
+    head.prepend(tabs);
     return true;
   }
   // The workers area nested.js renders is the Agents panel: it gets the id and the roles the tabs point at, nothing else.

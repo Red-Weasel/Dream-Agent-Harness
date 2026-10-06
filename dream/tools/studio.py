@@ -53,6 +53,19 @@ def _page(args: dict[str, Any]) -> tuple[Path | None, dict[str, Any] | None]:
     return p, None
 
 
+# What the owner's preview panel shows of a file that is not a page (DREAM-236). The session's artifact registry
+# opens it there when `done` or `show_to_user` returns; without a registry (no Studio) nothing shows it.
+_PANEL_SHOWS = {"report": "a report (its Markdown rendered)", "image": "an image", "video": "a video with a player",
+                "audio": "audio with a player", "document": "a document card (Open in app, Download)"}
+
+
+def _panel_shows(p: Path) -> str | None:
+    """How the preview panel shows ``p`` when it is not a page, or None when it does not show it."""
+    registry = getattr(studio(), "artifacts", None)
+    kind = registry.shows(str(p)) if registry is not None else None
+    return _PANEL_SHOWS.get(kind or "")
+
+
 def _summarize(logs: list[str]) -> str:
     errors = [l for l in logs if l.startswith(("error:", "console.error:"))]
     blocked = [l for l in logs if l.startswith("blocked:")]
@@ -288,10 +301,18 @@ async def get_webview_logs(args: dict[str, Any]) -> dict[str, Any]:
     "Open a file in the USER's Studio panel so they can see and interact with it, and "
     "load it in your hidden frame too. Use this to direct their attention to something "
     "mid-task. For end-of-turn delivery use `done` instead — it does the same AND "
-    "returns console errors.",
+    "returns console errors. A .md report, an image, a video, an audio file or a document "
+    "(.pdf .docx .pptx .xlsx) opens in their preview panel as it is.",
     {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
 )
 async def show_to_user(args: dict[str, Any]) -> dict[str, Any]:
+    raw = args.get("path")
+    other = _resolve(str(raw)) if raw else None
+    if other is not None and other.is_file() and other.suffix.lower() not in _RENDERABLE:
+        shows = _panel_shows(other)
+        if shows:
+            return ok(f"{other.name} is open in the user's preview panel as {shows}. It is not loaded in your "
+                      "hidden frame (that renders HTML and SVG only).")
     p, bad = _page(args)
     if bad:
         return bad
@@ -315,7 +336,8 @@ async def show_to_user(args: dict[str, Any]) -> dict[str, Any]:
     "If errors come back, fix them and call done again. A clean `done` is the "
     "end-of-turn handoff; the verifier runs after it, never before.",
     {"type": "object", "properties": {"path": {"type": "string",
-                                               "description": "HTML file to surface to the user."}},
+                                               "description": "HTML file to surface to the user; a .md report, an "
+                                                              "image, a media file or a document is shown as it is."}},
      "required": ["path"]},
 )
 async def done(args: dict[str, Any]) -> dict[str, Any]:
@@ -333,11 +355,16 @@ async def _done(args: dict[str, Any]) -> dict[str, Any]:
     raw = args.get("path")
     other = _resolve(str(raw)) if raw else None
     if other is not None and other.is_file() and other.suffix.lower() not in _RENDERABLE:
-        # A handoff doc, a script, data: the deliverable is the file on disk. It is
-        # not previewed, and a non-HTML deliverable is not a failed turn (live, a
-        # HANDOFF.md turned a finished turn into "delivery_failed", Dream fix #20).
-        return ok(f"Delivered {other} ({other.stat().st_size:,} bytes). Only HTML/SVG render in "
-                  "the Studio panel, so this file is not previewed; it is on disk for the user.")
+        # A handoff doc, a script, data: the deliverable is the file on disk, and a non-HTML
+        # deliverable is not a failed turn (live, a HANDOFF.md turned a finished turn into
+        # "delivery_failed", Dream fix #20). A report, an image, a media file or a document
+        # opens in the owner's preview panel (DREAM-236); any other file is not previewed.
+        shows = _panel_shows(other)
+        if shows:
+            return ok(f"Delivered {other} ({other.stat().st_size:,} bytes). The user's preview panel shows it "
+                      f"as {shows}.")
+        return ok(f"Delivered {other} ({other.stat().st_size:,} bytes). The preview panel does not show this "
+                  "kind of file, so it is not previewed; it is on disk for the user.")
     p, bad = _page(args)
     if bad:
         return bad
@@ -639,7 +666,7 @@ async def screenshot_user_view(args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "present_fs_item_for_download",
     "Present a file, a folder, or the whole workspace as a download to the user: a "
-    "download card appears in Studio (a folder is zipped). Omit path for the entire "
+    "download card appears in the chat (a folder is zipped). Omit path for the entire "
     "workspace. Use it to hand over a finished deliverable — a PDF, a bundle, an "
     "exported deck — not for files the user only needs to see.",
     {"type": "object", "properties": {
@@ -663,7 +690,8 @@ async def present_fs_item_for_download(args: dict[str, Any]) -> dict[str, Any]:
         return ok(f"Studio is not open, so there is no download card; the {kind} is at {target}. "
                   f"Tell the user the path.")
     emit(Event("studio", {"op": "download", "path": rel, "label": label, "kind": kind}))
-    return ok(f"Download card '{label}' ({kind}) is showing in Studio.")
+    return ok(f"Download card '{label}' ({kind}) is showing in the chat (and in the Nested view's conversation), "
+              f"not in the Studio tab.")
 
 
 # --- run_script -------------------------------------------------------------------------

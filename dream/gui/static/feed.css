@@ -26,3 +26,5 @@
 .think > summary .think-live { opacity:.7; font-style:italic; }
 .think:not([open]) > summary { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .think[open] > summary .think-live { display:none; }
+/* The end of the whole reasoning, for the desktop Chat's collapsed line (chat-nested.css shows it there). */
+.think > summary .think-tail { display:none; }

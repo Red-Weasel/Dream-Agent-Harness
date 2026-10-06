@@ -160,7 +160,7 @@ async def test_stats_render_prefill_decode_and_context_as_the_chat_does_and_are_
 async def test_tabs_follow_the_aria_pattern_and_workflows_is_an_honest_empty_state(studio):
     async with studio() as s:
         page = await open_nested(s)
-        tabs = page.locator('.nd-top [role=tablist]')
+        tabs = page.locator('.nd-orch .nd-head [role=tablist]')                   # the orchestrator's header row (v2 mockup)
         await expect(tabs).to_have_attribute('aria-label', 'Views')
         agents, workflows = page.locator('#nd-tab-agents'), page.locator('#nd-tab-workflows')
         await expect(tabs.locator('[role=tab]')).to_have_text(['Agents', 'Workflows'])
@@ -201,7 +201,7 @@ async def test_tabs_follow_the_aria_pattern_and_workflows_is_an_honest_empty_sta
         await expect(s.page.locator('#mc-guided-open')).to_have_attribute('aria-expanded', 'true')
         await s.page.locator('#mc-close').click()
         await expect(s.page.locator('#dream-create')).not_to_have_attribute('open', '')
-        await expect(s.page.locator('#dream-create-open')).to_be_focused()        # Create's close returns focus there
+        await expect(wf.locator('#nd-wf-create')).to_be_focused()                 # Create's own button is in a bar this view hides: the door gets the focus back
         # the keyboard: arrows move selection and focus, Home and End reach the ends
         await workflows.focus()
         await s.page.keyboard.press('ArrowLeft')
@@ -298,8 +298,8 @@ async def test_mounts_survive_a_side_swap_and_a_reset_layout(studio):
             await expect(page.locator('.nd-pnow .nd-pk')).to_have_text('Phase 2 of 4')
             await expect(page.locator('.nd-orch .nd-composer #nd-foot')).to_be_visible()
             await expect(page.locator('#nd-perf')).to_have_text(PERF)
-            await expect(page.locator('.nd-top [role=tablist] [role=tab]')).to_have_count(2)
-            assert await page.locator('#nd-tab-agents').evaluate('e => e.previousElementSibling === null && e.parentElement.previousElementSibling.classList.contains("nd-title")')
+            await expect(page.locator('.nd-orch .nd-head [role=tablist] [role=tab]')).to_have_count(2)
+            assert await page.locator('#nd-tab-agents').evaluate('e => e.previousElementSibling === null && e.parentElement.previousElementSibling === null && e.parentElement.parentElement.classList.contains("nd-head")')
 
         await mounted()
         assert await orch.evaluate(left) < await main.evaluate(left)
@@ -313,7 +313,9 @@ async def test_mounts_survive_a_side_swap_and_a_reset_layout(studio):
         assert await orch.evaluate(left) > await wf.evaluate(left)
         assert await wf.evaluate('e => Math.abs(e.getBoundingClientRect().left - e.parentElement.getBoundingClientRect().left) < 1')
         await mounted()
+        await page.locator('#nd-custom-btn').click()                      # Reset layout sits in Customize (the v2 mockup)
         await page.locator('#nd-reset').click()                           # Reset layout: back to the left, nothing lost
+        await page.locator('#nd-custom-close').click()
         await expect(page.locator('.nd-app')).to_have_attribute('data-side', 'left')
         await expect(wf).to_be_visible()
         assert await orch.evaluate(left) < await wf.evaluate(left)

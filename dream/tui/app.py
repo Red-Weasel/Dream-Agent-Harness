@@ -251,8 +251,13 @@ class App(CouncilControls):
         self._council_pending: CouncilRequest | None = None
         self._accepting_input = False
         from ..gui.bus import EventBus
+        from ..gui.artifacts import ArtifactRegistry
 
         self.bus = EventBus()
+        # What a turn builds (DREAM-233): pages the model writes, as artifacts with versions on disk; the Chat panel
+        # and its cards come from the events this publishes. Fed from _render_event, read by Studio's content route.
+        self.artifacts = ArtifactRegistry(lambda: self.workspace, lambda: self.engine.session_id if self.engine else "",
+                                          self.bus.publish)
         # This session's errors, kept in FULL (the collapsed run line only shows a
         # short preview) so /errors can recall exactly what went wrong.
         self.session_errors: list[tuple[str, str]] = []
@@ -1081,6 +1086,7 @@ class App(CouncilControls):
         if self.studio is not None:
             self.studio.retain_show(ev)
         self.bus.publish(ev)
+        self.artifacts.observe(ev)   # a page the turn wrote becomes an artifact; the panel's events follow (DREAM-233)
         self._feed_cockpit(ev)
         if ev.kind == "text_delta":
             self.renderer.assistant_delta(ev.data)
@@ -1767,6 +1773,7 @@ class App(CouncilControls):
                 on_control=self._runtime_control,
                 follow_model_view=follow_default(),   # the pane follows the model's view (DREAM-104)
                 sleepwalk=True,                       # Sleepwalk schedules fire while Dream is open (DREAM-158)
+                artifacts=self.artifacts,             # the content route and the follow-up note (DREAM-233)
             )
             url = await self.studio.start()
             set_studio(self.studio)

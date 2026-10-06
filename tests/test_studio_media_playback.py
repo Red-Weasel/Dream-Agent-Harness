@@ -38,14 +38,36 @@ async def _advanced(video):
     await video.evaluate("v => new Promise((resolve, reject) => { if (v.currentTime > 0) return resolve(); const timer = setTimeout(() => reject(new Error('video clock did not advance')), 3000); v.addEventListener('timeupdate', () => { if(v.currentTime > 0) { clearTimeout(timer); resolve(); } }); })")
 
 
-async def test_visible_studio_still_blocks_remote_media(controls):
+REMOTE = ('<video id="remote" src="{src}"></video><script>window.violations=[];'
+          'document.addEventListener("securitypolicyviolation",e=>window.violations.push(e.effectiveDirective));</script>')
+
+
+async def _try_remote(controls, src, *, internet):
+    """Show a page whose video is at `src` with the header's internet switch on or off (DREAM-234); return
+    (the frame saw a media-src violation, the URLs the browser actually asked for)."""
     server, page, api, url, errors = controls
     requested = []
-    await page.route('https://media.example.invalid/**', lambda route: (requested.append(route.request.url), route.abort())[-1])
-    body = '<video id="remote" src="https://media.example.invalid/clip.mp4"></video><script>window.violations=[];document.addEventListener("securitypolicyviolation",e=>window.violations.push(e.effectiveDirective));</script>'
-    server.retain_show(Event('studio', {'op':'show','path':'remote.html','content':body}))
+    await page.route('**://media.example.invalid/**', lambda route: (requested.append(route.request.url), route.abort())[-1])
+    await page.add_init_script("try{ localStorage.setItem('dream.previewNet', '%s'); }catch(e){}" % ('1' if internet else '0'))
+    server.retain_show(Event('studio', {'op':'show','path':'remote.html','content':REMOTE.format(src=src)}))
     await page.goto(url)
     video = page.frame_locator('#artbody iframe').locator('video')
     await video.evaluate("v => { v.load(); return new Promise(resolve => { v.onerror=resolve; setTimeout(resolve, 1000); }); }")
-    assert await video.evaluate("v => window.violations.includes('media-src')")
-    assert not requested
+    return await video.evaluate("v => window.violations.includes('media-src')"), requested
+
+
+async def test_visible_studio_blocks_remote_media_with_the_internet_switch_off(controls):
+    blocked, requested = await _try_remote(controls, 'https://media.example.invalid/clip.mp4', internet=False)
+    assert blocked and not requested
+
+
+async def test_visible_studio_asks_for_https_media_with_the_internet_switch_on(controls):
+    # The owner's rule (DREAM-234): the preview has the internet. On is the default; the request leaves the frame.
+    blocked, requested = await _try_remote(controls, 'https://media.example.invalid/clip.mp4', internet=True)
+    assert not blocked and set(requested) == {'https://media.example.invalid/clip.mp4'}   # asked for (the element, then load())
+
+
+async def test_visible_studio_never_loads_plain_http_media(controls):
+    # https only: a plain-http address (a loopback service, a LAN box) stays out of reach with the switch on.
+    blocked, requested = await _try_remote(controls, 'http://media.example.invalid/clip.mp4', internet=True)
+    assert blocked and not requested

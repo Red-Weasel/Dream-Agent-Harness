@@ -308,3 +308,38 @@ async def test_done_with_a_non_html_deliverable_is_not_a_failure(ws):
     assert not out.get("is_error")
     text = out["content"][0]["text"]
     assert "Delivered" in text and "not previewed" in text
+
+
+async def test_done_and_show_to_user_say_what_the_panel_shows_of_a_report_an_image_and_a_document(ws):
+    """DREAM-236: with the session's artifact registry on the Studio server, a report, an image, a media file or a
+    document is shown in the owner's preview panel, and the two show tools say so; any other file, a file in a
+    hidden folder, and every such file without a registry, is not previewed."""
+    from types import SimpleNamespace
+
+    from dream.gui.artifacts import ArtifactRegistry
+
+    tmp, emitted = ws
+    registry = ArtifactRegistry(tmp, "t", lambda ev: None, store=tmp / "var" / "artifacts")
+    (tmp / "report.md").write_text("# Findings\n")
+    (tmp / "chart.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (tmp / "deck.pptx").write_bytes(b"PK")
+    (tmp / "data.csv").write_text("a,b\n")
+    (tmp / ".cache").mkdir()
+    (tmp / ".cache" / "notes.md").write_text("# hidden\n")
+    out = await done.handler({"path": "report.md"})          # no registry yet: the fixture's bare Studio
+    assert not _failed(out) and "not previewed" in _text(out)
+    assert _failed(await show_to_user.handler({"path": "report.md"}))
+    set_studio(SimpleNamespace(artifacts=registry))
+    out = await done.handler({"path": "report.md"})
+    assert not _failed(out) and _text(out).startswith("Delivered ")
+    assert "preview panel shows it as a report (its Markdown rendered)" in _text(out) and "not previewed" not in _text(out)
+    out = await show_to_user.handler({"path": "chart.png"})
+    assert not _failed(out) and "chart.png is open in the user's preview panel as an image" in _text(out)
+    out = await show_to_user.handler({"path": "deck.pptx"})
+    assert not _failed(out) and "a document card (Open in app, Download)" in _text(out)
+    out = await done.handler({"path": "data.csv"})
+    assert not _failed(out) and "not previewed" in _text(out)
+    assert _failed(await show_to_user.handler({"path": "data.csv"}))
+    out = await done.handler({"path": ".cache/notes.md"})
+    assert not _failed(out) and "not previewed" in _text(out), "the registry skips hidden folders, so nothing shows it"
+    assert emitted == [], "no studio show for a file the frame does not render"

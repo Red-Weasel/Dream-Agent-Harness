@@ -12,6 +12,7 @@ from playwright.async_api import async_playwright, expect
 from dream.core.backends.base import Event
 from dream.gui.bus import EventBus
 from dream.gui.server import StudioServer
+from chat_more import more
 
 
 PAGE = """<!doctype html><html><head><style>
@@ -27,11 +28,16 @@ input{display:block;padding:10px;margin:18px 0;border:1px solid #9ca99e}
 
 
 @pytest.fixture
-async def studio(tmp_path, monkeypatch):
+async def studio(request, tmp_path, monkeypatch):
+    """The companion page on an isolated StudioServer. The session's workspace is the test's own folder, or a sub-folder of
+    it under the name a test asks for with `parametrize("studio", [name], indirect=True)`: the workbar's first button
+    shows the folder's name. (Other test files import this fixture, so it needs no second fixture of this module.)"""
     monkeypatch.delenv("DREAM_DESKTOP_SESSION_FILE", raising=False)
+    workspace = tmp_path / request.param if getattr(request, "param", None) else tmp_path
+    workspace.mkdir(exist_ok=True)
     prompts = []
     srv = StudioServer(EventBus(), on_prompt=prompts.append,
-                       session={"workspace": str(tmp_path), "provider": "test", "model": "fixture"})
+                       session={"workspace": str(workspace), "provider": "test", "model": "fixture"})
     url = await srv.start()
     try:
         async with async_playwright() as p:
@@ -67,6 +73,12 @@ async def no_overflow(page):
             assert box["x"] >= 0 and box["x"] + box["width"] <= width, (selector, box)
 
 
+# The 800 px measurement below is of the frame under a ONE-row workbar. pytest names a test's folder after the test
+# (`test_chat_is_primary_and_previ0`, 31 characters) and the bar's first button shows that name: in a wider fallback font
+# (DejaVu Sans on the CI runner, where the page's own fonts are not installed) the bar's last item, Tools, wrapped to a
+# second row -- 38 px -- and the frame was 379.8 px high where 410 is expected (CI run 36980971824; reproduced here with
+# a DejaVu-only font configuration). The layout must not depend on the test's own name, so the folder gets a short one.
+@pytest.mark.parametrize("studio", ["garden"], indirect=True)
 async def test_chat_is_primary_and_preview_and_external_mode_are_preserved(studio, tmp_path):
     srv, page, url, _, errors = studio
     await ready(page, url)
@@ -100,10 +112,12 @@ async def test_chat_is_primary_and_preview_and_external_mode_are_preserved(studi
     await page.locator("#artver").select_option("0")
     await expect(page.frame_locator("#artbody iframe").locator("h1")).to_have_text("A little room to grow.")
     await page.get_by_role("button", name="Close preview", exact=True).click()
+    # Closing in the tab returns to its home: the Artifacts list (DREAM-235; it was the empty Studio with the select above it)
     await expect(page.locator("#studio-empty")).to_be_visible()
     await expect(page.locator("#artbody iframe")).to_have_count(0)
-    await page.get_by_label("Choose an artifact").select_option("file:garden.html")
+    await page.locator("#art-home-list .art-row", has_text="garden.html").get_by_role("button", name="Open", exact=True).click()
     await expect(page.frame_locator("#artbody iframe").locator("h1")).to_have_text("A little room to bloom.")
+    await expect(page.get_by_label("Choose an artifact")).to_have_value("file:garden.html")   # the viewer's own switcher
     await page.set_viewport_size({"width": 800, "height": 800})
     # Expanded Studio dedicates the workspace to the existing frame; no reload.
     await page.locator("#dream-output-expand").click()
@@ -234,8 +248,7 @@ async def test_design_checkpoints_keyboard_and_retry_states(studio, tmp_path):
     await ready(page, url)
     await show(srv, page)
     await page.route("**/api/assets", lambda route: route.fulfill(json={"assets": []}))
-    await page.locator("#dream-workspace-tools > summary").click()
-    await page.locator("#studio-design").click()
+    await more(page, "studio-design")                # the Artifacts tab shows no bars (DREAM-240): Design is under More
     await expect(page.get_by_role("heading", name="Build a shared design language")).to_be_visible()
     await expect(page.get_by_role("tab", name="Design system")).to_be_focused()
     await page.keyboard.press("Home")
@@ -244,10 +257,10 @@ async def test_design_checkpoints_keyboard_and_retry_states(studio, tmp_path):
     await expect(page.get_by_role("tab", name="Checkpoints")).to_be_focused()
     await page.keyboard.press("Escape")
     await expect(page.locator("#rail")).to_be_hidden()
-    await expect(page.locator("#studio-design")).to_be_focused()
+    await expect(page.locator("#chat-menu > summary")).to_be_focused()    # the drawer gives the focus back to the menu
     await page.unroute("**/api/assets")
     await page.route("**/api/assets", lambda route: route.fulfill(status=503, json={"error": "unavailable"}))
-    await page.locator("#studio-design").click()
+    await more(page, "studio-design")
     await expect(page.get_by_role("heading", name="Could not load design system")).to_be_visible()
     await page.unroute("**/api/assets")
     await page.route("**/api/assets", lambda route: route.fulfill(json={"assets": [{
@@ -258,7 +271,7 @@ async def test_design_checkpoints_keyboard_and_retry_states(studio, tmp_path):
     await expect(page.locator("#rail")).to_be_hidden()
     await expect(page.locator("#artname")).to_have_text("Type specimen")
     await page.route("**/api/checkpoints", lambda route: route.fulfill(json={"checkpoints": []}))
-    await page.locator("#studio-checkpoints").click()
+    await more(page, "studio-checkpoints")
     await expect(page.get_by_role("heading", name="A place to return to")).to_be_visible()
     await page.screenshot(path=str(tmp_path / "companion-checkpoints.png"))
     await page.unroute("**/api/checkpoints")

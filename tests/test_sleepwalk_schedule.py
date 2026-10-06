@@ -119,6 +119,10 @@ async def test_tick_fires_once_and_the_missed_policy(home, monkeypatch):
         assert 'Missed while Dream was closed' in store.read_run(auto['id'], store.runs()[0]['run'])['error']
         # disabled: nothing fires
         store.save({**store.load()[0], 'enabled': False})
+        # the save stamped last_slot with today's real date: put it before the slot, so only the switch stops it
+        data = json.loads((home / 'automations.json').read_text())
+        data['automations'][0]['last_slot'] = at(2026, 9, 29, 7, 30).isoformat()
+        (home / 'automations.json').write_text(json.dumps(data))
         assert await sched.tick(at(2026, 9, 30, 7, 31)) == []
     finally:
         await sched.stop()

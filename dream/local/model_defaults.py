@@ -50,6 +50,20 @@ def _number(key, value):
     return f'{value:.1f}' if key == 'temperature' and value == round(value, 1) else f'{value:g}'
 
 
+# The load screen's Recommended settings card (the owner's plan of 2026-10-01): each mode's values as rows, in this
+# order, with the model card's names for them.
+CARD_ROWS = (('temperature', 'Temperature'), ('top_p', 'Top-p'), ('top_k', 'Top-k'), ('min_p', 'Min-p'),
+             ('presence_penalty', 'Presence penalty'), ('repeat_penalty', 'Repetition penalty'))
+
+
+def _card_value(key, value):
+    """A value as the card shows it: whole numbers for top_k, else at least one decimal (1.0, 0.0, 0.95)."""
+    if key == 'top_k':
+        return f'{value:g}'
+    text = f'{value:g}'
+    return text if '.' in text or 'e' in text else text + '.0'
+
+
 def _tokens(value):
     if isinstance(value, dict):
         return f"{_tokens(value.get('reasoning'))} reasoning / {_tokens(value.get('answer'))} answer"
@@ -101,8 +115,13 @@ def recommended_modes(capabilities, architecture, thinking, meta):
         if output:
             shown.append('max output ' + _tokens(output))
         title = str(raw.get('label') or name.title())
+        rows = [[label, _card_value(key, card[key])] for key, label in CARD_ROWS if key in card]
+        if output:
+            rows.append(['Max output', _tokens(output)])
         modes[name] = {'values': {**NEUTRAL, **card}, 'when': str(raw.get('when', '')), 'label': title,
-                       'line': title + ' — ' + ' · '.join(shown)}
+                       'line': title + ' — ' + ' · '.join(shown), 'rows': rows,
+                       # the samplers the card leaves out, which the recommendation sets off (NEUTRAL)
+                       'unset': [label for key, label in CARD_ROWS if key in NEUTRAL and key not in card]}
     modes['active'] = 'instruct' if thinking is False and modes['instruct'] else 'thinking'
     return modes
 

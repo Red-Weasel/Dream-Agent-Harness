@@ -36,7 +36,8 @@ _STATIC = ('index.html', 'controls.js', 'controls.css', 'attachments.js', 'attac
            'workflows.js', 'workflows.css', 'projects.js', 'projects.css', 'feed.js', 'feed.css',
            'council.js', 'council.css', 'nested.js', 'nested.css', 'nested-drawer.js', 'nested-layout.js',
            'nested-customize.js',
-           'nested-plan.js', 'nested-plan.css', 'nested-footer.js', 'nested-footer.css', 'nested-workflows.js')
+           'nested-plan.js', 'nested-plan.css', 'nested-footer.js', 'nested-footer.css', 'nested-workflows.js',
+           'chat-nested.js', 'chat-nested.css', 'nested-pane.js', 'nested-pane.css')
 _REQUIRED = {f'dream/gui/static/{name}' for name in _STATIC} | {
     'dream/__init__.py', 'dream/__main__.py', 'dream/diagnostics.py', 'dream/environment.py', 'dream/agent_activity.py', 'dream/core/capabilities.py',
     'dream/core/inference_coordination.py', 'dream/local/load_lock.py',

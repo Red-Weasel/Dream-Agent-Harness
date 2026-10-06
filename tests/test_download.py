@@ -88,7 +88,7 @@ async def test_the_tool_shows_a_card_with_studio_and_names_the_path_without(ws):
     assert emitted == []
     set_studio(object())
     res = await present_fs_item_for_download.handler({"path": "deck.pdf", "label": "The deck"})
-    assert "is showing in Studio" in _text(res)
+    assert "is showing in the chat" in _text(res)
     (ev,) = emitted
     assert ev.kind == "studio" and ev.data == {"op": "download", "path": "deck.pdf", "label": "The deck", "kind": "file (4 bytes)"}
     res = await present_fs_item_for_download.handler({"path": "out"})

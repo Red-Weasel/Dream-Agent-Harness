@@ -53,9 +53,24 @@ const draftAttachments = (() => {
   }
   attach.onclick = () => picker.click();
   picker.onchange = () => { add(picker.files); picker.value=''; };
-  footer.addEventListener('dragover', e => { if(e.dataTransfer.types.includes('Files')) { e.preventDefault(); footer.classList.add('file-drag'); } });
-  footer.addEventListener('dragleave', e => { if(!footer.contains(e.relatedTarget)) footer.classList.remove('file-drag'); });
-  footer.addEventListener('drop', e => { if(e.dataTransfer.files.length){ e.preventDefault(); footer.classList.remove('file-drag'); add(e.dataTransfer.files); } });
+  // Files dropped anywhere on the window join the draft (the owner, 2026-10-03: [feedback]),
+  // while the composer is on screen and usable. Only a drag that carries files counts: the skill library and
+  // the Nested windows drag their own types. A veil over the page (attachments.css) says what a drop does and
+  // sits above the preview frame, which would otherwise swallow the drop.
+  const carriesFiles = e => !!e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+  const droppable = () => footer.offsetParent !== null && !footer.inert && !input.readOnly;
+  let dragDepth = 0;
+  const dragging = on => { footer.classList.toggle('file-drag', on); document.body.classList.toggle('file-drag-page', on); };
+  document.addEventListener('dragenter', e => { if(carriesFiles(e) && droppable()){ dragDepth++; dragging(true); } });
+  document.addEventListener('dragover', e => { if(carriesFiles(e) && droppable()){ e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
+  document.addEventListener('dragleave', e => { if(carriesFiles(e) && --dragDepth <= 0){ dragDepth = 0; dragging(false); } });
+  document.addEventListener('drop', e => {
+    if(!carriesFiles(e)) return;
+    dragDepth = 0; dragging(false);
+    if(!droppable()) return;
+    e.preventDefault();
+    if(e.dataTransfer.files.length) add(e.dataTransfer.files);
+  });
   input.addEventListener('paste', e => { if(e.clipboardData?.files.length){ e.preventDefault(); add(e.clipboardData.files); } });
   input.addEventListener('input', save);
   try {

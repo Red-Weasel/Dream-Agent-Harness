@@ -1,0 +1,224 @@
+/* The desktop page in the Nested view's look. DREAM-240 (the owner, 2026-10-04 03:08, screenshots of Chat, Artifacts
+   and Nested: [feedback]) did Chat and Artifacts; DREAM-242 (05:25: [feedback]) made the first two points the whole page's. Linked last; presentation only; the
+   plain browser page and the classic presentation keep their look.
+     1. Nothing above the work area, in any view: the page's header and work bar are not shown; what they held is the
+        More menu and the chips under the composer, and two alerts that float where a view has no composer
+        (chat-nested.js).
+     2. The palette is Nested's, for every view, dialog and drawer: the same values as nested.css's token block
+        (tests/test_chat_nested_look.py compares the two files), with Dream's theme tokens pointed at them.
+     3. The conversation reads as Nested's: a name over each message, no bubble, 14 px text, thinking as a rose-edged
+        line that opens, a tool call as one quiet line that opens.
+     4. Beside an open preview the chat is a column of its own from the top of the work area to the bottom, the
+        composer inside it, with a resize edge (chat-nested.js) -- Nested's orchestrator column. */
+html.dream-design.companion :is(body>header,#dream-workbar){display:none!important}
+
+html.dream-design.companion{
+  --nd-bg:#0b0a0e;--nd-card:#151318;--nd-raised:#1c1a21;--nd-hover:#221f28;--nd-select:#2a1f33;
+  --nd-line:#26232c;--nd-line-strong:#48434f;
+  --nd-fg1:#fafafa;--nd-fg2:#b3aeba;--nd-fg3:#918b98;
+  --nd-accent:#ff8a4c;--nd-on-accent:#1a0e08;--nd-rose:#ff7aa8;
+  --nd-accent-wash:rgba(255,138,76,.10);--nd-accent-line:rgba(255,138,76,.45);
+  --nd-ok:#58c98a;--nd-fail:#ff5566;
+  --nd-mono:ui-monospace,"SFMono-Regular",Menlo,monospace;
+  --nd-shadow:0 0 0 1px rgba(0,0,0,.4),0 24px 48px rgba(0,0,0,.55);
+  --bg0:var(--nd-bg);--bg:var(--nd-card);--bg2:var(--nd-raised);--panel:var(--nd-raised);--raised:var(--nd-hover);
+  --line:var(--nd-line);--line-strong:var(--nd-line-strong);--fg:var(--nd-fg1);--dim:var(--nd-fg2);--faint:var(--nd-fg3);
+  --ember:var(--nd-accent);--ember-soft:#ffa06c;--ember-ink:var(--nd-on-accent);--plum:var(--nd-select);--plum-line:var(--nd-line-strong);
+  --violet:var(--nd-fg2);--violet-soft:var(--nd-fg1);--cyan:var(--nd-fg2);--ok:var(--nd-ok);--err:var(--nd-fail);
+  --ch-surface:var(--nd-card);--ch-code:var(--nd-bg);--ch-bubble:var(--nd-hover);--ch-field:var(--nd-raised);
+  --ch-line:var(--nd-line);--ch-line-strong:var(--nd-line-strong);--ch-text:var(--nd-fg1);--ch-quiet:var(--nd-fg2);--ch-faint:var(--nd-fg3);
+  --ch-action:var(--nd-accent);--ch-action-hover:#ffa06c;--ch-action-ink:var(--nd-on-accent);--ch-focus:var(--nd-fg2);
+  --dream-glass:var(--nd-card);
+}
+html.dream-design.companion body{background:var(--nd-bg);color:var(--nd-fg1)}
+html.dream-design.companion :is(.split,footer){border-color:var(--nd-line);color:var(--nd-fg1)}
+/* The eclipse stays behind the welcome; a conversation and the Artifacts tab are flat. */
+html.dream-design.companion[data-dream-view=studio] .split,
+html.dream-design.companion[data-dream-view=chat] .split:has(#studio-interactions-empty[hidden]){--dream-art:none;background:var(--nd-bg)}
+html.dream-design.companion:not([data-dream-view=nested]) :is(button,a,select,input,textarea,summary,[tabindex]):focus-visible{outline:2px solid var(--nd-accent);outline-offset:2px}
+/* Design, Checkpoints and Metrics open the page's side drawer: at the right, above the view, as in Nested. */
+html.dream-design.companion:not([data-dream-view=nested]) #rail:not(.hide){z-index:6;inset:0 0 0 auto;width:min(560px,100%);border-left:1px solid var(--nd-line);box-shadow:-24px 0 48px rgba(0,0,0,.5)}
+
+/* ---- the conversation ------------------------------------------------------------------------------------------ */
+html.dream-design.companion[data-dream-view=chat]{--ch-col:960px}
+html.dream-design.companion[data-dream-view=chat] #main:has(#studio-interactions-empty[hidden]){padding:0 16px 16px;background:var(--nd-card)}
+html.dream-design.companion[data-dream-view=chat] #main .feed-toolbar{padding:12px 0;color:var(--nd-fg3)}
+html.dream-design.companion[data-dream-view=chat] .feed-toolbar select{border-color:var(--nd-line);border-radius:4px;background-color:var(--nd-raised);color:var(--nd-fg2)}
+html.dream-design.companion[data-dream-view=chat] .msg{margin:0 0 24px;font:400 14px/1.5 var(--sans)}   /* 24 px: an earlier message's action row lies in this gap */
+/* The names are shown, as Nested's "You" and "Orchestrator" are. */
+html.dream-design.companion[data-dream-view=chat] .msg .who{position:static;display:block;width:auto;height:auto;min-height:0;margin:0 0 4px;padding:0;overflow:visible;clip-path:none;white-space:normal;text-align:left;color:var(--nd-fg1);font:600 12px/1.5 var(--sans)}
+html.dream-design.companion[data-dream-view=chat] .msg .body{line-height:1.5}
+html.dream-design.companion[data-dream-view=chat] .you{align-items:stretch}
+html.dream-design.companion[data-dream-view=chat] .you .body{max-width:none;padding:0;border-radius:0;background:none;line-height:1.5}
+html.dream-design.companion[data-dream-view=chat] .you .msg-foot{left:0;right:auto}
+html.dream-design.companion[data-dream-view=chat] .body :is(p,ul,ol){margin:0 0 12px}
+html.dream-design.companion[data-dream-view=chat] .body :is(h1,h2,h3,h4){margin:16px 0 8px}
+html.dream-design.companion[data-dream-view=chat] .body h1{font-size:20px}
+html.dream-design.companion[data-dream-view=chat] .body h2{font-size:18px}
+html.dream-design.companion[data-dream-view=chat] .body h3{font-size:16px}
+html.dream-design.companion[data-dream-view=chat] .body h4{font-size:14px}
+html.dream-design.companion[data-dream-view=chat] .body>:first-child{margin-top:0}
+html.dream-design.companion[data-dream-view=chat] .body>:last-child{margin-bottom:0}
+html.dream-design.companion[data-dream-view=chat] .body a{color:var(--nd-accent)}
+html.dream-design.companion[data-dream-view=chat] .body code{border-radius:4px;font:12px/1.4 var(--nd-mono)}
+html.dream-design.companion[data-dream-view=chat] .body table{font-size:12px}
+html.dream-design.companion[data-dream-view=chat] .codeblock{margin:0 0 12px;border-radius:6px}
+html.dream-design.companion[data-dream-view=chat] .body pre code{font:12px/1.6 var(--nd-mono)}
+html.dream-design.companion[data-dream-view=chat] .sys{margin:0 0 12px;color:var(--nd-fg3)}
+html.dream-design.companion[data-dream-view=chat] .sys.error{color:var(--nd-fail)}
+html.dream-design.companion[data-dream-view=chat] .sys.dream-note{color:var(--nd-fg2)}
+
+/* Thinking: the rose edge; collapsed, one line that shows the END of the text across the row (the box runs right to
+   left, so what is cut is the older text at the left; the words stay left to right); open, the whole text in a box
+   that follows its newest line (feed.js). */
+html.dream-design.companion[data-dream-view=chat] .think{margin:0 0 8px;padding:0 0 0 12px;border-left:2px solid var(--nd-rose);color:var(--nd-fg2);font:400 12px/1.5 var(--sans);min-width:0}
+html.dream-design.companion[data-dream-view=chat] .think>summary{display:flex;align-items:center;gap:8px;min-height:32px;padding:0;list-style:none;color:var(--nd-rose);font-size:12px;cursor:pointer;overflow:visible}
+html.dream-design.companion[data-dream-view=chat] .think>summary::-webkit-details-marker{display:none}
+html.dream-design.companion[data-dream-view=chat] .think>summary::before{content:"";flex:none;width:0;height:0;border-left:5px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform 120ms linear}
+html.dream-design.companion[data-dream-view=chat] .think[open]>summary::before{transform:rotate(90deg)}
+html.dream-design.companion[data-dream-view=chat] .think>summary :is(.think-src,.think-live){display:none}
+html.dream-design.companion[data-dream-view=chat] .think>summary .think-label{flex:none}
+html.dream-design.companion[data-dream-view=chat] .think>summary .think-tail{display:block;flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;direction:rtl;text-align:left;color:var(--nd-fg2)}
+html.dream-design.companion[data-dream-view=chat] .think[open]>summary .think-tail{display:none}
+html.dream-design.companion[data-dream-view=chat] .think>div{margin:0 0 8px;padding:0;border:0;color:var(--nd-fg2);font-size:12px}
+
+/* A tool call: one quiet line -- an icon for its kind, its name, the one thing it touched, how it ended -- that opens
+   to its arguments and its result. */
+html.dream-design.companion[data-dream-view=chat] .tool{margin:0 0 4px;border:0;border-radius:0;background:none;min-width:0}
+html.dream-design.companion[data-dream-view=chat] .tool>summary{display:flex;align-items:center;gap:8px;min-height:24px;padding:0;list-style:none;color:var(--nd-fg2);font:400 12px/1.5 var(--sans);cursor:pointer}
+html.dream-design.companion[data-dream-view=chat] .tool>summary::-webkit-details-marker{display:none}
+html.dream-design.companion[data-dream-view=chat] .tool>summary::before{content:"";flex:none;width:16px;height:16px;background:currentColor;
+  -webkit-mask:var(--cn-ic) center/contain no-repeat;mask:var(--cn-ic) center/contain no-repeat;
+  --cn-ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.4'%3E%3Ccircle cx='8' cy='8' r='2.5'/%3E%3C/svg%3E")}
+html.dream-design.companion[data-dream-view=chat] .tool[data-kind=read]>summary::before{--cn-ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.4'%3E%3Cpath d='M4 2.5h5l3 3v8H4z'/%3E%3Cpath d='M9 2.5v3h3'/%3E%3C/svg%3E")}
+html.dream-design.companion[data-dream-view=chat] .tool[data-kind=edit]>summary::before{--cn-ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.4'%3E%3Cpath d='M3 13l1-3.5L10.5 3 13 5.5 6.5 12z'/%3E%3C/svg%3E")}
+html.dream-design.companion[data-dream-view=chat] .tool[data-kind=run]>summary::before{--cn-ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.4'%3E%3Cpath d='M3 4l4 4-4 4M8.5 12H13'/%3E%3C/svg%3E")}
+html.dream-design.companion[data-dream-view=chat] .tool[data-kind=search]>summary::before{--cn-ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.4'%3E%3Ccircle cx='7' cy='7' r='4'/%3E%3Cpath d='M10 10l3.5 3.5'/%3E%3C/svg%3E")}
+html.dream-design.companion[data-dream-view=chat] .tool .tname{flex:none;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--nd-fg2);font-weight:400}
+html.dream-design.companion[data-dream-view=chat] .tool .targ{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--nd-fg1);font:12px/1.5 var(--nd-mono)}
+html.dream-design.companion[data-dream-view=chat] .tool .badge{flex:none;margin-left:auto;color:var(--nd-fg2);font-size:12px}
+html.dream-design.companion[data-dream-view=chat] .tool.err .badge{color:var(--nd-fail)}
+html.dream-design.companion[data-dream-view=chat] .tool.incomplete .badge{color:var(--nd-fg2)}
+/* Open, its arguments and result sit under the line, in from the icon. An opened call shows its result's first lines
+   whatever the feed's detail says: the choice is what starts open. */
+html.dream-design.companion[data-dream-view=chat] .tool[open]{margin-bottom:8px}
+html.dream-design.companion[data-dream-view=chat] .tool>:not(summary){margin-left:24px}
+html.dream-design.companion[data-dream-view=chat] .tool pre{margin-block:4px;padding:8px 12px;border:1px solid var(--nd-line);border-radius:6px;background:var(--nd-bg);color:var(--nd-fg2);font:12px/1.5 var(--nd-mono)}
+html.dream-design.companion[data-dream-view=chat] .tool .feed-preview{color:var(--nd-fg1)}
+html.dream-design.companion[data-dream-view=chat] [data-feed-detail=compact] .tool[open] .feed-preview{display:block}
+html.dream-design.companion[data-dream-view=chat] .feed-inspect{padding:2px 0;border:0;min-height:24px;background:none;color:var(--nd-fg2);font:12px/1.5 var(--sans)}
+html.dream-design.companion[data-dream-view=chat] .feed-inspect:hover:not(:disabled){background:none;color:var(--nd-fg1)}
+html.dream-design.companion[data-dream-view=chat] .tool-preview{margin:0 0 8px;padding:8px 12px;border:1px solid var(--nd-line);border-radius:6px;background:var(--nd-bg);color:var(--nd-fg2);font:12px/1.5 var(--nd-mono)}
+/* A worker's card, a permission request, a form, a download: Nested's cards. */
+html.dream-design.companion[data-dream-view=chat] .agent-card{margin:0 0 12px;border:1px solid var(--nd-line);border-radius:10px;background:var(--nd-raised)}
+html.dream-design.companion[data-dream-view=chat] :is(.permission-card,.qform){margin:0 0 12px;padding:12px;border:1px solid var(--nd-accent-line);border-radius:10px;background:var(--nd-accent-wash)}
+html.dream-design.companion[data-dream-view=chat] .permission-card h3{font-size:14px}
+html.dream-design.companion[data-dream-view=chat] :is(.permission-card,.qform .qacts) button{min-height:32px;padding:0 12px;border:1px solid var(--nd-line-strong);border-radius:6px;background:none;color:var(--nd-fg1);font:500 14px/1 var(--sans)}
+html.dream-design.companion[data-dream-view=chat] :is(.permission-card,.qform .qacts) button:hover:not(:disabled){background:var(--nd-hover);border-color:var(--nd-fg2)}
+html.dream-design.companion[data-dream-view=chat] :is(.dlcard,.vcard){border-color:var(--nd-line);border-radius:10px;background:var(--nd-raised)}
+html.dream-design.companion[data-dream-view=chat] .artcard{margin:0 0 12px;border-radius:10px}
+html.dream-design.companion[data-dream-view=chat] .artcard .go{border-radius:6px;font-weight:600}
+
+/* ---- the composer: Nested's box ------------------------------------------------------------------------------------ */
+html.dream-design.companion:not([data-dream-view=nested]) footer{padding:8px 16px 12px;background:var(--nd-card)}
+html.dream-design.companion:not([data-dream-view=nested]) .composer{padding:8px;border:1px solid var(--nd-line-strong);border-radius:10px;background:var(--nd-raised);box-shadow:none}
+html.dream-design.companion:not([data-dream-view=nested]) .composer:focus-within{border-color:var(--nd-fg2);box-shadow:none}
+html.dream-design.companion:not([data-dream-view=nested]) #input{min-height:32px;padding:5px 4px;font:400 14px/1.5 var(--sans)}
+html.dream-design.companion:not([data-dream-view=nested]) #attach{flex:0 0 32px;width:32px;min-width:32px;height:32px;min-height:32px;border-radius:6px}
+/* Send says Send, in the corona, as Nested's does; 10 px box, 8 px padding: its corner is 2 px. */
+html.dream-design.companion:not([data-dream-view=nested]) .composer:not(.working) #send{display:inline-flex;align-items:center;flex:0 0 auto;width:auto;min-width:0;height:32px;min-height:32px;padding:0 16px;border-radius:2px;font:600 14px/1 var(--sans)}
+html.dream-design.companion:not([data-dream-view=nested]) .composer:not(.working) #send::before{content:none}
+/* Stop: a square icon button; from 600 px it says Stop beside its square (chat.css), in the same place. */
+html.dream-design.companion:not([data-dream-view=nested]) #stop{flex:0 0 32px;width:32px;min-width:32px;height:32px;min-height:32px;border-radius:2px}
+@media(min-width:600px){html.dream-design.companion:not([data-dream-view=nested]) #stop:not([hidden]){flex:0 0 auto;width:auto;min-width:0}}
+html.dream-design.companion:not([data-dream-view=nested]) .composer.working #send,
+html.dream-design.companion:not([data-dream-view=nested]) #steer{height:32px;min-height:32px;border-radius:6px}
+/* The row under it: square chips, as Nested's footer has; the More menu and the page's status at its end. */
+html.dream-design.companion:not([data-dream-view=nested]) footer .hint{color:var(--nd-fg2);font-variant-numeric:tabular-nums}
+html.dream-design.companion:not([data-dream-view=nested]) :is(#chat-mode,#read-twice,#fresh-start,.cn-chip){display:inline-flex;align-items:center;gap:6px;height:24px;min-height:24px;padding:0 8px;border:1px solid var(--nd-line-strong);border-radius:4px;background:none;box-shadow:none;color:var(--nd-fg1);font:400 12px/1 var(--sans);white-space:nowrap;cursor:pointer}
+html.dream-design.companion:not([data-dream-view=nested]) :is(#chat-mode,#read-twice,#fresh-start,.cn-chip):hover:not(:disabled){border-color:var(--nd-line-strong);background:var(--nd-hover);color:var(--nd-fg1)}
+html.dream-design.companion:not([data-dream-view=nested]) #read-twice:not(.on){color:var(--nd-fg2)}
+html.dream-design.companion:not([data-dream-view=nested]) #read-twice.on{border-color:var(--nd-line-strong);background:var(--nd-select);color:var(--nd-fg1)}
+html.dream-design.companion:not([data-dream-view=nested]) #preset-pick select{border-color:var(--nd-line-strong);border-radius:4px;background-color:transparent;color:var(--nd-fg1)}
+/* A recording in progress and a waiting approval: said in the row while the bars that said them are not shown. In
+   Chat the approval's card is in the conversation itself, so its chip waits for the other views. Where a view has no
+   composer (Projects, Skills, Sleepwalk) the pair floats at the work area's lower right (#cn-float). */
+html.dream-design.companion:not([data-dream-view=nested]) :is(#cn-approval,#cn-approval-float){border-color:var(--nd-accent-line);background:var(--nd-accent-wash);color:var(--nd-accent)}
+html.dream-design.companion[data-dream-view=chat] #cn-approval{display:none}
+html.dream-design.companion:not([data-dream-view=nested]) :is(#cn-recording,#cn-recording-float){border-color:rgba(255,85,102,.45);background:rgba(255,85,102,.08);color:var(--nd-fail)}
+.cn-recording::before{content:"";flex:none;width:6px;height:6px;border-radius:50%;background:currentColor}
+html.dream-design.companion:not([data-dream-view=nested]) :is(#cn-recording,#cn-recording-float).cn-unknown{border-color:var(--nd-line-strong);background:none;color:var(--nd-fg2)}
+#cn-float{display:none;position:absolute;right:16px;bottom:16px;z-index:8;gap:8px}
+html.dream-design.companion:is([data-dream-view=projects],[data-dream-view=skills],[data-dream-view=sleepwalk]) #cn-float{display:flex}
+html.dream-design.companion:not([data-dream-view=nested]) #cn-float :is(#cn-approval-float,#cn-recording-float){box-shadow:var(--nd-shadow)}
+.cn-chip[hidden],.cn-menu[hidden],.cn-stat[hidden]{display:none!important}
+.cn-chip .cn-dot,.cn-stat .cn-dot{flex:none;width:6px;height:6px;border-radius:50%;background:var(--nd-fg3)}
+.cn-chip[data-state=on] .cn-dot,.cn-stat[data-on=true] .cn-dot{background:var(--nd-ok)}
+.cn-chip[data-state=off] .cn-dot{background:var(--nd-fail)}
+.cn-stat{display:inline-flex;align-items:center;gap:6px;color:var(--nd-fg2);white-space:nowrap}
+/* The plain page and the classic presentation keep the page's bars: no use for the mirrors there. */
+html:not(.dream-design.companion) :is(.cn-chip,.cn-menu,.cn-stat){display:none}
+.cn-menu{position:relative;flex:none}
+.cn-menu>summary{list-style:none}
+.cn-menu>summary::-webkit-details-marker{display:none}
+.cn-menu-list{position:absolute;left:0;bottom:calc(100% + 4px);z-index:20;min-width:184px;padding:4px;display:grid;gap:2px;background:var(--nd-card);border:1px solid var(--nd-line-strong);border-radius:6px;box-shadow:var(--nd-shadow)}
+html.dream-design.companion .cn-menu-list button{height:32px;min-height:32px;padding:0 12px;border:0;border-radius:4px;background:none;box-shadow:none;color:var(--nd-fg1);font:400 14px/1 var(--sans);text-align:left;white-space:nowrap}
+html.dream-design.companion .cn-menu-list button[hidden]{display:none}
+html.dream-design.companion .cn-menu-list button:is(:hover,:focus-visible){background:var(--nd-hover)}
+
+/* ---- the Artifacts panel and tab ---------------------------------------------------------------------------------- */
+html.dream-design.companion:not([data-dream-view=nested]) #artpanel{background:var(--nd-bg)}
+html.dream-design.companion:not([data-dream-view=nested]) :is(.artbar,.artnote,#dream-output-tools){background:var(--nd-bg)}
+html.dream-design.companion:not([data-dream-view=nested]) .artbar :is(.artmode,.artfollow,select){border-color:var(--nd-line);border-radius:6px;background-color:transparent;color:var(--nd-fg2)}
+html.dream-design.companion:not([data-dream-view=nested]) .artbar .artmode:hover{border-color:var(--nd-line-strong);background:none;color:var(--nd-fg1)}
+html.dream-design.companion:not([data-dream-view=nested]) .artbar .artmode.on{border-color:var(--nd-line-strong);background:var(--nd-select);color:var(--nd-fg1)}
+html.dream-design.companion:not([data-dream-view=nested]) .seg{border-radius:6px;background:var(--nd-raised)}
+html.dream-design.companion:not([data-dream-view=nested]) .seg button.on{background:var(--nd-select);color:var(--nd-fg1)}
+html.dream-design.companion:not([data-dream-view=nested]) #artbody{border-color:var(--nd-line);border-radius:10px}
+
+/* ---- beside an open preview: the chat is a column from the top of the work area to the bottom ------------------------
+   The composer sits in the column (the footer is as wide as the conversation: --cn-foot-w, measured by chat-nested.js)
+   and the preview runs down beside it (by the footer's height, --cn-foot-h). The resize edge is the panel's first
+   8 px: a glow when hovered, dragged or focused, as Nested's edges; the arrow keys move it too. */
+#chat-split{display:none}
+/* (:is(.chat-art,:not(.chat-art)) always matches: it gives these rules the weight of chat.css's body.chat-art ones,
+   whichever way the preview was opened beside the chat.) */
+@media (min-width:1000px){
+  html.dream-design.companion[data-dream-view=chat] body.has-artifact:is(.chat-art,:not(.chat-art)){--ch-col:none}
+  html.dream-design.companion[data-dream-view=chat] body.has-artifact:is(.chat-art,:not(.chat-art)) .split{overflow:visible}
+  html.dream-design.companion[data-dream-view=chat] body.has-artifact:is(.chat-art,:not(.chat-art)) #main{flex:0 0 clamp(360px,var(--dream-chat-share,46%),calc(100% - 388px));min-width:0;border-top-left-radius:15px}
+  html.dream-design.companion[data-dream-view=chat] body.has-artifact:is(.chat-art,:not(.chat-art)) #artpanel{flex:1 1 0;min-width:0;margin:0 -1px calc(-1 * var(--cn-foot-h,0px)) 0;border:solid var(--nd-line);border-width:0 1px 0 1px;border-radius:0 15px 0 0}
+  html.dream-design.companion[data-dream-view=chat] body.has-artifact:is(.chat-art,:not(.chat-art)).cn-column #artpanel{border-bottom-width:1px;border-bottom-right-radius:16px}
+  html.dream-design.companion[data-dream-view=chat] body.has-artifact:is(.chat-art,:not(.chat-art)).cn-column>footer{box-sizing:border-box;width:var(--cn-foot-w);margin-right:auto;border-right:0;border-bottom-right-radius:0}
+  html.dream-design.companion[data-dream-view=chat] body.has-artifact:is(.chat-art,:not(.chat-art)) #chat-split{display:block;position:absolute;z-index:3;inset:0 auto 0 0;width:8px;cursor:col-resize;touch-action:none}
+  #chat-split::after{content:"";position:absolute;inset:0 2px;border-radius:4px;transition:background-color 120ms linear}
+  #chat-split:is(:hover,.cn-drag,:focus-visible)::after{background:var(--nd-accent-line)}
+  html.dream-design.companion #chat-split:focus-visible{outline:none}
+  /* While the edge is dragged the page under the pointer must not take the pointer. */
+  body.cn-dragging #artbody{pointer-events:none}
+  body.cn-dragging{cursor:col-resize;-webkit-user-select:none;user-select:none}
+}
+
+/* ---- every other view (DREAM-242): Nested's flat surfaces, the corona for the one main action, one selected colour ---
+   The pages' own stylesheets carry their old purple and peach as literals; these rules repaint what shows. */
+/* Library pages (Projects, Skills, Lucid Control, Files, Sleepwalk): flat, as Nested is; the eclipse stays in the
+   page's banner, as Nested keeps it in its hero. */
+html.dream-design.companion .dream-library{background:var(--nd-bg)}
+html.dream-design.companion .dream-library .library-heading{border-color:var(--nd-line);border-radius:10px}
+html.dream-design.companion .library-status{color:var(--nd-fg2)!important}
+html.dream-design.companion .library-status[data-error=true]{color:var(--nd-fail)!important}
+/* The main action of a page or a dialog: the corona, as Nested's Send. */
+html.dream-design.companion :is(.dream-library button.primary,.sw-dialog button.primary,#dream-prompt-optimizer button.po-primary,.dc-dialog .dc-primary,#dream-council .council-primary,#ua-empty button,#ua-changes button){background:var(--nd-accent);border-color:var(--nd-accent);color:var(--nd-on-accent);font-weight:600;border-radius:6px;box-shadow:none}
+html.dream-design.companion :is(.dream-library button.primary,.sw-dialog button.primary,#dream-prompt-optimizer button.po-primary,.dc-dialog .dc-primary,#dream-council .council-primary,#ua-empty button,#ua-changes button):hover:not(:disabled){background:#ffa06c;border-color:#ffa06c;color:var(--nd-on-accent)}
+/* What is selected: Nested's selected tab. */
+html.dream-design.companion :is(.dream-library .sw-tabs button[aria-selected=true],.dc-dialog .dc-tabs [aria-selected=true],#dream-understand .ua-bar button[aria-selected=true],.sw-dialog button.sw-day[aria-pressed=true]:not(:disabled)){background:var(--nd-select);border-color:var(--nd-line-strong);color:var(--nd-fg1);box-shadow:none}
+html.dream-design.companion .sw-tabs{padding:2px;border-color:var(--nd-line);border-radius:8px;background:var(--nd-card)}
+html.dream-design.companion .dream-library .sw-tabs button{min-height:32px;border-radius:6px}
+html.dream-design.companion .sw-card.sw-build{border-color:var(--nd-line-strong)}
+html.dream-design.companion #dream-prompt-optimizer :focus-visible{outline:2px solid var(--nd-accent);outline-offset:2px}
+html.dream-design.companion #dream-prompt-optimizer .po-checkbox input{accent-color:var(--nd-accent)}
+html.dream-design.companion #dream-prompt-optimizer .po-warning{background:var(--nd-accent-wash);border-left-color:var(--nd-accent)}
+/* Home: Nested's card corners. */
+html.dream-design.companion .dream-hero{border-color:var(--nd-line);border-radius:10px}
+html.dream-design.companion .dream-home-card{border-color:var(--nd-line);border-radius:10px;background:var(--nd-card)}
+html.dream-design.companion .dream-eyebrow{color:var(--nd-accent)}

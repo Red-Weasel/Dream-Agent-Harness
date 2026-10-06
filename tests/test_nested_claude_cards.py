@@ -39,7 +39,7 @@ CLAUDE = AnthropicBackend.provider_label             # what hello.provider says 
 WORKER_ACTIONS = {'agent_stop', 'agent_pause', 'agent_resume', 'agents_pause_all', 'agent_message'}
 # Three launches of the SDK's Agent tool; their card run ids are "claude-" + these ids, alike in their first 12 characters.
 A, B, C = 'toolu_01AlphaQ7cXb2mNpR4sTvW8', 'toolu_01BravoK3dLf9gHjP2qWeR5', 'toolu_01CharlieM6nBv1cXz8aSdF'
-PEWTER = 'rgb(74, 74, 92)'                          # nested.css --nd-pewter: the pip of the states that are neither good nor bad
+PEWTER = 'rgb(74, 70, 80)'                          # nested.css --nd-pewter (the v2 mockup's): the pip of the states that are neither good nor bad
 EMPTY_CLAUDE = ("Claude's sub-agents appear here as read-only cards once one runs, and its local helpers "
                 "(delegate_local) as full cards you can pause, stop and message.")
 LANES_CLAUDE = "The local engine's lanes: how many of Claude's local helpers can run at once"

@@ -366,6 +366,20 @@ def test_a_path_that_is_not_this_processs_own_folder_is_never_made_nor_handed_ou
 needs_bwrap = pytest.mark.skipif(shutil.which("bwrap") is None, reason="needs bubblewrap")
 
 
+@pytest.fixture(scope="module")
+def bwrap_namespaces():
+    """Skip, in bubblewrap's own words, on a host where it cannot set up a user namespace. Ubuntu 24.04 restricts
+    unprivileged user namespaces through AppArmor (kernel.apparmor_restrict_unprivileged_userns=1); without a profile
+    for bubblewrap the two tests below failed on the public CI runner with "bwrap: setting up uid map: Permission
+    denied" (run 36980971824). The probe runs /bin/true under the tests' own flags and no Dream code, so it cannot
+    hide a failure of Dream's."""
+    probe = subprocess.run(["bwrap", "--dev-bind", "/", "/", "--die-with-parent", "--unshare-pid", "--proc", "/proc",
+                            "/bin/true"], capture_output=True, text=True, timeout=60)
+    if probe.returncode != 0:
+        pytest.skip("bubblewrap cannot set up a user namespace on this host: "
+                    + (probe.stderr.strip()[:300] or f"exit {probe.returncode}"))
+
+
 def _under_bwrap(flags: list[str], code: str) -> list[str]:
     """The command line that runs `code` in a fresh interpreter importing Dream from this checkout, under bubblewrap
     with `flags` and the file system as it is (the DREAM-206 gate's round-3 probes)."""
@@ -374,7 +388,7 @@ def _under_bwrap(flags: list[str], code: str) -> list[str]:
 
 
 @needs_bwrap
-def test_processes_in_separate_pid_namespaces_use_separate_folders(tmp_path):
+def test_processes_in_separate_pid_namespaces_use_separate_folders(tmp_path, bwrap_namespaces):
     """(1) Processes started together in separate PID namespaces share a pid and often a start tick (the gate: pid 2 and
     the same tick in 40 of 40 pairs), so the name also carries the PID namespace, the inode of /proc/self/ns/pid. Two
     children, each in a PID namespace of its own and both with one temp directory, take a lease and the launch lock:
@@ -411,7 +425,7 @@ def test_processes_in_separate_pid_namespaces_use_separate_folders(tmp_path):
 
 
 @needs_bwrap
-def test_without_proc_a_test_process_is_told_which_folder_variables_to_set(tmp_path):
+def test_without_proc_a_test_process_is_told_which_folder_variables_to_set(tmp_path, bwrap_namespaces):
     """(2) Without a readable /proc (macOS; a container without it) a test process cannot name a folder of its own and
     uses none. Resolving the lease root, making a coordinator, resolving the lock root and taking the launch lock each
     raise a ValueError that names the two variables to set -- the error load_lock's callers handle, never a bare

@@ -16,6 +16,7 @@ from playwright.async_api import async_playwright, expect
 from dream.core.backends.base import Event
 from dream.gui.bus import EventBus
 from dream.gui.server import StudioServer
+from chat_more import more
 
 
 # Loading the companion reads the mode once; it must not change execution policy.
@@ -164,7 +165,7 @@ async def controls(tmp_path, monkeypatch):
 async def open_controls(page, url, tab="Runtime"):
     await page.goto(url)
     await expect(page.locator("#stat")).to_have_text("Ready")
-    await page.locator("#dream-controls-open").click()
+    await more(page, "dream-controls-open")          # Chat shows no bars (DREAM-240): Controls is under More
     await page.get_by_role("tab", name=tab, exact=True).click()
 
 
@@ -181,18 +182,18 @@ async def test_profile_numbers_and_next_session_do_not_change_canvas(controls, t
     await page.goto(url)
     await expect(page.frame_locator("#artbody iframe").locator("h1")).to_have_text("Working canvas")
     await page.frame_locator("#artbody iframe").locator("#draft").fill("Keep this edit")
-    await page.locator("#dream-controls-open").click()
+    await more(page, "dream-controls-open")
     await expect(page.locator("#dc-session")).to_contain_text("fixture-model")
     await expect(page.locator("#dc-profile")).to_have_value("auto")
     await page.screenshot(path=str(tmp_path / "studio-runtime-800.png"))
     await page.get_by_text("Override limits", exact=True).click()
     await page.locator("#dc-profile").select_option("lean")
     await page.locator("#dc-context_limit").fill("16384")
-    await page.locator("#dc-max_parallel").fill("1")
+    await expect(page.locator("#dc-max_parallel")).to_have_count(0)      # Parallel workers is max agents now (Settings)
     await page.locator("#dc-idle_timeout_s").fill("90.5")
     await page.get_by_role("button", name="Save for next session").click()
     await expect(page.locator("#dc-feedback")).to_contain_text("This session remains balanced")
-    assert api.calls == READ_ONLY_STARTUP_CALLS + [{"action": "profile", "profile": "lean", "overrides": {"context_limit": 16384, "max_parallel": 1, "idle_timeout_s": 90.5}}]
+    assert api.calls == READ_ONLY_STARTUP_CALLS + [{"action": "profile", "profile": "lean", "overrides": {"context_limit": 16384, "idle_timeout_s": 90.5}}]
     assert all(h.get("x-dream-token") == server.token for h in api.headers)
     await no_overflow(page)
     await page.set_viewport_size({"width": 480, "height": 800})
@@ -200,7 +201,7 @@ async def test_profile_numbers_and_next_session_do_not_change_canvas(controls, t
     await page.screenshot(path=str(tmp_path / "studio-profile-480.png"))
     await page.keyboard.press("Escape")
     await expect(page.locator("#dream-controls")).not_to_be_visible()
-    await expect(page.locator("#dream-controls-open")).to_be_focused()
+    await expect(page.locator("#chat-menu > summary")).to_be_focused()        # the focus goes back to where it was opened from
     await expect(page.frame_locator("#artbody iframe").locator("#draft")).to_have_value("Keep this edit")
     assert errors == []
 
@@ -241,13 +242,13 @@ async def test_explicit_capture_stop_extract_queue_review_install(controls, tmp_
     for key, value in {"record-name": "Export a design", "x": "10", "y": "20", "width": "800", "height": "600", "seconds": "90"}.items():
         await page.locator("#dc-" + key).fill(value)
     await page.get_by_role("button", name="Start recording", exact=True).click()
-    await expect(page.locator("#dream-recording")).to_be_visible()
+    await expect(page.locator("#cn-recording")).to_be_visible()                 # Chat shows no bars (DREAM-240): the indicator is a chip under the composer
     assert api.calls[-1] == {"action": "learn_start", "name": "Export a design", "region": [10, 20, 800, 600], "seconds": 90}
     await page.keyboard.press("Escape")
-    await expect(page.locator("#dream-recording")).to_have_text("Recording")
-    await page.locator("#dream-recording").click()
+    await expect(page.locator("#cn-recording")).to_have_text("Recording")
+    await page.locator("#cn-recording").click()
     await page.get_by_role("button", name="Stop recording", exact=True).click()
-    await expect(page.locator("#dream-recording")).to_be_hidden()
+    await expect(page.locator("#cn-recording")).to_be_hidden()
     await page.get_by_role("button", name="Extract frames", exact=True).click()
     await expect(page.locator(".dc-demo")).to_contain_text("1 sampled frames")
     assert not any(c["action"] == "learn_analyze" for c in api.calls)
@@ -296,7 +297,7 @@ async def test_wayland_failure_import_and_recording_connection_loss(controls, tm
         await page.locator("#dc-" + key).fill(value)
     await page.get_by_role("button", name="Start recording", exact=True).click()
     await expect(page.locator("#dc-feedback")).to_contain_text("X11")
-    await expect(page.locator("#dream-recording")).to_be_hidden()
+    await expect(page.locator("#cn-recording")).to_be_hidden()
     await page.get_by_text("Import a recording instead", exact=True).click()
     await page.locator("#dc-import-path").fill("/tmp/workflow.webm")
     await page.locator("#dc-import-name").fill("My workflow")
@@ -305,10 +306,10 @@ async def test_wayland_failure_import_and_recording_connection_loss(controls, tm
     assert api.calls[-1] == {"action": "learn_import", "path": "/tmp/workflow.webm", "name": "My workflow"}
     api.learning["active"] = {"id": "recording-elsewhere", "name": "Terminal capture", "status": "recording", "maximum_seconds": 60}
     await page.get_by_role("button", name="Refresh controls").click()
-    await expect(page.locator("#dream-recording")).to_have_text("Recording")
+    await expect(page.locator("#cn-recording")).to_have_text("Recording")
     api.fail["learning"] = (503, "Recorder status temporarily unavailable")
     await page.get_by_role("button", name="Refresh controls").click()
-    await expect(page.locator("#dream-recording")).to_have_text("Check recording")
+    await expect(page.locator("#cn-recording")).to_have_text("Check recording")
     await expect(page.get_by_role("button", name="Stop recording", exact=True)).to_be_enabled()
     await expect(page.get_by_role("button", name="Start recording", exact=True)).to_be_disabled()
     await page.set_viewport_size({"width": 480, "height": 800})
@@ -378,7 +379,7 @@ async def test_stale_learning_poll_cannot_undo_confirmed_recording(controls):
     release.set()
     await expect(page.locator("#dc-feedback")).to_contain_text("Recording started")
     await expect(page.locator("#dc-active")).to_be_visible()
-    await expect(page.locator("#dream-recording")).to_have_text("Recording")
+    await expect(page.locator("#cn-recording")).to_have_text("Recording")
     assert reads >= 2, "A fresh status read follows the mutation, even with an earlier poll in flight"
     assert errors == []
 
@@ -398,7 +399,7 @@ async def test_stop_remains_visible_and_usable_during_slow_extraction(controls):
         await expect(stop).to_be_visible()
         await expect(stop).to_be_enabled()
         await stop.click()
-        await expect(page.locator("#dream-recording")).to_be_hidden()
+        await expect(page.locator("#cn-recording")).to_be_hidden()
         assert api.calls[-1] == {"action": "learn_stop"}
     finally:
         release.set()

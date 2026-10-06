@@ -257,8 +257,8 @@ REJECTS = ("<!doctype html><title>r</title><h1>r</h1><script>"
            "Promise.reject(new Error('nobody caught this')); console.error('asset missing:', 'terrain.bin');"
            "</script>")
 CLEAN = "<!doctype html><title>c</title><h1 id='h'>fine</h1>"
-# The falcon9 shape (gate 1): the page's code is a separate module file, which the Studio frame
-# cannot load (it loads nothing by URL) while the hidden frame reads it from disk.
+# The falcon9 shape (gate 1): the page's code is a separate module file. The Studio frame could not load
+# it (it loads nothing by URL); since DREAM-238 the page's local modules are inlined and it runs there.
 FALCON = ("<!doctype html><title>f</title><h1 id='h'>booting...</h1>"
           "<script type='module' src='post.js'></script>")
 
@@ -325,10 +325,15 @@ async def test_the_owners_real_pane_reports_what_only_it_shows(tmp_path, monkeyp
             assert not res.get("is_error"), _text(res)
             assert "Studio (owner's view): loaded clean (no errors)." in _text(res)
 
-            # gate 1: a page whose code is a module file (falcon9/post.js): the frame names it
+            # gate 1: a page whose code is a module file (falcon9/post.js). Before DREAM-238 the frame named
+            # it ("failed to load <script post.js>"); now the module travels in the page and runs.
             res = await show_to_user.handler({"path": "falcon9.html"})
-            assert ("Studio (owner's view): 1 error: failed to load <script post.js> "
-                    "(the Studio frame loads nothing by URL)") in _text(res), _text(res)
+            assert "Studio (owner's view): loaded clean (no errors)." in _text(res), _text(res)
+            await expect(page.frame_locator("#artbody iframe").locator("#h")).to_have_text("running")
+            # a module file that is not there is still named by the frame
+            (ws / "falcon9-gone.html").write_text(FALCON.replace("post.js", "gone.js"))
+            res = await show_html.handler({"path": "falcon9-gone.html"})
+            assert "gone.js" in _text(res) and "clean — no console output" not in _text(res), _text(res)
 
             # gate 1 (R5): the owner reads the code; the model edits the open page twice in a row
             await show_to_user.handler({"path": "clean.html"})

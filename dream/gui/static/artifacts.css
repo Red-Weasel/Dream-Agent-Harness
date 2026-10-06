@@ -1,0 +1,162 @@
+/* The Artifacts tab and the panel's header (DREAM-235, DREAM-236). Linked last. The tab is the view the Studio tab
+   was (html[data-dream-view=studio], the nav entry #dream-nav-studio): its home is a list of what Dream built in this
+   project, drawn in #studio-empty by artifacts.js; a row opens the same #artpanel frame at full width. Presentation
+   only; colours are the theme's tokens through chat.css's --ch-* aliases where the desktop design is on. */
+
+/* The home: shown instead of the canvas while body.art-home (the nav entry, a close in the tab), even with an artifact
+   open under it (its frame is kept). #studio-empty carries [hidden] while an artifact is open: this rule outranks it. */
+html[data-dream-view=studio] body.art-home #studio-empty{display:flex!important}
+html[data-dream-view=studio] body.art-home :is(.artbar,#artbody,.artnote,#dream-output-tools,#studio-loading,#studio-frame-error){display:none!important}
+/* The list and a viewer opened from it take the whole tab: the conversation waits in Chat. A question, an approval
+   or a sent message opens the conversation again (artifacts.js clears both classes). */
+html.companion[data-dream-view=studio] body:is(.art-home,.art-full) #main{display:none}
+html.companion[data-dream-view=studio] body:is(.art-home,.art-full) #artpanel{display:flex;flex:1 1 auto;min-width:0;border-left:0}
+html.companion[data-dream-view=studio] body.art-full #dream-split-size{display:none}
+
+/* The home's look (DREAM-241, after the owner's examples of 2026-10-04: a library grid with a picture per item, a
+   list with one row per item): the Nested view's palette and shapes -- its tokens where the desktop design defines
+   them (chat-nested.css), Dream's theme tokens otherwise. Radii 10 / 6 / 4, type 12 / 14 / 16 / 20, spacing on the
+   4 px scale, 32 px controls, flat surfaces. Every rule carries the home's id, so the page's button paint
+   (.companion button, 0,1,1, and its hover) never outranks a control here. */
+.companion #studio-empty.art-list{
+  --a-bg:var(--nd-bg,var(--bg0));--a-card:var(--nd-card,var(--bg));--a-raised:var(--nd-raised,var(--panel));--a-hover:var(--nd-hover,var(--raised));
+  --a-select:var(--nd-select,var(--plum));--a-line:var(--nd-line,var(--line));--a-line-strong:var(--nd-line-strong,var(--line-strong));
+  --a-fg1:var(--nd-fg1,var(--fg));--a-fg2:var(--nd-fg2,var(--dim));--a-fg3:var(--nd-fg3,var(--faint));
+  --a-accent:var(--nd-accent,var(--ember));--a-accent-line:var(--nd-accent-line,var(--ember));--a-fail:var(--nd-fail,var(--err));
+  align-items:stretch;justify-content:flex-start;text-align:left;padding:24px 24px 32px;color:var(--a-fg1);font:14px/1.5 var(--sans)}
+.art-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.companion #studio-empty.art-list :is(button,a,input,summary):focus-visible{outline:2px solid var(--a-accent);outline-offset:2px}
+
+/* The header: the title, the kind filters, the search, Grid | List, the media history. One row; it wraps. */
+.companion #studio-empty.art-list .art-head{display:flex;align-items:center;gap:8px 16px;flex-wrap:wrap;margin:0 0 16px;min-width:0}
+.companion #studio-empty.art-list h1{margin:0;font:600 20px/1.4 var(--sans);letter-spacing:-.02em;color:var(--a-fg1)}
+.companion #studio-empty.art-list .art-space{flex:1 1 0}
+.companion #studio-empty.art-list .art-filters{display:flex;flex-wrap:wrap;gap:4px;min-width:0}
+.companion #studio-empty.art-list .art-filters button{display:inline-flex;align-items:center;gap:6px;height:32px;min-height:0;padding:0 12px;border:0;border-radius:6px;background:none;color:var(--a-fg2);font:400 14px/1 var(--sans);white-space:nowrap;cursor:pointer}
+.companion #studio-empty.art-list .art-filters button:hover{background:var(--a-hover);color:var(--a-fg1)}
+.companion #studio-empty.art-list .art-filters button[aria-pressed=true]{background:var(--a-select);color:var(--a-fg1)}
+.companion #studio-empty.art-list .art-filters .n{color:var(--a-fg3);font-size:12px;font-variant-numeric:tabular-nums}
+.companion #studio-empty.art-list .art-filters button[aria-pressed=true] .n{color:var(--a-fg2)}
+.companion #studio-empty.art-list .art-search{position:relative;flex:0 1 240px;min-width:140px}
+.companion #studio-empty.art-list .art-search::before{content:"";position:absolute;left:10px;top:50%;width:14px;height:14px;margin-top:-7px;background:var(--a-fg3);pointer-events:none;
+  -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.6'%3E%3Ccircle cx='7' cy='7' r='4.5'/%3E%3Cpath d='M10.5 10.5l3.5 3.5'/%3E%3C/svg%3E") center/contain no-repeat;
+  mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.6'%3E%3Ccircle cx='7' cy='7' r='4.5'/%3E%3Cpath d='M10.5 10.5l3.5 3.5'/%3E%3C/svg%3E") center/contain no-repeat}
+.companion #studio-empty.art-list .art-search input{box-sizing:border-box;width:100%;height:32px;padding:0 8px 0 32px;border:1px solid var(--a-line);border-radius:6px;background:var(--a-raised);color:var(--a-fg1);font:400 14px/1 var(--sans);-webkit-appearance:none;appearance:none}
+.companion #studio-empty.art-list .art-search input::placeholder{color:var(--a-fg3)}
+.companion #studio-empty.art-list .art-search input:hover{border-color:var(--a-line-strong)}
+.companion #studio-empty.art-list .art-search input:focus{border-color:var(--a-fg2)}
+.companion #studio-empty.art-list .art-view{display:flex;flex:none;padding:2px;gap:2px;border:1px solid var(--a-line);border-radius:6px}
+.companion #studio-empty.art-list .art-view button{display:grid;place-items:center;width:28px;height:26px;min-height:0;padding:0;border:0;border-radius:4px;background:none;color:var(--a-fg2);cursor:pointer}
+.companion #studio-empty.art-list .art-view button:hover{background:var(--a-hover);color:var(--a-fg1)}
+.companion #studio-empty.art-list .art-view button[aria-pressed=true]{background:var(--a-select);color:var(--a-fg1)}
+.companion #studio-empty.art-list .art-history{flex:none;height:32px;min-height:0;padding:0 12px;border:1px solid var(--a-line);border-radius:6px;background:none;color:var(--a-fg2);font:400 14px/1 var(--sans);white-space:nowrap;cursor:pointer}
+.companion #studio-empty.art-list .art-history:hover{border-color:var(--a-line-strong);background:none;color:var(--a-fg1)}
+/* Nothing built yet: nothing to filter, search or lay out. */
+.companion #studio-empty.art-list .art-head.none :is(.art-filters,.art-search,.art-view){display:none}
+
+/* The groups: Today, Yesterday, then the months. */
+.companion #studio-empty.art-list .art-section{margin:0 0 24px}
+.companion #studio-empty.art-list h2{margin:0 0 8px;color:var(--a-fg2);font:500 12px/1.5 var(--sans);letter-spacing:0;text-transform:none}
+.companion #studio-empty.art-list :is(.art-grid,.art-rows){margin:0;padding:0;list-style:none}
+.companion #studio-empty.art-list .art-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,248px),1fr));gap:16px}
+
+/* An item. The whole of it is its Open button (.primary, laid over it); "..." and its menu sit above that. */
+.companion #studio-empty.art-list .art-row{position:relative;min-width:0;border:1px solid var(--a-line);background:var(--a-card);transition:border-color 120ms linear}
+.companion #studio-empty.art-list .art-row:hover{border-color:var(--a-line-strong)}
+.companion #studio-empty.art-list .art-row.now{border-color:var(--a-accent-line)}
+.companion #studio-empty.art-list .art-row:has(.art-more[open]){z-index:3}
+.companion #studio-empty.art-list .art-row .primary{position:absolute;inset:0;z-index:1;width:auto;height:auto;min-height:0;margin:0;padding:0;border:0;border-radius:inherit;background:none;box-shadow:none;cursor:pointer}
+.companion #studio-empty.art-list .art-row .primary:hover{background:none;border:0}
+.companion #studio-empty.art-list .art-row .primary:focus-visible{outline-offset:-2px}
+.companion #studio-empty.art-list .art-row .t{min-width:0}
+.companion #studio-empty.art-list .art-row .t b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--a-fg1);font:600 14px/1.5 var(--sans)}
+.companion #studio-empty.art-list .art-row .t .meta{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--a-fg2);font:12px/1.5 var(--sans);font-variant-numeric:tabular-nums}
+.companion #studio-empty.art-list .art-row .gone{display:block;color:var(--a-fg3);font:12px/1.5 var(--sans)}
+.companion #studio-empty.art-list .art-row .badge{display:inline-flex;align-items:center;height:20px;padding:0 6px;border:1px solid var(--a-line-strong);border-radius:4px;color:var(--a-fg2);font:500 12px/1 var(--sans);white-space:nowrap;pointer-events:none}
+.companion #studio-empty.art-list .art-row .said{position:relative;z-index:2;margin:0;color:var(--a-fg2);font:12px/1.5 var(--sans)}
+.companion #studio-empty.art-list .art-row .said:empty{display:none}
+.companion #studio-empty.art-list .art-row .said.bad{color:var(--a-fail)}
+
+/* The grid's card: a 16:10 picture, then the title and one quiet line. */
+.companion #studio-empty.art-list .art-grid .art-row{display:flex;flex-direction:column;border-radius:10px}
+.companion #studio-empty.art-list .thumb{position:relative;aspect-ratio:16/10;overflow:hidden;border-bottom:1px solid var(--a-line);border-radius:9px 9px 0 0;background:var(--a-bg)}
+.companion #studio-empty.art-list .thumb img{display:block;width:100%;height:100%;object-fit:cover}
+.companion #studio-empty.art-list .thumb img.fit{object-fit:contain;background:#fff}
+/* A page, laid out 1280 px wide and scaled to the card (artifacts.js sets --art-s); it takes no pointer and no focus. */
+.companion #studio-empty.art-list .thumb iframe{position:absolute;left:0;top:0;width:1280px;height:800px;border:0;background:#fff;color-scheme:light;transform:scale(var(--art-s,.2));transform-origin:0 0;pointer-events:none}
+.companion #studio-empty.art-list .thumb .glyph{position:absolute;inset:0;display:grid;place-items:center;color:var(--a-fg3);font:600 20px/1 var(--mono);letter-spacing:.04em}
+.companion #studio-empty.art-list .thumb .badge{position:absolute;left:8px;top:8px;border-color:transparent;background:rgba(11,10,14,.78);color:#e7e3eb}
+.companion #studio-empty.art-list .art-grid .t{padding:8px 44px 12px 12px}
+.companion #studio-empty.art-list .art-grid .said{padding:0 12px 12px}
+.companion #studio-empty.art-list .art-grid .art-more{position:absolute;right:8px;bottom:12px}
+
+/* The list's row: the kind in a square, the title over its kind and path, the version and age at the right. */
+.companion #studio-empty.art-list .art-rows{display:grid;gap:4px}
+.companion #studio-empty.art-list .art-rows .art-row{display:flex;align-items:center;gap:12px;min-height:56px;padding:8px 8px 8px 12px;border-color:transparent;border-radius:6px;background:none;flex-wrap:wrap}
+.companion #studio-empty.art-list .art-rows .art-row:hover{border-color:transparent;background:var(--a-card)}
+.companion #studio-empty.art-list .art-rows .art-row.now{border-color:var(--a-accent-line)}
+.companion #studio-empty.art-list .art-rows .ic{flex:none;display:grid;place-items:center;width:36px;height:36px;border:1px solid var(--a-line);border-radius:6px;background:var(--a-raised);color:var(--a-fg2);font:600 10px/1 var(--mono)}
+.companion #studio-empty.art-list .art-rows .t{flex:1 1 0;display:grid;grid-template-columns:minmax(0,auto) auto minmax(0,1fr);column-gap:8px;align-items:center}
+.companion #studio-empty.art-list .art-rows .t .meta,.companion #studio-empty.art-list .art-rows .t .gone{grid-column:1 / -1}
+.companion #studio-empty.art-list .art-rows .side{flex:none;color:var(--a-fg2);font:12px/1.5 var(--sans);font-variant-numeric:tabular-nums;white-space:nowrap}
+.companion #studio-empty.art-list .art-rows .art-more{position:relative;flex:none}
+.companion #studio-empty.art-list .art-rows .said{flex:1 1 100%;padding-left:48px}
+
+/* "...": a quiet square button; it shows with the pointer on the item or the keyboard in it, and always where there
+   is no pointer that hovers. Its menu opens under it. */
+.companion #studio-empty.art-list .art-more{z-index:2}
+.companion #studio-empty.art-list .art-more>summary{display:grid;place-items:center;width:28px;height:28px;border-radius:6px;color:var(--a-fg2);list-style:none;cursor:pointer}
+.companion #studio-empty.art-list .art-more>summary::-webkit-details-marker{display:none}
+.companion #studio-empty.art-list .art-more>summary:hover,.companion #studio-empty.art-list .art-more[open]>summary{background:var(--a-hover);color:var(--a-fg1)}
+@media (hover:hover){
+  .companion #studio-empty.art-list .art-row:not(:hover):not(:focus-within) .art-more:not([open])>summary{opacity:0}
+}
+.companion #studio-empty.art-list .acts{position:absolute;right:0;top:calc(100% + 4px);display:grid;gap:2px;min-width:184px;padding:4px;border:1px solid var(--a-line-strong);border-radius:6px;background:var(--a-card);box-shadow:0 0 0 1px rgba(0,0,0,.4),0 24px 48px rgba(0,0,0,.55)}
+.companion #studio-empty.art-list .acts :is(button,a){box-sizing:border-box;display:flex;align-items:center;height:32px;min-height:0;padding:0 12px;border:0;border-radius:4px;background:none;color:var(--a-fg1);font:400 14px/1 var(--sans);text-align:left;text-decoration:none;white-space:nowrap;cursor:pointer}
+.companion #studio-empty.art-list .acts :is(button,a):is(:hover,:focus-visible){background:var(--a-hover);border:0}
+
+/* The empty states: nothing built, nothing matching. */
+.companion #studio-empty.art-list .art-none{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;min-height:220px;gap:8px;text-align:center}
+.companion #studio-empty.art-list .art-none h2{margin:0;color:var(--a-fg1);font:600 16px/1.4 var(--sans)}
+.companion #studio-empty.art-list .art-none p{max-width:52ch;margin:0;color:var(--a-fg2);font:14px/1.5 var(--sans)}
+.companion #studio-empty.art-list .art-clear{height:32px;min-height:0;margin-top:8px;padding:0 12px;border:1px solid var(--a-line-strong);border-radius:6px;background:none;color:var(--a-fg1);font:400 14px/1 var(--sans);cursor:pointer}
+.companion #studio-empty.art-list .art-clear:hover{background:var(--a-hover);border-color:var(--a-line-strong)}
+#art-home-list{display:flex;flex-direction:column;flex:1 0 auto;min-width:0}
+@media (max-width:700px){
+  .companion #studio-empty.art-list{padding:16px 16px 24px}
+  .companion #studio-empty.art-list .art-space{display:none}
+  .companion #studio-empty.art-list .art-search{flex:1 1 160px}
+  .companion #studio-empty.art-list .art-grid{grid-template-columns:repeat(auto-fill,minmax(min(100%,160px),1fr));gap:12px}
+  .companion #studio-empty.art-list .art-rows .side{display:none}
+}
+
+/* The header beside the chat (body.chat-art): the title keeps its room, Preview | Code and the close button keep
+   their size, and while the bar is narrower than its actions they are a menu under "More", with Open in browser as
+   an arrow beside it (the bar's own width decides: a container query, so a wide window with a narrow panel gets the
+   menu too). */
+html.dream-design.companion body.chat-art .artbar{position:relative;container:artbar/inline-size}
+html.dream-design.companion body.chat-art #artname{flex:1 1 120px;min-width:72px}
+html.dream-design.companion body.chat-art .artbar :is(#artvn,#artver,.seg,#artext,#artmore,.artclose){flex:0 0 auto}
+html.dream-design.companion body.chat-art .artbar :is(.artmode,.seg button){white-space:nowrap}
+html.dream-design.companion body.chat-art #artmore{display:none;min-width:32px;justify-content:center;font-size:16px;line-height:1}
+html.dream-design.companion body.chat-art .artclose{margin-left:0}
+@container artbar (max-width:900px){
+  html.dream-design.companion body.chat-art #artmore{display:inline-flex}
+  /* Open in browser stays in the bar as its arrow; its words remain its name. */
+  html.dream-design.companion body.chat-art #artext{display:inline-flex;align-items:center;justify-content:center;width:32px;min-height:30px;padding:0;overflow:hidden;font-size:0}
+  html.dream-design.companion body.chat-art #artext::after{content:"↗";font-size:15px;line-height:1}
+  html.dream-design.companion body.chat-art .artmenu{display:none;position:absolute;top:calc(100% + 4px);right:8px;z-index:7;flex-direction:column;align-items:stretch;gap:4px;min-width:190px;padding:8px;border:1px solid var(--ch-line-strong);border-radius:12px;background:var(--ch-field);box-shadow:0 12px 32px rgb(0 0 0 / .45)}
+  html.dream-design.companion body.chat-art .artmenu.open{display:flex}
+  html.dream-design.companion body.chat-art .artmenu :is(.artmode,.artfollow){display:flex;align-items:center;min-height:32px;margin:0;padding:6px 12px;border:0;border-radius:8px;background:none;color:var(--ch-text);text-decoration:none;text-align:left}
+  html.dream-design.companion body.chat-art .artmenu :is(.artmode,.artfollow):hover{background:var(--ch-bubble)}
+}
+/* What has no source to show has no Preview | Code; what is not a running page has nothing to point at. */
+#artpanel:is([data-kind=video],[data-kind=audio],[data-kind=document]) .seg{display:none}
+#artpanel:is([data-kind=report],[data-kind=image],[data-kind=video],[data-kind=audio],[data-kind=document]) #artpoint{display:none}
+
+/* A report beside the chat or in the tab: the reply's own type, at a document's width. */
+html.dream-design.companion #artbody.report{background:var(--ch-surface);color:var(--ch-text);color-scheme:dark}
+html.dream-design.companion .artdoc{max-width:720px;padding:32px 28px 56px;font:400 16px/1.65 var(--sans)}
+html.dream-design.companion #artbody.report pre{padding:12px 16px;white-space:pre}
+.companion #artbody.media{background:#111;color-scheme:dark}
+.companion #artbody.file{background:var(--bg);color-scheme:dark}

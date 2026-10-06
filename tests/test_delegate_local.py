@@ -208,7 +208,7 @@ async def test_delegate_local_runs_every_task_at_once_and_returns_them_together(
         engine.close()
     assert not failed and engine.peak == 4
     header, sections = _sections(text)
-    assert header.startswith("[Dream] delegate_local ran 4 of 4 tasks on the local engine's qwen-local (4 lanes)")
+    assert header.startswith("[Dream] delegate_local ran 4 tasks on the local engine's qwen-local, 4 at a time, in ")
     assert [title for title, _ in sections] == [f"Task {i} · worker · completed" for i in range(1, 5)]
     assert [body for _, body in sections] == [f"did part {i}" for i in range(1, 5)]
     cards = _cards(events)
@@ -289,43 +289,54 @@ async def test_the_leads_interrupt_ends_every_helper_card(monkeypatch):
     assert helpers.running == []
 
 
-async def test_tasks_past_the_worker_cap_are_answered_in_place(monkeypatch):
-    """The owner's worker limit (nested.max_workers) bounds one call as it bounds one reply: five tasks with a limit
-    of three run three, and one line under the header names the others without a card (DREAM-213 gate, round 1: one
-    line for them all, not a section each)."""
-    from dream.core import settings
-    monkeypatch.setattr(settings, "nested_max_workers", lambda: 3)
-    engine, events = _LocalEngine(slots=4), []
-    helpers = _helpers(engine.url, events)
+def _save_limit(limit):
+    from dream.core.profiles import settings_path
+    path = settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"version": 1, "nested": {"max_agents": limit}}), encoding="utf-8")
+
+
+async def test_every_task_runs_and_max_agents_holds_the_rest_in_line():
+    """The owner's max agents (2026-10-01) bounds how many of one call's workers run at once, below the engine's lanes;
+    the others wait their turn, queued on their cards, and every task runs: five tasks, max agents 3, four lanes."""
+    _save_limit(3)
+    engine, events = _LocalEngine(slots=4, hold=0.15), []
     try:
-        text, failed = await helpers.delegate(_tasks(5))
-        one_over, _ = await helpers.delegate(_tasks(4))
+        text, failed = await _helpers(engine.url, events).delegate(_tasks(5))
     finally:
         engine.close()
     header, sections = _sections(text)
-    assert not failed and engine.chats == 6 and len(_cards(events)) == 6
-    assert header.startswith("[Dream] delegate_local ran 3 of 5 tasks")
-    assert header.split("\n")[1:] == ["Tasks 4-5 were not run: the worker limit is 3 per call."]
-    assert [title for title, _ in sections] == [f"Task {i} · worker · completed" for i in (1, 2, 3)]
-    assert _sections(one_over)[0].split("\n")[1:] == ["Task 4 was not run: the worker limit is 3 per call."]
+    assert not failed and engine.chats == 5 and engine.peak == 3
+    assert header.startswith("[Dream] delegate_local ran 5 tasks on the local engine's qwen-local, 3 at a time, in ")
+    assert "\n" not in header and "not run" not in text
+    assert [title for title, _ in sections] == [f"Task {i} · worker · completed" for i in range(1, 6)]
+    cards = _cards(events)
+    assert len(cards) == 5 and all(statuses[-1] == "completed" for statuses in cards.values())
+    assert sum("queued" in statuses for statuses in cards.values()) == 2
 
 
-async def test_two_hundred_tasks_reach_dream_and_stay_within_the_limit(monkeypatch):
-    """(DREAM-213 gate, round 1) Two hundred tasks with a limit of fifteen reach Dream through the SDK's own tool path
-    (claude_agent_sdk's run_tool checks the arguments against the tool's schema first): the schema sets no maxItems,
-    whose jsonschema error would echo every prompt and never name the limit (the lead's decision). The whole result --
-    header, headings, cut notes -- takes at most 60,000 characters, and the tasks that ran share nearly all of it:
-    every reply far past its share, it comes back as the one not-run line and fifteen replies, each cut with a note
-    saying how much was cut."""
+async def test_without_max_agents_the_lanes_set_the_pace():
+    engine = _LocalEngine(slots=2, hold=0.1)
+    try:
+        text, failed = await _helpers(engine.url).delegate(_tasks(5))
+    finally:
+        engine.close()
+    assert not failed and engine.chats == 5 and engine.peak == 2
+    assert _sections(text)[0].startswith("[Dream] delegate_local ran 5 tasks on the local engine's qwen-local, 2 at a time")
+
+
+async def test_two_hundred_tasks_reach_dream_and_every_one_runs_within_the_limit(monkeypatch):
+    """(DREAM-213 gate, round 1) Two hundred tasks reach Dream through the SDK's own tool path (claude_agent_sdk's
+    run_tool checks the arguments against the tool's schema first): the schema sets no maxItems. Every task runs now
+    (no per-call cap), and the whole result -- header, headings, cut notes -- still takes at most 60,000 characters:
+    every reply far past its share comes back cut, with a note saying how much was cut."""
     import mcp.types as types
     from claude_agent_sdk import create_sdk_mcp_server
-    from dream.core import settings
     from dream.tools import delegate_tools
     from dream.tools.context import ToolContext, bind_context
-    monkeypatch.setattr(settings, "nested_max_workers", lambda: 15)
     engine = _LocalEngine(slots=4, hold=0.0, reply=lambda prompt: "y" * 50_000)
     server = create_sdk_mcp_server(name="dream", tools=[
-        delegate_tools.delegate_local_tool(model="qwen-local", cap=15, names=["worker"])])["instance"]
+        delegate_tools.delegate_local_tool(model="qwen-local", limit=None, names=["worker"])])["instance"]
     context = ToolContext(None, None, None, "s")
     context.local_helpers = _helpers(engine.url)
     call = types.CallToolRequest(method="tools/call", params=types.CallToolRequestParams(
@@ -338,13 +349,22 @@ async def test_two_hundred_tasks_reach_dream_and_stay_within_the_limit(monkeypat
     (content,) = result.content
     text = content.text
     header, sections = _sections(text)
-    assert not result.isError and engine.chats == 15 and 59_900 < len(text) <= 60_000
-    assert header.split("\n")[1:] == ["Tasks 16-200 were not run: the worker limit is 15 per call."]
-    assert [title for title, _ in sections] == [f"Task {i} · worker · completed" for i in range(1, 16)]
+    assert not result.isError and engine.chats == 200 and len(text) <= 60_000
+    assert header.startswith("[Dream] delegate_local ran 200 tasks on the local engine's qwen-local, 4 at a time")
+    assert [title for title, _ in sections] == [f"Task {i} · worker · completed" for i in range(1, 201)]
     for _, body in sections:
         kept = body.count("y")
-        assert body == "y" * kept + f"\n[… {50_000 - kept:,} more characters cut; see this worker's card in Nested " \
-                                    "Dream]"
+        assert kept > 0 and body == "y" * kept + f"\n[… {50_000 - kept:,} more characters cut; see this worker's card " \
+                                                 "in Nested Dream]"
+
+
+@pytest.mark.parametrize("limit, says", [(None, "as many at once as the engine has lanes; the rest wait their turn"),
+                                         (4, "as many at once as the engine has lanes, at most 4 (the owner's max "
+                                             "agents); the rest wait their turn")])
+def test_the_tool_says_what_runs_at_once_and_that_the_rest_wait(limit, says):
+    from dream.tools import delegate_tools
+    description = delegate_tools.delegate_local_tool(model="qwen-local", limit=limit, names=["worker"]).description
+    assert says in description and "per call" not in description
 
 
 async def test_with_no_local_engine_nothing_runs_and_the_lead_is_told():
@@ -370,7 +390,7 @@ async def test_the_model_is_the_one_served_or_the_one_roles_main_names(monkeypat
         text, failed = await _helpers(engine.url).delegate(_tasks(1))
     finally:
         engine.close()
-    assert not failed and _sections(text)[0].startswith("[Dream] delegate_local ran 1 of 1 tasks on the local engine's small")
+    assert not failed and _sections(text)[0].startswith("[Dream] delegate_local ran 1 task on the local engine's small")
     assert set(engine.asked) == {"small"}
 
 
@@ -426,8 +446,8 @@ async def test_the_tool_answers_from_the_sessions_helpers():
         async def delegate(self, tasks, *, meter=None):
             calls.append((tasks, meter))
             return "all done", False
-    tool = delegate_tools.delegate_local_tool(model="qwen-local", cap=7, names=["worker"])
-    assert tool.name == "delegate_local" and "qwen-local" in tool.description and "up to 7" in tool.description
+    tool = delegate_tools.delegate_local_tool(model="qwen-local", limit=7, names=["worker"])
+    assert tool.name == "delegate_local" and "qwen-local" in tool.description and "at most 7" in tool.description
     context = ToolContext(None, None, None, "s")
     with bind_context(context):
         refused = await tool.handler({"tasks": _tasks(1)})

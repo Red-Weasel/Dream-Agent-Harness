@@ -158,8 +158,8 @@ class DreamWindow(Gtk.Window):
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.workspace = Gtk.Stack(hhomogeneous=False, vhomogeneous=False)
         self.workspace.connect('notify::visible-child-name', self._workspace_changed)
-        top = Gtk.Box(spacing=8)
-        top.get_style_context().add_class('toolbar')
+        # No row of its own above the work area (the owner, 2026-10-04: [feedback], DREAM-239): the folder's name and New
+        # conversation sit in the title bar; the sidebar already says which view this is, so its label is not shown.
         self.workspace_name = Gtk.Button(label=Path(cwd).name or cwd)
         self.workspace_name.get_style_context().add_class('flat')
         self.workspace_name.get_child().set_ellipsize(Pango.EllipsizeMode.MIDDLE)
@@ -167,11 +167,9 @@ class DreamWindow(Gtk.Window):
         self.workspace_name.set_tooltip_text('Show the full workspace path')
         self.workspace_name.connect('clicked', self._show_workspace_path)
         self.workspace_path = cwd
-        top.pack_start(self.workspace_name, False, False, 0)
+        header.pack_start(self.workspace_name)
         self.view_label = label('Chat', 'muted')
-        top.pack_start(self.view_label, True, True, 0)
-        top.pack_end(button('document-new-symbolic', 'New conversation', lambda _: self.new_session()), False, False, 0)
-        right.pack_start(top, False, False, 0)
+        header.pack_end(button('document-new-symbolic', 'New conversation', lambda _: self.new_session()))
 
         self.studio_stack = Gtk.Stack(hhomogeneous=False, vhomogeneous=False)
         self.studio = webview(local_only=True)
@@ -203,7 +201,7 @@ class DreamWindow(Gtk.Window):
                 ('chat', 'Chat', 'user-available-symbolic'),
                 ('nested', 'Nested Dream', 'view-grid-symbolic'),
                 ('optimizer', 'Prompt Optimizer', 'document-edit-symbolic'),
-                ('studio', 'Studio', 'applications-graphics-symbolic'),
+                ('studio', 'Artifacts', 'applications-graphics-symbolic'),   # the page's view id stays 'studio' (DREAM-235)
                 ('projects', 'Projects', 'folder-symbolic'),
                 ('skills', 'Skills', 'applications-system-symbolic'),
                 ('memory', 'Lucid Control', 'document-open-recent-symbolic'),
@@ -275,6 +273,7 @@ class DreamWindow(Gtk.Window):
         self.onboarding.advanced.hide()
         self.onboarding.reset.hide()
         self.onboarding.mode_box.hide()
+        self.onboarding.card.hide()
         self.studio_stack.set_visible_child_name('welcome')
         self.workspace.set_visible_child_name('studio')
         self._highlight_navigation('chat')
@@ -293,7 +292,7 @@ class DreamWindow(Gtk.Window):
         for name, item in self.nav_buttons.items():
             context = item.get_style_context()
             context.add_class('selected') if name == view else context.remove_class('selected')
-        self.view_label.set_text('Prompt Optimizer' if view == 'optimizer' else view.title())
+        self.view_label.set_text({'optimizer': 'Prompt Optimizer', 'studio': 'Artifacts'}.get(view) or view.title())
 
     def _workspace_changed(self, *_):
         name = self.workspace.get_visible_child_name()
@@ -613,8 +612,13 @@ class DreamWindow(Gtk.Window):
             sequence = state.get('show_sequence', 0)
             if isinstance(sequence, int) and sequence > self.show_sequence:
                 self.show_sequence = sequence
-                self.navigate('studio')
-                self.status('Dream opened an artifact in Studio.')
+                if self.native_view == 'chat':
+                    # The Chat view shows the artifact beside the conversation itself (DREAM-233); when the page
+                    # chose the Artifacts tab instead (a narrow window), the 700 ms view poll follows it.
+                    self.status('Dream opened an artifact beside the chat.')
+                else:
+                    self.navigate('studio')
+                    self.status('Dream opened an artifact in the Artifacts tab.')
         elif (error or not address) and self.connected:
             self.connected = False
             self.session_label.set_text('Studio reconnecting')

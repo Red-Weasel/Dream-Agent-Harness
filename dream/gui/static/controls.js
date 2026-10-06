@@ -53,7 +53,7 @@
             <div class="dc-row"><h3 class="dc-grow">Next session</h3><span class="dc-pill">Profile</span></div>
             <p class="dc-help">Saved preferences apply to new sessions. This session keeps its current profile; environment overrides still take precedence.</p>
             <form id="dc-profile-form"><fieldset id="dc-profile-fields">
-              <label>Runtime profile<select id="dc-profile"><option value="auto">Auto · choose for the provider</option><option value="lean">Lean · compact, single worker</option><option value="balanced">Balanced · compact, parallel work</option><option value="frontier">Frontier · fuller context and tools</option></select></label>
+              <label>Runtime profile<select id="dc-profile"><option value="auto">Auto · choose for the provider</option><option value="lean">Lean · compact, small context</option><option value="balanced">Balanced · compact, medium context</option><option value="frontier">Frontier · fuller context and tools</option></select></label>
               <p id="dc-profile-note" class="dc-help"></p>
               <label>Image input<select id="dc-vision"><option value="auto">Auto · provider default</option><option value="true">On · image-capable model</option><option value="false">Off · text only</option></select></label>
               <p class="dc-help">Use On only for a model that accepts images. Exact model settings and DREAM_VISION can override this preference.</p>
@@ -61,7 +61,6 @@
                 <div class="dc-fields">
                   <label>Context limit <span class="dc-muted">· tokens</span><input id="dc-context_limit" type="number" min="2048" step="1" placeholder="Profile default"></label>
                   <label>Output reserve <span class="dc-muted">· tokens</span><input id="dc-output_tokens" type="number" min="1" step="1" placeholder="Profile default"></label>
-                  <label>Parallel workers<input id="dc-max_parallel" type="number" min="1" max="16" step="1" placeholder="Profile default"></label>
                   <label>Idle timeout <span class="dc-muted">· seconds</span><input id="dc-idle_timeout_s" type="number" min="0.1" step="any" placeholder="Profile default"></label>
                 </div>
               </details>
@@ -130,7 +129,7 @@
   let performanceEdited = false;
   let draftId = null, queued = new Set(), installed = new Map(), demoSignature = '', loading = {};
   let pollTimer, wasRecording = false, scopeDeadline = null, revision = 0, stopping = false;
-  const overrideKeys = ['context_limit','output_tokens','max_parallel','idle_timeout_s'];
+  const overrideKeys = ['context_limit','output_tokens','idle_timeout_s'];
   const tabs = ['runtime','extensions','learn','settings'];
   const isRecording = () => learning?.active?.status === 'recording';
 
@@ -266,7 +265,7 @@
       <details id="dc-runtime-build"><summary>Dream version · ${esc(r.runtime_identity?.version || 'Not reported')}</summary>
         ${r.runtime_identity ? `<dl class="dc-meta"><dt>Process</dt><dd>${esc(r.runtime_identity.pid)}</dd><dt>Started importing Dream</dt><dd>${esc(r.runtime_identity.imported_at)}</dd><dt>Startup source</dt><dd>${esc(r.runtime_identity.startup_source_id || 'Unavailable')}</dd><dt>Selected source changed</dt><dd>${r.runtime_identity.source_changed === true ? 'Yes' : r.runtime_identity.source_changed === false ? 'No' : 'Unknown'}</dd></dl><p class="dc-help">${esc(r.runtime_identity.restart_guidance)}</p><p class="dc-help">${esc(r.runtime_identity.scope)}</p>` : '<p class="dc-help">This session does not report its running source identity.</p>'}
       </details>
-      <dl class="dc-stats"><div><dt>Context input${c ? ' · est.' : ''}</dt><dd>${esc(context)}</dd></div><div><dt>Output reserve</dt><dd>${number(c?.output ?? p.output_tokens)} <small>tokens</small></dd></div><div><dt>Parallel workers</dt><dd>${number(p.max_parallel)}</dd></div></dl>
+      <dl class="dc-stats"><div><dt>Context input${c ? ' · est.' : ''}</dt><dd>${esc(context)}</dd></div><div><dt>Output reserve</dt><dd>${number(c?.output ?? p.output_tokens)} <small>tokens</small></dd></div></dl>
       ${c && c.window > 0 ? `<div class="dc-budget" aria-hidden="true"><span class="dc-input" style="width:${percent(c.input_tokens)}%"></span><span class="dc-output" style="width:${percent(c.output)}%"></span></div><p class="dc-help">${esc(c.method || 'Estimated context accounting')} · ${number(c.remaining)} tokens remaining after output and margin.</p>` : `<p class="dc-help">Context is owned by ${esc(r.context_owner || 'the provider')}. A live breakdown is not available.</p>`}
       ${run ? `<details><summary>Observed turn usage · ${number(run.tools)} tools · ${number(run.failures)} failures</summary><dl class="dc-meta"><dt>Input tokens</dt><dd>${number(run.prompt_tokens)}</dd><dt>Output tokens</dt><dd>${number(run.output_tokens)}</dd><dt>Cached tokens</dt><dd>${number(run.cached_tokens)}</dd></dl><p class="dc-help">Runtime observations describe execution, not verified task outcomes.</p></details>` : '<p class="dc-help">No turn usage reported yet.</p>'}`;
     if(!profileEdited && !profileSaved) {

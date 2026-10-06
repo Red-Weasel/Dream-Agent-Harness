@@ -8,7 +8,21 @@ from pathlib import Path
 from gi.repository import GLib, Gtk, Pango
 
 from .browser import label
-from .protocol import refill
+from .protocol import recommended_card, refill
+
+# The field names the Advanced grid shows where `name.replace('_', ' ')` would not read well.
+FIELD_LABELS = {'slot_ctx': 'sub-agent context'}
+
+
+def wrapped(text, style='', chars=46):
+    """A label that wraps at about `chars` characters and starts at the left. Its minimum width is that too (or its
+    text's, when shorter), so a grid or box asks for the height it really takes: a wrapping label measured at its
+    narrowest makes the screen leave a tall empty band."""
+    widget = label(text, style)
+    widget.set_line_wrap(True)
+    widget.set_max_width_chars(chars)
+    widget.set_width_chars(min(chars, len(text)))
+    return widget
 
 
 class Onboarding(Gtk.Box):
@@ -98,15 +112,22 @@ class Onboarding(Gtk.Box):
         for widget in (self.mode_label, self.mode_think, self.mode_instruct, self.effort_label, self.mode_effort):
             row.pack_start(widget, False, False, 0)
         self.mode_box.pack_start(row, False, False, 0)
-        self.snapshot = label('', 'muted')
-        self.snapshot.set_line_wrap(True)
-        self.snapshot.set_max_width_chars(72)
-        self.mode_box.pack_start(self.snapshot, False, False, 0)
-        self.pack_start(self.mode_box, False, False, 0)
         self.advanced = Gtk.Expander(label='Advanced model settings')
         self.grid = Gtk.Grid(column_spacing=16, row_spacing=8)
         self.advanced.add(self.grid)
-        self.pack_start(self.advanced, False, False, 0)
+        # The owner's plan of 2026-10-01: the model card's recommendations as a card to the RIGHT of the mode row and
+        # the Advanced fields (render_card), with the load screen's notes, instead of small lines above and below them.
+        self.model_area = Gtk.Box(spacing=36)
+        self.fields_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        self.fields_column.pack_start(self.mode_box, False, False, 0)
+        self.fields_column.pack_start(self.advanced, False, False, 0)
+        self.model_area.pack_start(self.fields_column, False, False, 0)
+        self.card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        self.card.get_style_context().add_class('rec-card')
+        self.card.set_valign(Gtk.Align.START)
+        self.card.set_size_request(400, -1)
+        self.model_area.pack_start(self.card, False, False, 0)
+        self.pack_start(self.model_area, False, False, 0)
         actions = Gtk.Box(spacing=10)
         self.start = Gtk.Button(label='Start conversation')
         self.start.get_style_context().add_class('suggested-action')
@@ -231,6 +252,7 @@ class Onboarding(Gtk.Box):
         self.advanced.hide()
         self.reset.hide()
         self.mode_box.hide()
+        self.card.hide()
         self.summary.set_text('')
         index = self.engines.get_active()
         if not 0 <= index < len(self.choices):
@@ -266,8 +288,8 @@ class Onboarding(Gtk.Box):
         self.fill_mode()
         self.summary.set_text(f"Context {data['selection']['ctx']:,} · GPUs {data['selection']['gpus'] or 'auto'}\n"
                               + data['sources']['ctx'])
-        self.message.set_text('\n'.join(data['notes']))
-        self.advanced.show_all()
+        self.message.set_text('')                 # the notes are in the card (render_card)
+        self.show_fields()
         self.reset.show()
         self.start.set_sensitive(True)
         self.start.set_label('Load model and start')
@@ -294,23 +316,28 @@ class Onboarding(Gtk.Box):
                 field = Gtk.Entry()
                 field.set_text('default' if value is None else json.dumps(value) if isinstance(value, list) else str(value))
             field.set_tooltip_text(control['hint'])
-            self.grid.attach(label(name.replace('_', ' ')), 0, row, 1, 1)
+            self.grid.attach(label(FIELD_LABELS.get(name, name.replace('_', ' ')), 'field-name'), 0, row, 1, 1)
             self.grid.attach(field, 1, row, 1, 1)
-            source = label(self.settings['sources'].get(name, control.get('source', '')), 'muted')
+            text = self.settings['sources'].get(name, control.get('source', ''))
+            # The card names the model card's page once; a row says where its value came from in a word or two.
+            source = wrapped('Model card' if text.startswith('Model card · ') else text, 'source', 34)
             self.fields[name], self.source_labels[name] = (field, control), source
             self.grid.attach(source, 2, row, 1, 1)
+
+    def show_fields(self):
+        """The Advanced fields, shown; their column keeps their width with Advanced closed, so the card beside it stays
+        where it is."""
+        self.advanced.show_all()
+        self.fields_column.set_size_request(self.grid.get_preferred_width()[1], -1)
 
     def fill_mode(self):
         self.modes = self.settings.get('modes')
         thinking, effort = self.fields.get('thinking'), self.fields.get('reasoning_effort')
-        if not self.modes or not thinking:
-            self.mode_box.hide()
-            if not self.modes:          # DREAM-180: say so in the snapshot's place; no Mode/Effort row
-                self.mode_box.show_all()
-                self.mode_row.hide()
-                self.snapshot.set_text('Recommendations not available for this model')
-            return
         self.active_mode = None
+        if not self.modes or not thinking:
+            self.mode_box.hide()        # DREAM-180: no Mode/Effort row; the card says when there is no recommendation
+            self.render_card()
+            return
         self.mode_effort.remove_all()
         for choice in (effort[1]['choices'] if effort else []):
             self.mode_effort.append_text(choice)
@@ -354,19 +381,58 @@ class Onboarding(Gtk.Box):
         self.active_mode = mode
         (self.mode_instruct if mode == 'instruct' else self.mode_think).set_active(True)
         self.mode_effort.set_sensitive(field.get_active_text() != 'off')
-        m = self.modes
-        lines = ['<b>Recommended</b> · model card']
-        for name in ('thinking', 'instruct'):
-            if m[name]:
-                line = GLib.markup_escape_text(m[name]['line'])
-                lines.append(f'<span foreground="#EBF0FA">{line}</span>' if name == mode else line)
-                if m[name]['when']:
-                    lines.append(GLib.markup_escape_text('      Use for: ' + m[name]['when']))
-        if m['effort']:
-            lines.append(GLib.markup_escape_text('Effort: ' + ' · '.join(f'{k} — {v}' for k, v in m['effort'].items())))
-        lines += [GLib.markup_escape_text(text) for text in
-                  (m['note'], m['source'] and 'Source: ' + m['source'].removeprefix('https://')) if text]
-        self.snapshot.set_markup('\n'.join(lines))
+        self.render_card()
+
+    def render_card(self):
+        """The Recommended settings card, from protocol.recommended_card: per mode its use and values (the mode in use
+        marked), the reasoning efforts, the source, and the load screen's notes."""
+        for child in self.card.get_children():
+            self.card.remove(child)
+        data = recommended_card(self.modes, (self.settings or {}).get('notes'), self.active_mode)
+        head = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        head.pack_start(label(data['title'], 'rec-title'), False, False, 0)
+        if data['source']:
+            head.pack_start(wrapped(data['source'], 'rec-source', 64), False, False, 0)
+        self.card.pack_start(head, False, False, 0)
+        if data['empty']:
+            self.card.pack_start(wrapped(data['empty'], 'rec-text'), False, False, 0)
+        for mode in data['modes']:
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            box.get_style_context().add_class('rec-mode')
+            if mode['active']:
+                box.get_style_context().add_class('active')
+            top = Gtk.Box(spacing=10)
+            top.pack_start(label(mode['name'].upper(), 'rec-mode-name'), False, False, 0)
+            if mode['active']:
+                pill = label('In use', 'rec-pill')
+                pill.set_valign(Gtk.Align.CENTER)
+                top.pack_start(pill, False, False, 0)
+            box.pack_start(top, False, False, 0)
+            if mode['when']:
+                box.pack_start(wrapped(mode['when'][0].upper() + mode['when'][1:], 'rec-when', 50), False, False, 0)
+            values = Gtk.Grid(column_spacing=28, row_spacing=5)
+            for row, (name, value) in enumerate(mode['rows']):
+                values.attach(label(name, 'rec-key'), 0, row, 1, 1)
+                values.attach(wrapped(value, 'rec-value', 26), 1, row, 1, 1)
+            box.pack_start(values, False, False, 0)
+            if mode['unset']:
+                box.pack_start(wrapped('Not on the card, so off: ' + ', '.join(mode['unset']).lower() + '.',
+                                       'rec-text', 50), False, False, 0)
+            self.card.pack_start(box, False, False, 0)
+        for title, rows in (('Reasoning effort', data['effort']), ('Notes', [['•', note] for note in data['notes']])):
+            if not rows:
+                continue
+            section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            section.pack_start(label(title, 'rec-heading'), False, False, 0)
+            grid = Gtk.Grid(column_spacing=12, row_spacing=6)
+            for row, (name, text) in enumerate(rows):
+                key = label(name, 'rec-level')
+                key.set_valign(Gtk.Align.START)
+                grid.attach(key, 0, row, 1, 1)
+                grid.attach(wrapped(text, 'rec-text', 50), 1, row, 1, 1)
+            section.pack_start(grid, False, False, 0)
+            self.card.pack_start(section, False, False, 0)
+        self.card.show_all()
 
     def reset_settings(self, *_):
         if self.settings:
@@ -376,7 +442,7 @@ class Onboarding(Gtk.Box):
             rec = self.settings['recommended']
             self.summary.set_text(f"Context {rec['ctx']:,} · GPUs {rec['gpus'] or 'auto'}\n" + self.settings['sources']['ctx'])
             self.message.set_text('Recommendations restored. Saved settings change only after a successful load.')
-            self.advanced.show_all()
+            self.show_fields()
 
     def launch(self, *_):
         if self.owner.running:

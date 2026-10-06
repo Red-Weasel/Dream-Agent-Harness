@@ -878,14 +878,25 @@ def test_run_and_invoke_name_a_skill_like_use(curated, prompt, named):
 
 @pytest.mark.parametrize("prompt", ["x" + ";do" * 10000, "x" + ", is" * 8000])
 def test_the_question_guard_stays_linear_on_long_prompts(curated, prompt):
-    """Re-gate note 2: the old guard rescanned to the end of the sentence from every , ; : -- 907 and 785 ms here."""
+    """Re-gate note 2: the old guard rescanned to the end of the sentence from every , ; : -- 907 and 785 ms here.
+
+    2026-10-02: the public CI runner took 0.19 to 0.20 s where the ceiling is 0.150 (run 36980971824; 0.07 s here).
+    The claim, linear, is now a ratio that holds on any machine; the 0.150 s ceiling, measured on the owner's machine,
+    is scaled by DREAM_TEST_TIME_SCALE (the CI workflow sets it) and is 0.150 s where that is unset."""
     import time
-    best = float("inf")
-    for _ in range(3):
-        started = time.perf_counter()
-        select_for_task(prompt, curated)
-        best = min(best, time.perf_counter() - started)
-    assert best < 0.150, best
+
+    def best(text):
+        wall = cpu = float("inf")
+        for _ in range(3):
+            started, used = time.perf_counter(), time.thread_time()
+            select_for_task(text, curated)
+            wall, cpu = min(wall, time.perf_counter() - started), min(cpu, time.thread_time() - used)
+        return wall, cpu
+    (wall, cpu), (_, quarter_cpu) = best(prompt), best(prompt[: len(prompt) // 4])
+    # four times the prompt costs about four times the CPU -- under eight; the old guard was quadratic: sixteen
+    assert cpu < 8 * quarter_cpu, (quarter_cpu, cpu)
+    ceiling = 0.150 * float(os.environ.get("DREAM_TEST_TIME_SCALE", "1"))
+    assert wall < ceiling, (wall, ceiling)
 
 
 # ---- (4) the six upstream siblings -----------------------------------------------------------------------------------

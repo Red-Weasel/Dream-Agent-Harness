@@ -76,8 +76,11 @@ async def test_sizes_and_side_persist_across_reload(studio):
         left = await page.locator('.nd-orch').evaluate('e => e.getBoundingClientRect().left')
         assert left > await page.locator('.nd-main').evaluate('e => e.getBoundingClientRect().left')
         rows = await page.evaluate("""p => { const r = s => p.querySelector(s).getBoundingClientRect();
-            const a = r('.nd-app'), o = r('.nd-orch'), m = r('.nd-main'); return {o: [o.top, o.bottom], m: [m.top, m.bottom], a: [a.top, a.bottom]}; }""")
-        assert abs(rows['o'][0] - rows['m'][0]) <= 1 and abs(rows['m'][1] - rows['a'][1]) <= 1, rows   # side by side, full height
+            const a = r('.nd-app'), o = r('.nd-orch'), m = r('.nd-main'), t = r('.nd-top'), n = r('.nd-notes');
+            return {o: [o.top, o.bottom], m: [m.top, m.bottom], a: [a.top, a.bottom], t: [t.top, t.bottom + n.height, t.left, m.left]}; }""")
+        # side by side, full height: the column from the app's top to its bottom, the workers under their own bar (DREAM-239)
+        assert abs(rows['o'][0] - rows['a'][0]) <= 1 and abs(rows['o'][1] - rows['a'][1]) <= 1 and abs(rows['m'][1] - rows['a'][1]) <= 1, rows
+        assert abs(rows['t'][0] - rows['o'][0]) <= 1 and abs(rows['m'][0] - rows['t'][1]) <= 1 and abs(rows['t'][2] - rows['t'][3]) <= 1, rows
         assert await s.page.evaluate(KEYS) == ['dream.nested.orch-w', 'dream.nested.pin-split', 'dream.nested.pins.nested-test', 'dream.nested.side', 'dream.nested.top-h']
         await shot(s.page, 'nested-layout-right-1600.png')
         await s.page.reload()
@@ -240,6 +243,7 @@ async def test_reset_layout_restores_the_defaults(studio):
         await expect(page.locator('.nd-app')).to_have_attribute('data-side', 'right')
         await expect(page.locator('.nd-win[data-slot="1"]')).to_have_attribute('data-run-id', 'r-3')
         assert len(await s.page.evaluate(KEYS)) == 4
+        await page.locator('#nd-custom-btn').click()                   # Reset layout sits in Customize (the v2 mockup)
         await page.locator('#nd-reset').click()
         assert abs(await width(s.page, orch) - w0) <= 1
         await expect(page.locator('.nd-app')).to_have_attribute('data-side', 'left')
@@ -275,6 +279,7 @@ async def test_the_page_works_when_storage_throws(studio):
         await expect(page.locator('.nd-app')).to_have_attribute('data-side', 'right')
         await page.locator('.nd-card[data-run-id="r-3"] [data-pin]').click()
         await expect(page.locator('.nd-win[data-slot="1"]')).to_have_attribute('data-run-id', 'r-3')
+        await page.locator('#nd-custom-btn').click()                   # Reset layout sits in Customize (the v2 mockup)
         await page.locator('#nd-reset').click()
         await expect(page.locator('.nd-app')).to_have_attribute('data-side', 'left')
         assert await s.page.evaluate("Object.keys(localStorage).filter(k => k.startsWith('dream.nested.'))") == []

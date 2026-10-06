@@ -67,3 +67,34 @@ def browser_address(value: str) -> str:
 def refill(current, old, new):
     """DREAM-179: the fields a mode switch re-seeds: those still at the old mode's recommended value (never a user's edit)."""
     return {key: value for key, value in new.items() if key in current and current[key] == old.get(key)}
+
+
+def recommended_card(modes, notes, active=None):
+    """The load screen's Recommended settings card (the owner's plan of 2026-10-01) as plain data, for the GTK screen
+    to lay out: {title, source, modes: [{key, name, when, active, rows: [[label, value]], unset}], effort: [[level,
+    text]], notes: [text]}. `modes` is model_defaults.recommended_modes' block, None when the model card gives nothing
+    (the card says so); `notes` are the load screen's notes, which the card shows instead of small lines under the
+    buttons; `active` is the mode the Thinking / Instruct switch is on (default: the block's own)."""
+    card = {'title': 'Recommended settings', 'source': '', 'modes': [], 'effort': [], 'empty': '',
+            'notes': [str(note) for note in notes or () if str(note).strip()]}
+    if not modes:
+        card['empty'] = ("This model's card gives no recommended settings, so the fields show the engine's own "
+                         "defaults.")
+        return card
+    source = str(modes.get('source') or '').removeprefix('https://').removeprefix('http://')
+    card['source'] = 'From the model card' + (f' · {source}' if source else '')
+    active = active or modes.get('active') or 'thinking'
+    for key in ('thinking', 'instruct'):
+        mode = modes.get(key)
+        if not mode:
+            continue
+        name = str(mode.get('label') or key.title())
+        if key == 'thinking' and not modes.get('instruct'):
+            name += ' (always on)'
+        card['modes'].append({'key': key, 'name': name, 'when': str(mode.get('when') or ''), 'active': key == active,
+                              'rows': [list(row) for row in mode.get('rows') or ()],
+                              'unset': list(mode.get('unset') or ())})
+    card['effort'] = [[str(level), str(text)] for level, text in (modes.get('effort') or {}).items()]
+    if modes.get('note'):
+        card['notes'].insert(0, str(modes['note']))
+    return card

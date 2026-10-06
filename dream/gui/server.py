@@ -174,6 +174,21 @@ def follow_default() -> bool:
     return not (isinstance(section, dict) and section.get("follow_model_view") is False)
 
 
+def open_in_app(path: Path) -> None:
+    """Hand a file to the desktop's default application for its type (xdg-open). Raises OSError when this machine
+    has no opener or it cannot start."""
+    import shutil
+    import subprocess
+    import threading
+
+    opener = shutil.which("xdg-open")
+    if opener is None:
+        raise OSError("this machine has no xdg-open")
+    process = subprocess.Popen([opener, str(path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, start_new_session=True)
+    threading.Thread(target=process.wait, daemon=True).start()
+
+
 class StudioServer:
     """Serves the GUI for one Dream session."""
 
@@ -198,9 +213,13 @@ class StudioServer:
         on_workflow: Callable[[str, dict], Any] | None = None,
         follow_model_view: bool = True,
         sleepwalk: bool = False,
+        artifacts: Any = None,
     ) -> None:
         self.bus = bus
         self.port = port
+        # The session's artifact registry (gui/artifacts.py, DREAM-233): what a turn built, by id and version,
+        # for the content route and the follow-up note. None without one (the pane then shows no cards).
+        self.artifacts = artifacts
         self._sleepwalk = None
         self._sleepwalk_on = sleepwalk     # Dream's own session fires Sleepwalk schedules (DREAM-158); tests do not
         self.token = secrets.token_urlsafe(32)
@@ -287,6 +306,9 @@ class StudioServer:
             Route("/api/follow", self._follow, methods=["POST"]),
             Route("/api/studio_report", self._studio_report, methods=["POST"]),
             Route("/api/page_link", self._page_link),
+            Route("/api/artifact/{aid}", self._artifact),
+            Route("/api/artifacts", self._artifact_library),
+            Route("/api/open_file", self._open_file, methods=["POST"]),
             Route("/api/assets", self._assets),
             Route("/api/frame_reply", self._frame_reply, methods=["POST"]),
             Route("/api/answer", self._answer, methods=["POST"]),
@@ -433,10 +455,20 @@ class StudioServer:
         return JSONResponse({"ok": True})
 
     def add_report(self, report: dict[str, Any]) -> dict[str, Any]:
-        """Keep one pane report (already validated), numbered in arrival order."""
+        """Keep one pane report (already validated), numbered in arrival order, and write it to
+        the session's runtime log (A0): the owner's nine shows left no record of what the pane
+        did with them; `var/logs/runtime/<session>.jsonl` now carries each `studio_report`."""
         self._report_seq += 1
         record = {**report, "seq": self._report_seq, "at": time.time()}
         self._reports = [*self._reports[-(REPORTS_KEPT - 1):], record]
+        session_id = self._session.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            from .. import config as dream_config
+            from ..telemetry.runtime import RunMeter
+            RunMeter(session_id, 0, None, dream_config.LOG_DIR / "runtime" / f"{session_id}.jsonl").record(
+                "studio_report", seq=record["seq"], path=record["path"], digest=record["digest"],
+                status=record["status"], phase=record["phase"], errors=list(record["errors"]),
+                webgl_lost=record["webgl_lost"])
         return record
 
     def report_mark(self) -> int:
@@ -516,6 +548,84 @@ class StudioServer:
             return JSONResponse({"error": "path must name a file inside the workspace, not a hidden one"},
                                 status_code=400)
         return JSONResponse({"url": url}, headers={"Cache-Control": "no-store"})
+
+    async def _artifact(self, request):
+        """One version of a registered artifact (DREAM-233): the page's prepared body (local media embedded as a
+        show embeds it, the raw page with a note when that fails) and its metadata; a report's source as written;
+        no content for a binary kind (the panel shows the file itself). The token header only: this page fetches
+        it, a frame never does. Ids are this session's, or with ``session=`` those of an earlier session of this
+        workspace (the Artifacts tab's list, DREAM-235); any other is unknown here."""
+        if not self._authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        if self.artifacts is None:
+            return JSONResponse({"error": "no artifacts in this session"}, status_code=404)
+        asked = request.query_params.get("v")
+        try:
+            version = int(asked) if asked else None
+            if version is not None and version < 1:
+                raise ValueError(asked)
+        except ValueError:
+            return JSONResponse({"error": "v must be a version number from 1"}, status_code=400)
+        got = await run_in_threadpool(self.artifacts.read, request.path_params["aid"], version,
+                                      request.query_params.get("session") or None)
+        if got is None:
+            return JSONResponse({"error": "no such artifact or version in this session"}, status_code=404)
+        text = got.pop("text")
+        content = text
+        ws = self._workspace()
+        if got.get("type") == "page" and ws is not None:
+            from .bundle import prepare_studio_media
+            try:
+                content = await run_in_threadpool(prepare_studio_media, ws / got["path"], text)
+            except ValueError as exc:
+                got["note"] = str(exc)
+        return JSONResponse({**_jsonable(got), "content": content}, headers={"Cache-Control": "no-store"})
+
+    async def _artifact_library(self, request):
+        """The Artifacts tab's list (DREAM-235): what this session built in this workspace, then what earlier
+        sessions built in it, newest first. Metadata only."""
+        if not self._authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        if self.artifacts is None:
+            return JSONResponse({"session_id": "", "session": [], "earlier": []}, headers={"Cache-Control": "no-store"})
+        listed = await run_in_threadpool(self.artifacts.library)
+        ws = self._workspace()
+        if ws is not None and self.pages.ready:
+            # A page's "Open in browser" address (the page server's own origin, DREAM-111), ready for a plain link.
+            for row in listed["session"] + listed["earlier"]:
+                if row.get("exists") and row.get("type") in ("page", "svg"):
+                    try:
+                        row["page_url"] = self.pages.url_for(ws / row["path"])
+                    except OSError:
+                        pass
+        return JSONResponse(_jsonable(listed), headers={"Cache-Control": "no-store"})
+
+    async def _open_file(self, request):
+        """"Open in app" (DREAM-236): a report, an image, a media file or a document of this workspace, handed to
+        the desktop's own application for it. Only on the owner's click in Dream's page (the token header, never
+        a URL), only a workspace file of those kinds: never a page or a script, which Open in browser serves from
+        its own origin."""
+        if not self._authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "bad json"}, status_code=400)
+        target = self._inside(str(body.get("path") or "")) if isinstance(body, dict) else None
+        from .artifacts import PAGE_TYPES, kind_of
+        try:
+            found = target is not None and target.is_file()
+        except OSError:
+            found = False
+        if not found or kind_of(target) is None or kind_of(target) in PAGE_TYPES:
+            return JSONResponse({"error": "path must name a report, image, media file or document inside the workspace"},
+                                status_code=400)
+        try:
+            await run_in_threadpool(open_in_app, target)
+        except OSError as exc:
+            return JSONResponse({"error": f"{target.name} could not be opened in an application: {exc}. "
+                                          "Download it instead."}, status_code=503)
+        return JSONResponse({"ok": True, "name": target.name})
 
     def reset_project_view(self) -> None:
         """Called after an idle project switch; discard old preview handles only."""
@@ -895,6 +1005,12 @@ class StudioServer:
         if (body.get("read_twice") is True and body.get("delivery", "queue") == "queue"
                 and not text.startswith("/")):
             text = text + READ_AGAIN + text
+        if isinstance(body.get("artifact"), str) and self.artifacts is not None and not text.startswith("/"):
+            # The owner has an artifact open in the preview panel (DREAM-233): the model is told which file
+            # "it" is, under the owner's words; the owner's bubble shows only their words.
+            note = self.artifacts.note(body["artifact"])
+            if note:
+                text += "\n\n" + note
         if files:
             display += "\n\nAttached files: " + ", ".join(f["name"] for f in files)
             text += ("\n\n[Files attached by the user. Use read_file on these workspace paths "

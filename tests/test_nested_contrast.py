@@ -116,6 +116,9 @@ def studio(monkeypatch):
         prompts, state = [], {'mode': 'ask'}
 
         async def control(payload):
+            if payload.get('action') == 'settings_get':                   # Max agents' row (the settings branch's contract)
+                return {'sections': [{'id': 'workers', 'rows': [{'key': 'nested.max_agents', 'label': 'Max agents', 'value': None,
+                                                                  'edit': {'kind': 'number', 'min': 1, 'value': None}}]}]}
             if payload.get('action') == 'permission_mode':
                 state['mode'] = policy.next_mode(state['mode'])
             return {'mode': state['mode'], 'modes': list(policy.MODES), 'labels': policy.MODE_LABEL}
@@ -232,6 +235,12 @@ async def test_every_text_pair_of_a_full_session_meets_aa(studio):
         assert not bad, bad
         box = await page.locator('#nd-compose').evaluate(BOX)
         assert box['text'] >= 4.5 and box['placeholder'] >= 4.5, box
+        await expect(page.locator('#nd-maxw')).to_be_visible()
+        box = await page.locator('#nd-max').evaluate(BOX)                     # Max agents: its "No limit" and a typed number
+        assert box['text'] >= 4.5 and box['placeholder'] >= 4.5, box
+        for t in await page.locator('.nd-say textarea').all():                 # the workers' boxes, typed and empty
+            box = await t.evaluate(BOX)
+            assert box['text'] >= 4.5 and box['placeholder'] >= 4.5, box
         # an empty window and the belt's note; a turn that ended (Send)
         await page.locator('.nd-win[data-run-id="r-2"] [data-unpin]').click()
         await expect(page.locator('.nd-win-empty')).to_be_visible()
@@ -273,7 +282,8 @@ async def test_every_text_pair_of_a_full_session_meets_aa(studio):
 # --- (b) hover and focus: every control, in every state it can be in today ------------------------------------------
 
 async def test_hover_and_focus_keep_the_contrast_of_every_control(studio):
-    async with studio(lanes={'served': 2, 'busy': 2, 'queued': 1}) as s:
+    # 2400 px wide: the workers' bar is over the workers' column only (DREAM-239) and shows its buttons' words from 1100 px of its own.
+    async with studio(width=2400, height=1000, lanes={'served': 2, 'busy': 2, 'queued': 1}) as s:
         page = await open_nested(s)
         await s.srv._accept_prompt('Write the release notes for 0.3.0.')
         full_session(s)                                          # the turn runs on: its end would settle the Working and Queued pips (0428a6a)
@@ -287,11 +297,21 @@ async def test_hover_and_focus_keep_the_contrast_of_every_control(studio):
             states.add(await pips.nth(i).get_attribute('aria-label'))
             bad += await check_states(s.page, pips.nth(i))
         assert {a.split(': ')[1] for a in states} == {'Working', 'Done', 'Failed', 'Stopped', 'Queued'}, states
-        for sel in ['#nd-send', '#nd-drawer-btn', '#nd-auto', '#nd-reset', '#nd-prev', '#nd-next', '#nd-side',
+        for sel in ['#nd-send', '#nd-drawer-btn', '#nd-pause-all', '#nd-auto', '#nd-custom-btn', '#nd-prev', '#nd-next', '#nd-side',
                     '.nd-attn button.nd-fail', '.nd-win[data-run-id] [data-unpin]', '.nd-card[data-run-id] [data-pin]',
+                    '.nd-win[data-run-id="r-1"] .nd-ctl-pause', '.nd-win[data-run-id="r-1"] .nd-ctl-stop', '.nd-card[data-run-id="r-6"] .nd-ctl-stop',
                     '.nd-card[data-run-id="r-3"]', '#nd-tab-agents', '#nd-tab-workflows', '#nd-mode', '#nd-read-twice',
                     '#nd-plan-toggle', 'details.nd-think summary']:
             bad += [dict(r, sel=sel) for r in await check_states(s.page, page.locator(sel).first)]
+        # Reset layout and Close live in the Customize panel now (the v2 mockup); the open panel's button is pressed
+        await page.locator('#nd-custom-btn').focus()                       # opened from the keyboard: focus still shows
+        await s.page.keyboard.press('Enter')
+        await expect(page.locator('#nd-custom')).to_be_visible()
+        for sel in ['#nd-reset', '#nd-custom-close', '#nd-custom-btn']:
+            bad += [dict(r, sel=sel) for r in await check_states(s.page, page.locator(sel))]
+        await page.locator('#nd-custom-close').focus()
+        await s.page.keyboard.press('Enter')
+        await expect(page.locator('#nd-custom')).to_be_hidden()
         await page.locator('#nd-plan-toggle').focus()            # the pressed toggle, opened from the keyboard, hovered and focused
         await s.page.keyboard.press('Enter')
         bad += [dict(r, sel='#nd-plan-toggle[aria-expanded=true]') for r in await check_states(s.page, page.locator('#nd-plan-toggle'))]
@@ -343,17 +363,18 @@ async def test_empty_states_meet_aa(studio, provider, want):
 # --- (d) the states no event renders yet, from the stylesheet's tokens --------------------------------------------
 
 def test_pip_tokens_for_every_state_meet_aa_including_the_ones_no_event_sets_yet():
+    # The view paints its own palette now (the v2 mockup's, after the owner's "wrong colors" of 2026-09-30), not Dream's
+    # theme tokens: every pair is read from nested.css's own token block.
     css = (STATIC / 'nested.css').read_text()
     block = re.search(r'#dream-nested-page\{(.*?)\n\}', css, re.S).group(1)
     nd = dict(re.findall(r'--(nd-[\w-]+):(#[0-9a-f]{6})', block))
-    theme = re.search(r'html\.dream-design\{(--bg0:[^}]*)\}', (STATIC / 'theme.css').read_text()).group(1)
-    t = dict(re.findall(r'--([\w-]+):(#[0-9a-f]{6})', theme))
     pairs = {'working': (nd['nd-on-status'], nd['nd-ok']), 'verifying': (nd['nd-on-status'], nd['nd-verify']),
-             'needs': (t['ember-ink'], t['ember']), 'failed and stopped': (nd['nd-on-status'], nd['nd-fail']),
-             'queued and done': (nd['nd-on-pewter'], nd['nd-pewter'])}
+             'needs': (nd['nd-on-accent'], nd['nd-needs']), 'failed and stopped': (nd['nd-on-status'], nd['nd-fail']),
+             'queued and done': (nd['nd-on-pewter'], nd['nd-pewter']), 'a pressed segment': (nd['nd-on-seg'], nd['nd-seg-on'])}
     for state, (fg, bg) in pairs.items():
         assert _ratio(_hex(fg), _hex(bg)) >= 4.5, (state, fg, bg, round(_ratio(_hex(fg), _hex(bg)), 2))
-    # the accent words (needs you, failed, thinking) on every surface they can sit on
-    for text in (t['ember'], nd['nd-fail'], nd['nd-rose']):
-        for surface in (t['bg0'], t['bg2'], t['panel'], t['raised'], t['plum']):
+    surfaces = (nd['nd-bg'], nd['nd-card'], nd['nd-raised'], nd['nd-hover'], nd['nd-select'])
+    # the accent words (needs you, failed, thinking) and the quiet text on every surface they can sit on
+    for text in (nd['nd-needs'], nd['nd-fail'], nd['nd-rose'], nd['nd-fg2'], nd['nd-fg3']):
+        for surface in surfaces:
             assert _ratio(_hex(text), _hex(surface)) >= 4.5, (text, surface, round(_ratio(_hex(text), _hex(surface)), 2))

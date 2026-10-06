@@ -29,7 +29,7 @@ async def test_queued_waiting_stopped_and_failed_rows_render_with_their_reasons(
         await expect(pips).to_have_count(4)
         await expect(pips.nth(2)).to_have_attribute('aria-label', '3 writer: Queued')
         await expect(pips.nth(2)).to_have_class(r'nd-pip nd-queued')
-        await expect(pips.nth(2)).to_have_css('background-color', 'rgb(74, 74, 92)')          # pewter
+        await expect(pips.nth(2)).to_have_css('background-color', 'rgb(74, 70, 80)')          # pewter (the v2 mockup's)
         card3 = page.locator('.nd-card[data-run-id="r-3"]')
         await expect(card3.locator('.nd-state')).to_have_text('Queued')
         await expect(card3.locator('.nd-headline')).to_have_text(QUEUED)
@@ -39,7 +39,7 @@ async def test_queued_waiting_stopped_and_failed_rows_render_with_their_reasons(
         await expect(card3.locator('.nd-headline')).to_have_text('Subagent started.')
         s.srv.bus.publish(_activity('r-4', 'writer', 'status', status='interrupted', text=STOPPED))
         await expect(pips.nth(3)).to_have_attribute('aria-label', '4 writer: Stopped')
-        await expect(pips.nth(3)).to_have_css('background-color', 'rgb(255, 115, 133)')       # the failed/stopped red
+        await expect(pips.nth(3)).to_have_css('background-color', 'rgb(255, 85, 102)')        # the failed/stopped red (the v2 mockup's)
         await expect(page.locator('.nd-card[data-run-id="r-4"] .nd-headline')).to_have_text(STOPPED)
         await expect(page.locator('.nd-attn')).to_contain_text('1 failed')
         # a lane waiting for another request on the local engine says so, and says when it is free

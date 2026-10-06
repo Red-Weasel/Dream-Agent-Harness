@@ -3,6 +3,7 @@ import re
 from playwright.async_api import expect
 from test_desktop_chat import chat
 from test_workspace_library_ui import library
+from chat_more import more
 
 
 async def test_navigation_selection_tracks_full_pages_and_preserves_draft(library):
@@ -33,7 +34,7 @@ async def test_navigation_selection_tracks_full_pages_and_preserves_draft(librar
 
 async def test_classic_library_selection_and_drawer_close_agree(library):
     _, page, prompts, _, _ = library
-    await page.locator('#dream-inspect-toggle').click()
+    await more(page,'dream-inspect-toggle')
     await page.get_by_role('button', name='Use classic presentation', exact=True).click()
     for name, identifier in [('skills', 'studio-skills'), ('projects', 'studio-project')]:
         await page.locator('#' + identifier).click()

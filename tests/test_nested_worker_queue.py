@@ -443,6 +443,6 @@ def test_session_info_carries_the_lanes(tmp_path):
     info = App._studio_session_info(app)
     assert info["lanes"] == {"served": 2, "busy": 0, "queued": 0} and info["model"] == "m"
     assert _backend_for("machx").lanes_status() == {"served": 1, "busy": 0, "queued": 0}, "no lanes known: one at a time"
-    assert _backend_for("openai").lanes_status() == {"served": 4, "busy": 0, "queued": 0}, "Parallel workers, 4 without a profile"
+    assert _backend_for("openai").lanes_status() == {"served": None, "busy": 0, "queued": 0}, "no max agents: no limit"
     engine.backend = None
     assert App._studio_session_info(app)["lanes"] is None, "no backend yet: nothing invented"

@@ -92,6 +92,19 @@ main{flex:1;min-width:380px;overflow-y:auto;padding:22px 20px 8px;scroll-behavio
 .body table{border-collapse:collapse;margin:0 0 12px;font-size:13px}
 .body th,.body td{border:1px solid var(--line);padding:5px 10px;text-align:left}
 .body th{background:var(--panel)}
+.body h4{margin:16px 0 8px;line-height:1.3;font-size:1em}
+.body li>ul,.body li>ol{margin:3px 0 0}
+.body hr{border:0;border-top:1px solid var(--line);margin:16px 0}
+.body del{color:var(--dim)}
+.body .md-table{overflow-x:auto;margin:0 0 12px}
+.body .md-table table{margin:0}
+/* a fenced block: the language and Copy above the code */
+.codeblock{margin:0 0 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);overflow:hidden}
+.codehead{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:3px 4px 3px 14px;
+  border-bottom:1px solid var(--line);color:var(--dim);font:11px/1.4 var(--mono)}
+.codecopy{background:none;border:0;border-radius:6px;color:var(--dim);font:inherit;padding:4px 9px;cursor:pointer}
+.codecopy:hover{color:var(--fg)}
+.body .codeblock pre{margin:0;border:0;border-radius:0}
 .cursor{display:inline-block;width:7px;height:15px;background:var(--cyan);
   vertical-align:-2px;animation:blink 1.1s step-end infinite}
 @keyframes blink{50%{opacity:0}}
@@ -126,7 +139,17 @@ main{flex:1;min-width:380px;overflow-y:auto;padding:22px 20px 8px;scroll-behavio
 .sys.dream-note{color:var(--violet)}   /* a note Dream wrote itself (steeringNotice), never shown as the owner's */
 
 /* composer */
-footer{flex:0 0 auto;background:var(--bg2);border-top:1px solid var(--line);padding:12px 20px 14px}
+footer{flex:0 0 auto;position:relative;background:var(--bg2);border-top:1px solid var(--line);padding:12px 20px 14px}
+/* "Jump to latest": above the composer, over the end of the conversation, while the reader is scrolled up */
+#to-latest{position:absolute;left:50%;bottom:calc(100% + 10px);transform:translateX(-50%);z-index:4}
+#to-latest[hidden]{display:none}
+.msg-foot{display:flex;align-items:center;gap:4px 10px;flex-wrap:wrap;margin-top:6px;color:var(--faint);font-size:12px;-webkit-user-select:none;user-select:none}
+/* message actions: Copy, Try again, the turn's speed and time. A message's Copy shows its word through its accessible
+   name, so a message's text stays its own words alone (what a selection copies and what a test reads). */
+.msg-copy::after{content:attr(aria-label)}
+.msg-foot button,.sys .msg-retry{background:none;border:1px solid var(--line);border-radius:6px;color:var(--dim);font:inherit;padding:2px 9px;cursor:pointer}
+.msg-foot .msg-meta{margin-left:auto}
+.sys .msg-retry{margin-left:8px}
 .composer{max-width:860px;margin:0 auto;display:flex;gap:10px;align-items:flex-end;
   background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:9px 11px;
   transition:border-color .18s}
@@ -196,6 +219,11 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:var(
 .pill{display:inline-block;font-size:9.5px;padding:1px 7px;border-radius:99px;
   background:var(--panel);color:var(--dim);margin-left:6px}
 .pill.live{background:#12301f;color:var(--ok)}
+/* the previews' internet switch (DREAM-234): green = on, red = off */
+.netpill{display:inline-flex;align-items:center;gap:6px;background:none;border:1px solid var(--line);
+  color:var(--dim);font:10px var(--mono);padding:2px 9px;border-radius:99px;cursor:pointer}
+.netpill .dot{background:#22c55e}
+.netpill.off .dot{background:#ef4444}
 #railtoggle,.tabs button{background:none;border:1px solid var(--line);color:var(--dim);
   padding:4px 9px;font:10px var(--mono);border-radius:6px;cursor:pointer}
 #railtoggle:hover,.tabs button:hover{color:var(--fg);border-color:var(--violet)}
@@ -229,19 +257,20 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:var(
   padding:8px 9px;font:10.5px/1.5 var(--mono);max-height:280px;overflow:auto;white-space:pre-wrap}
 .cpdiff .a{color:var(--ok)}.cpdiff .d{color:var(--err)}.cpdiff .h{color:var(--violet)}
 
-/* artifacts */
-.artchip{display:flex;align-items:center;gap:9px;border:1px solid var(--line);
-  border-radius:9px;background:var(--panel);padding:9px 12px;margin:0 0 10px;cursor:pointer;
+/* artifacts: the card in the conversation (DREAM-233) -- the type, the title, "Page · v3", Open; it re-opens the panel */
+.artcard{display:flex;align-items:center;gap:10px;max-width:460px;border:1px solid var(--line);
+  border-radius:10px;background:var(--panel);padding:9px 10px 9px 12px;margin:0 0 12px;cursor:pointer;
   transition:border-color .15s}
-.artchip:hover{border-color:var(--violet)}
-.artchip .ic{width:23px;height:23px;border-radius:6px;background:var(--grad);flex:0 0 auto;
+.artcard:hover{border-color:var(--violet)}
+.artcard .ic{width:24px;height:24px;border-radius:6px;background:var(--grad);flex:0 0 auto;
   display:grid;place-items:center;font:600 10px var(--mono);color:var(--bg0)}
-.artchip .t{flex:1;min-width:0}
-.artchip .t b{display:block;font-size:12.5px;font-weight:500;overflow:hidden;
-  text-overflow:ellipsis;white-space:nowrap}
-.artchip .t span{color:var(--faint);font:10px var(--mono);display:block;overflow:hidden;
-  text-overflow:ellipsis;white-space:nowrap}
-.artchip .go{color:var(--faint);font:10px var(--mono)}
+.artcard .t{flex:1;min-width:0;display:flex;align-items:baseline;gap:6px;overflow:hidden;white-space:nowrap}
+.artcard .t b{font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis}
+.artcard .t .meta{color:var(--faint);font:11px var(--mono);flex:0 0 auto}
+.artcard .go{flex:0 0 auto;padding:4px 12px;border-radius:999px;font:600 12px var(--sans)}
+.artcard.pulse{animation:artpulse 1.2s ease-out 2}
+@keyframes artpulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--violet) 70%,transparent)}100%{box-shadow:0 0 0 12px transparent}}
+.artvn{flex:0 0 auto;color:var(--faint);font:11px var(--mono)}
 
 #artpanel{width:min(52vw,760px);flex:0 0 auto;background:var(--bg2);
   border-left:1px solid var(--line);display:none;flex-direction:column;min-width:0}
@@ -275,6 +304,26 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:var(
 .stillbar button{padding:5px 11px;border-radius:6px;border:1px solid #8673ba;background:#383151;
   color:#fff;font:600 12px/1.3 system-ui,sans-serif;cursor:pointer}
 .stillbar button:hover{background:#4a4070}
+/* a report, a media player and the file card (DREAM-236) */
+#artbody.report, .companion #artbody.report{background:var(--bg);color:var(--fg)}
+.artdoc{max-width:720px;margin:0 auto;padding:28px 24px 48px;font:15px/1.7 var(--sans)}
+#artbody.media, .companion #artbody.media{display:flex;align-items:center;justify-content:center;background:#111}
+#artbody.media video{max-width:100%;max-height:100%;min-width:min(100%,360px)}   /* a tiny clip still has usable controls */
+#artbody.media audio{width:min(92%,520px)}
+#artbody.file, .companion #artbody.file{display:flex;align-items:center;justify-content:center;background:var(--bg);color:var(--fg);padding:24px}
+.artfile{display:flex;align-items:flex-start;gap:14px;max-width:520px;border:1px solid var(--line);border-radius:12px;
+  background:var(--panel);padding:16px}
+.artfile .ic{width:40px;height:40px;border-radius:8px;background:var(--bg2);border:1px solid var(--line);flex:0 0 auto;
+  display:grid;place-items:center;font:600 11px var(--mono);color:var(--dim)}
+.artfile .t{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;overflow-wrap:anywhere}
+.artfile .t b{font:600 14px/1.4 var(--sans)}
+.artfile .t span{color:var(--dim);font:12px/1.4 var(--sans)}
+.artfile .t p{margin:6px 0 0;font:13px/1.5 var(--sans);color:var(--fg)}
+.artfile .t p.said{color:var(--dim)}.artfile .t p.said:empty{display:none}.artfile .t p.said.bad{color:var(--err)}
+.artfile .acts{display:flex;flex-direction:column;gap:8px;flex:0 0 auto}
+.artfile .go{box-sizing:border-box;display:block;text-align:center;text-decoration:none;cursor:pointer;padding:6px 14px;
+  border-radius:999px;border:1px solid var(--line);background:var(--bg2);color:var(--fg);font:500 12px/1.4 var(--sans)}
+.artfile .go:hover{border-color:var(--violet)}
 .artfollow{display:flex;align-items:center;gap:5px;font:10px var(--mono);color:var(--dim);cursor:pointer;
   white-space:nowrap;padding:0 4px}
 .artfollow input{margin:0;accent-color:var(--accent,#7c6cf0)}
@@ -283,6 +332,7 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:var(
 /* Phase 6: forms, tweaks, point mode */
 .artmode{all:unset;cursor:pointer;font:12px system-ui,sans-serif;padding:3px 8px;border-radius:6px;background:rgba(255,255,255,.08);margin-left:6px;opacity:.85}
 .artmode.on{background:rgba(120,90,255,.45);opacity:1}
+.artmenu{display:contents}
 .mention{display:flex;gap:8px;align-items:center;margin:0 0 6px;padding:6px 10px;border-radius:8px;background:rgba(120,90,255,.18);font:12px/1.4 ui-monospace,monospace;white-space:pre-wrap}
 .mention button{all:unset;cursor:pointer;padding:0 6px;opacity:.7}
 .qform{margin:10px 0;padding:14px 16px;border-radius:10px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1)}
@@ -366,6 +416,7 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:var(
   <span class="wordmark">DREAM</span>
   <div class="meta" id="meta"></div>
   <div class="status">
+    <button id="netpill" class="netpill" title="Previews may load from the public internet over https. Click to turn off."><span class="dot"></span>internet</button>
     <button id="railtoggle" title="toggle telemetry">metrics</button>
     <span class="dot" id="dot"></span><span id="stat">connecting</span>
   </div>
@@ -399,6 +450,7 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:var(
   <section id="artpanel">
     <div class="artbar">
       <span class="nm" id="artname"></span>
+      <span class="artvn" id="artvn" style="display:none"></span>
       <select id="artver" title="version"></select>
       <div class="seg">
         <button id="artprev" class="on">preview</button>
@@ -407,6 +459,18 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:var(
       <button id="arttweaks" class="artmode" style="display:none" title="show the page's Tweaks panel">Tweaks</button>
       <button id="artpoint" class="artmode" title="point at an element; your next message names it">point</button>
       <a id="artext" class="artmode" target="_blank" rel="noopener noreferrer" style="display:none" title="Open this file in your default browser. It is served read-only from this workspace on its own local address, where ES modules load; that page holds no Dream credentials and cannot reach Dream.">Open in browser ↗</a>
+      <!-- The secondary actions beside the chat (body.chat-art). Where the bar is narrower than they are, they are the
+           menu under "More" and Open in browser is its arrow alone (artifacts.css; DREAM-235). -->
+      <button id="artmore" class="artmode" type="button" style="display:none" aria-haspopup="true" aria-expanded="false" aria-controls="artmenu" aria-label="More actions" title="More actions">⋯</button>
+      <div id="artmenu" class="artmenu">
+        <button id="artapp" class="artmode" type="button" style="display:none" title="Open this file in its application on this computer">Open in app</button>
+        <!-- The Chat view's panel controls (DREAM-233): shown while the panel is open beside the chat (body.chat-art) -->
+        <button id="artrefresh" class="artmode" style="display:none" title="Re-read this file from disk">Refresh</button>
+        <button id="artcopy" class="artmode" style="display:none" title="Copy the file's source">Copy</button>
+        <a id="artdl" class="artmode" download style="display:none" title="Download this file">Download</a>
+        <button id="artstudio" class="artmode" style="display:none" title="Open in the Artifacts tab at full width, with Point, Tweaks, follow the model's view, Expand, Compare and History">Artifacts</button>
+        <label class="artfollow" id="artauto" style="display:none" title="Open previews automatically when Dream builds something (this browser only)"><input type="checkbox" id="artautobox" checked> auto-open</label>
+      </div>
       <label class="artfollow" id="artfollow" title="Follow the model's view: what it loads in its hidden frame, each edit to that file and each screenshot it saves appear here live, so you can steer as it works. Off: only what it shows you explicitly. Starting state: studio.follow_model_view in the runtime settings."><input type="checkbox" id="artfollowbox" checked> follow</label>
       <button class="artclose" id="artclose" title="close">&times;</button>
     </div>
@@ -416,6 +480,7 @@ main::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:var(
 </div>
 
 <footer>
+  <button id="to-latest" type="button" hidden title="Jump to the latest message">Jump to latest</button>
   <div id="mention" class="mention" style="display:none"><span id="mentiontext"></span><button id="mentionclear" title="clear">&times;</button></div>
   <div class="composer">
     <details id="plan-panel" hidden></details>
@@ -443,6 +508,11 @@ const feed = DreamFeed.mount(stream);
 let replayingHistory = false, working = false, sending = false;
 let socket, current = null, thinking = null, tools = new Map(), nTool = 0, nMsg = 0, retry = 0, replayOnConnect = false;
 let writing = null;   // the tool call being written, shown live and then replaced by its card
+let turnReply = null; // this turn's reply (.msg.dream) while nothing but text followed it: where "Stopped" and the turn's numbers go
+// "Try again" (DREAM-231) sends the owner's message that started a failed or stopped turn. ownerPending is the message
+// that will start the next turn; turn is the running one: {owner, failed, continued}. A turn no owner message started
+// (a command's own work, a project that did not open) has no owner and offers nothing.
+let ownerPending = null, turn = null, pendingPost = null;
 
 /* ---------- rendering ---------------------------------------------------- */
 // Model output is untrusted: escape FIRST, then apply markup to the escaped
@@ -451,46 +521,232 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 function md(src){
-  const blocks = [];
-  let t = esc(src);
-  // fenced code first, stashed so inline rules can't touch it
-  t = t.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
-    ` ${blocks.push(`<pre><code data-lang="${lang}">${code.replace(/\n$/,'')}</code></pre>`) - 1} `);
-  t = t.replace(/`([^`\n]+)`/g, '<code>$1</code>');
-  t = t.replace(/^###### (.*)$/gm,'<h3>$1</h3>').replace(/^##### (.*)$/gm,'<h3>$1</h3>')
-       .replace(/^#### (.*)$/gm,'<h3>$1</h3>').replace(/^### (.*)$/gm,'<h3>$1</h3>')
-       .replace(/^## (.*)$/gm,'<h2>$1</h2>').replace(/^# (.*)$/gm,'<h1>$1</h1>');
-  t = t.replace(/^&gt; (.*)$/gm,'<blockquote>$1</blockquote>');
-  t = t.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>')
-       .replace(/(^|\W)\*([^*\n]+)\*(?=\W|$)/g,'$1<em>$2</em>');
-  t = t.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-  t = t.replace(/^[-*] (.*)$/gm,'<li>$1</li>').replace(/^\d+\. (.*)$/gm,'<li>$1</li>');
-  t = t.replace(/(<li>[\s\S]*?<\/li>)(?!\s*<li>)/g,'<ul>$1</ul>');
-  t = t.split(/\n{2,}/).map(p =>
-        /^<(h\d|ul|ol|pre|blockquote|table)/.test(p.trim()) ? p : (p.trim() ? `<p>${p}</p>` : '')
-      ).join('');
-  return t.replace(/ (\d+) /g, (_, i) => blocks[+i]);
+  // Stashed HTML is put back at the end, so no later rule can touch it. A placeholder is \x00<index>\x00
+  // (\x00F<index>\x00 for a code block, which is a block of its own); these were literal NUL bytes in this
+  // file until DREAM-228 and are written as escapes now. A NUL in model text could pass for one: drop it.
+  const blocks = [], stash = (html, block) => `\x00${block ? 'F' : ''}${blocks.push(html) - 1}\x00`;
+  let t = esc(src).replace(/[\x00\x01]/g, '');
+  // fenced code first, stashed so inline rules can't touch it; a fence still open (a reply mid-stream) runs to the end
+  t = t.replace(/```([\s\S]*?)(```|$)/g, (_, body, close, at, all) => {
+    // What stands before the fence on its line: an indent (a block inside a list item; the code loses it) or text.
+    const before = all.slice(all.lastIndexOf('\n', at - 1) + 1, at), indent = /^[ \t]*$/.test(before);
+    return (indent ? '' : '\n') + stash(mdCode(body, !close, indent ? before : ''), true) + '\n';
+  });
+  t = t.replace(/`([^`\n]+)`/g, (_, code) => stash(`<code>${code}</code>`));
+  let html = mdBlocks(t.split('\n'), stash);
+  for(let pass = 0; pass < 4 && html.includes('\x00'); pass++) html = html.replace(/\x00F?(\d+)\x00/g, (_, i) => blocks[+i]);
+  return html;
 }
+// One fenced block: a header with the language ("text" when none) and Copy, then the code. `body` is escaped text.
+// A fence still open (a reply mid-stream) is marked data-open.
+function mdCode(body, open, indent){
+  const nl = body.indexOf('\n'), word = s => (s.trim().match(/^[\w+#.-]+/) || [''])[0];
+  const lang = nl >= 0 ? word(body.slice(0, nl)) : open ? word(body) : '';
+  let code = (nl >= 0 ? body.slice(nl + 1) : open ? '' : body).replace(/\n[ \t]*$/, '');
+  if(indent) code = code.split('\n').map(l => l.startsWith(indent) ? l.slice(indent.length) : l).join('\n');
+  return `<div class="codeblock"${open ? ' data-open' : ''}><div class="codehead"><span class="codelang">${lang || 'text'}</span>`
+    + `<button type="button" class="codecopy">Copy</button></div><pre><code data-lang="${lang}">${code}</code></pre></div>`;
+}
+// Inline markup inside one block of escaped text: links (only http and https), bare URLs, bold, italic, strikethrough.
+function mdInline(t, stash){
+  const emphasis = s => s.replace(/\*\*(?=\S)(.*?\S)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|\W)\*(?=\S)([^*\n]*?\S)\*(?=\W|$)/g, '$1<em>$2</em>')
+    .replace(/~~(?=\S)(.*?\S)~~/g, '<del>$1</del>');
+  // One template for every link (tests/test_gui_server.py pins its text): the label goes in first, then the address.
+  const LINK = '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>';
+  const anchor = (url, label) => stash(LINK.replace('$1', () => label).replace('$2', () => url));
+  t = t.replace(/\[([^\]\n]+)\]\((https?:[^)\s]+)\)/g, (_, label, url) => anchor(url, emphasis(label)));
+  t = t.replace(/\bhttps?:\/\/[^\s\x00]+/g, found => {
+    // The URL ends at an escaped quote or angle bracket, and sentence punctuation after it is not part of it.
+    let url = found.split(/&(?:lt|gt|quot|#39);/)[0];
+    for(let was; was !== url;){
+      was = url; url = url.replace(/[.,;:!?*~]+$/, '');
+      if(url.endsWith(')') && url.split(')').length > url.split('(').length) url = url.slice(0, -1);
+    }
+    return /^https?:\/\/[^\s]/.test(url) ? anchor(url, url) + found.slice(url.length) : found;
+  });
+  return emphasis(t);
+}
+// Block structure over escaped lines: code blocks, headings, rules, quotes, tables, lists nested by indent, paragraphs.
+function mdBlocks(lines, stash){
+  const out = [], inline = s => mdInline(s, stash);
+  const blank = l => !l.trim(), fence = l => /^[ \t]*\x00F\d+\x00[ \t]*$/.test(l);
+  const heading = l => /^(#{1,6}) +(.*)$/.exec(l), rule = l => /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/.test(l);
+  const quote = l => /^ {0,3}&gt; ?(.*)$/.exec(l);
+  const item = l => rule(l) ? null : /^([ \t]*)([-*+]|\d{1,9}[.)])[ \t]+(.*)$/.exec(l);
+  const cells = l => {
+    let s = l.trim().replace(/\\\|/g, '\x01');
+    if(s.startsWith('|')) s = s.slice(1);
+    if(s.endsWith('|')) s = s.slice(0, -1);
+    return s.split('|').map(c => c.trim().replace(/\x01/g, '|'));
+  };
+  const table = i => i + 1 < lines.length && lines[i].includes('|') && lines[i + 1].includes('|')
+    && /^[ \t]*\|?[ \t]*:?-+:?[ \t]*(\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/.test(lines[i + 1])
+    && cells(lines[i]).length === cells(lines[i + 1]).length;
+  const starts = i => fence(lines[i]) || heading(lines[i]) || rule(lines[i]) || quote(lines[i]) || item(lines[i]) || table(i);
+  const indented = l => /^(?: {2,}|\t)/.test(l);
+  let i = 0;
+  while(i < lines.length){
+    const line = lines[i];
+    let m;
+    if(blank(line)){ i++; }
+    else if(fence(line)){ out.push(line.trim()); i++; }
+    else if((m = heading(line))){ const n = Math.min(m[1].length, 4); out.push(`<h${n}>${inline(m[2])}</h${n}>`); i++; }
+    else if(rule(line)){ out.push('<hr>'); i++; }
+    else if(quote(line)){
+      const inner = [];
+      for(; i < lines.length && (m = quote(lines[i])); i++) inner.push(m[1]);
+      out.push(`<blockquote>${mdBlocks(inner, stash)}</blockquote>`);
+    }
+    else if(table(i)){
+      const head = cells(line), align = cells(lines[i + 1]).map(c => /^:-+:$/.test(c) ? 'center' : /-:$/.test(c) ? 'right' : /^:/.test(c) ? 'left' : '');
+      const cell = (tag, text, k) => `<${tag}${align[k] ? ` style="text-align:${align[k]}"` : ''}>${inline(text || '')}</${tag}>`;
+      let rows = '';
+      for(i += 2; i < lines.length && !blank(lines[i]) && lines[i].includes('|') && !fence(lines[i]); i++){
+        const row = cells(lines[i]);
+        rows += `<tr>${head.map((_, k) => cell('td', row[k], k)).join('')}</tr>`;
+      }
+      out.push(`<div class="md-table"><table><thead><tr>${head.map((h, k) => cell('th', h, k)).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`);
+    }
+    else if(item(line)){
+      // Open lists, outermost first. An item indented two or more past the innermost one opens a list inside it.
+      const open = [], width = s => s.replace(/\t/g, '    ').length, tag = l => l.ordered ? 'ol' : 'ul';
+      let html = '', afterBlank = false;
+      for(; i < lines.length; i++){
+        const cur = lines[i];
+        if((m = item(cur))){
+          const indent = width(m[1]), ordered = /\d/.test(m[2]);
+          while(open.length > 1 && indent < open[open.length - 1].indent) html += `</li></${tag(open.pop())}>`;
+          let top = open[open.length - 1];
+          if(top && indent < top.indent + 2){
+            html += '</li>';
+            if(top.ordered !== ordered){ html += `</${tag(open.pop())}>`; top = null; }
+          } else top = null;
+          if(!top){
+            const first = parseInt(m[2], 10);
+            html += !ordered ? '<ul>' : first === 1 ? '<ol>' : `<ol start="${first}">`;
+            open.push({indent, ordered});
+          }
+          html += '<li>' + inline(m[3]);
+          afterBlank = false;
+        }
+        else if(blank(cur)){
+          // A blank line keeps the list open only when an item or an indented continuation follows it.
+          let j = i; while(j < lines.length && blank(lines[j])) j++;
+          if(j >= lines.length || !(item(lines[j]) || indented(lines[j]))) break;
+          i = j - 1; afterBlank = true;
+        }
+        else if(fence(cur) && (indented(cur) || !afterBlank)){ html += cur.trim(); afterBlank = false; }
+        else if(afterBlank ? indented(cur) : !starts(i)){ html += (afterBlank ? '<br>' : ' ') + inline(cur.trim()); afterBlank = false; }
+        else break;
+      }
+      while(open.length) html += `</li></${tag(open.pop())}>`;
+      out.push(html);
+    }
+    else {
+      const para = [line];
+      for(i++; i < lines.length && !blank(lines[i]) && !starts(i); i++) para.push(lines[i]);
+      out.push(`<p>${inline(para.join('\n'))}</p>`);
+    }
+  }
+  return out.join('');
+}
+// A streaming reply is painted by patching what is already there (DREAM-230): `from`'s children become `to`'s, and
+// a node that is already the right kind stays. A finished block keeps its elements while the rest of the reply
+// streams, so a Copy button under the pointer, its "Copied", a selection or a focused link survive the next frame.
+function mdPatch(from, to){
+  let have = from.firstChild;
+  for(let want = to.firstChild; want; ){
+    const next = want.nextSibling;
+    if(have && have.nodeType === want.nodeType && have.nodeName === want.nodeName){
+      if(have.nodeType !== 1){ if(have.data !== want.data) have.data = want.data; }
+      else if(!have.classList.contains('codecopy')){   // a Copy button keeps its own state
+        for(const name of have.getAttributeNames()) if(!want.hasAttribute(name)) have.removeAttribute(name);
+        for(const name of want.getAttributeNames()) if(have.getAttribute(name) !== want.getAttribute(name)) have.setAttribute(name, want.getAttribute(name));
+        mdPatch(have, want);
+      }
+      have = have.nextSibling;
+    } else from.insertBefore(want, have);
+    want = next;
+  }
+  while(have){ const gone = have; have = have.nextSibling; gone.remove(); }
+}
+// Where the streaming cursor goes: the end of the text being written -- the last paragraph, list item, table cell,
+// heading or quote, or the code of a fence still open. After a closed code block or a rule nothing is open, and it
+// waits under the block.
+function cursorHost(root){
+  let node = root.lastElementChild;
+  while(node){
+    if(node.matches('.codeblock')) return node.hasAttribute('data-open') ? node.querySelector('pre code') : root;
+    const last = node.lastElementChild;
+    if(last && last.matches('p,ul,ol,li,blockquote,.md-table,table,thead,tbody,tr,td,th,.codeblock,hr')) node = last;
+    else return node.matches('p,li,td,th,h1,h2,h3,h4,blockquote') ? node : root;
+  }
+  return root;
+}
+const mdScratch = document.createElement('template');
+function paintReply(reply, live){
+  mdScratch.innerHTML = md(reply.raw);
+  if(live){ const cursor = document.createElement('span'); cursor.className = 'cursor'; cursorHost(mdScratch.content).append(cursor); }
+  mdPatch(reply.el, mdScratch.content);
+}
+// Every Copy button: a code block's copies exactly its code, a message's its source text (a reply's markdown as the
+// model wrote it); "Copied" for two seconds, and a refusal said as one.
+document.addEventListener('click', async e => {
+  const button = e.target.closest?.('.codecopy, .msg-copy');
+  if(!button) return;
+  const code = button.classList.contains('msg-copy') ? button.closest('.msg')._raw
+    : button.closest('.codeblock').querySelector('pre code').textContent;
+  let copied = false;
+  try{ await navigator.clipboard.writeText(code); copied = true; }
+  catch(err){
+    // A web view without the asynchronous clipboard can still copy a selection inside a click.
+    const area = document.createElement('textarea');
+    area.value = code; area.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.append(area); area.select();
+    try{ copied = document.execCommand('copy'); }catch(e2){ copied = false; }
+    area.remove(); button.focus();
+  }
+  const say = word => button.classList.contains('msg-copy') ? button.setAttribute('aria-label', word) : (button.textContent = word);
+  say(copied ? 'Copied' : 'Copy failed');
+  clearTimeout(button._reset);
+  button._reset = setTimeout(() => say('Copy'), 2000);
+});
 
-const atBottom = () => main.scrollHeight - main.scrollTop - main.clientHeight < 120;
-let followingFeed = true, scrollFrame = null, lastScrollTop = main.scrollTop;
+// The view follows the stream only while the reader is at its end (DREAM-230). Moving back through the feed stops
+// it at once, however little; reaching the end resumes it, and so does coming back down to within 120 px of it.
+// Growth alone never stops it, and neither does content that shrank (the browser moved the view, not the reader).
+const NEAR_END = 120, gapToEnd = () => main.scrollHeight - main.scrollTop - main.clientHeight;
+let followingFeed = true, scrollFrame = null, lastScrollTop = main.scrollTop, lastScrollHeight = main.scrollHeight;
 function syncFeedPosition(){
-  const top = main.scrollTop;
-  // Content growth alone must not disable following. Only moving back through
-  // the feed pauses it; returning to the bottom resumes it.
-  if(atBottom()) followingFeed = true;
-  else if(top < lastScrollTop) followingFeed = false;
-  lastScrollTop = top;
+  const top = main.scrollTop, height = main.scrollHeight, gap = gapToEnd();
+  if(gap <= 2) followingFeed = true;
+  else if(top < lastScrollTop){ if(height >= lastScrollHeight) followingFeed = false; }
+  else if(top > lastScrollTop && gap < NEAR_END) followingFeed = true;
+  lastScrollTop = top; lastScrollHeight = height;
+  syncLatest();
 }
 main.addEventListener('scroll', syncFeedPosition, {passive:true});
+// "Jump to latest": shown above the composer while the reader is more than 120 px from the end. The desktop Chat view
+// only: the plain browser page keeps its layout.
+const latest = $('to-latest');
+function syncLatest(){ latest.hidden = !COMPANION || gapToEnd() <= NEAR_END; }
+function toLatest(){
+  main.scrollTop = main.scrollHeight;
+  lastScrollTop = main.scrollTop; lastScrollHeight = main.scrollHeight;
+  syncLatest();
+}
+latest.onclick = e => {
+  followingFeed = true;
+  main.scrollTo({top: main.scrollHeight, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'});
+  if(e.detail === 0) $('input').focus({preventScroll: true});   // pressed from the keyboard: the button is about to hide, the focus goes to the prompt
+};
 function scroll(force){
   if(force) followingFeed = true;
-  if(!followingFeed || scrollFrame !== null) return;
+  if(scrollFrame !== null) return;
   scrollFrame = requestAnimationFrame(() => {
     scrollFrame = null;
-    if(!followingFeed) return;
-    main.scrollTop = main.scrollHeight;
-    lastScrollTop = main.scrollTop;
+    if(followingFeed) toLatest(); else syncLatest();
   });
 }
 // Text wrapping, expanded tool cards and viewport changes can move the bottom
@@ -502,6 +758,7 @@ feedResize.observe(main);
 function block(role, label){
   const d = document.createElement('div');
   d.className = `msg ${role}`;
+  d.dataset.role = role === 'you' ? 'user' : 'assistant';   // the desktop Chat view shows no label (chat.css); the role stays in the document
   d.innerHTML = `<div class="who">${esc(label)}</div><div class="body"></div>`;
   stream.appendChild(d);
   companion?.message?.();
@@ -538,10 +795,79 @@ function finishPermission(id){
   else document.getElementById('permission-' + id)?.remove();
 }
 function clearWriting(){ if(writing){ writing.remove(); writing = null; } }
+// A streaming reply is painted at most once per animation frame (DREAM-230): deltas only add to its text.
+let paintFrame = null;
+function paintSoon(){
+  if(paintFrame !== null) return;
+  paintFrame = requestAnimationFrame(() => {
+    paintFrame = null;
+    if(!current) return;
+    paintReply(current, true);
+    if(followingFeed) toLatest(); else syncLatest();
+  });
+}
+/* ---------- message actions (DREAM-231) ---------------------------------- */
+// The desktop Chat view draws a quiet row under each finished reply -- Copy, "Try again" on a stopped turn, the turn's
+// speed and time -- and a Copy under the owner's own message. The plain browser page keeps its layout.
+function msgFoot(msg){
+  let foot = msg.querySelector(':scope > .msg-foot');
+  if(!foot){ foot = document.createElement('div'); foot.className = 'msg-foot'; msg.append(foot); }
+  return foot;
+}
+function footButton(cls, text, title){
+  const b = document.createElement('button');
+  b.type = 'button'; b.className = cls; b.textContent = text; b.title = title;
+  return b;
+}
+// A message keeps its source text, and Copy puts exactly that on the clipboard (the delegated handler above).
+function copyRow(msg, raw, title){
+  msg._raw = raw;
+  if(!COMPANION) return;
+  const copy = footButton('msg-copy', '', title);
+  copy.setAttribute('aria-label', 'Copy');   // its visible word too (.msg-copy::after)
+  msgFoot(msg).append(copy);
+}
+// What "Try again" sends for an owner message: its text, and its files when this page sent them (the last message
+// this page posted with files, with the same text). A message whose files this page no longer holds (after a
+// reload) cannot be sent again as it was, and gets no offer.
+function resendFor(shown, said){
+  if(!said.includes('\n\nAttached files: ')) return {text: shown, attachments: []};
+  const mine = pendingPost?.attachments.length && (!pendingPost.text || said.startsWith(pendingPost.text + '\n\nAttached files: '));
+  return mine ? pendingPost : null;
+}
+function retryButton(owner){
+  const b = footButton('msg-retry', 'Try again', 'Send your message again as a new turn');
+  b.onclick = async () => {
+    b.disabled = true;
+    if(!await postPrompt(owner.text, owner.attachments, 'queue', undefined, readTwice)) b.disabled = false;
+  };
+  return b;
+}
+// A new owner message or a new turn: an earlier offer to try again is gone.
+function clearRetry(){ stream.querySelectorAll('.msg-retry').forEach(b => (b.closest('.turn-retry') || b).remove()); }
+// A turn the owner stopped: its partial reply stays and says so; with no reply text after its last tool, the column does.
+function markStopped(owner){
+  const mark = document.createElement('span'); mark.className = 'msg-stopped'; mark.textContent = 'Stopped';
+  const retry = COMPANION && owner ? retryButton(owner) : null;
+  if(turnReply){
+    const foot = msgFoot(turnReply);
+    turnReply.classList.add('stopped'); foot.prepend(mark);
+    if(retry) foot.insertBefore(retry, foot.querySelector('.msg-meta'));
+  } else {
+    const line = document.createElement('div'); line.className = 'sys turn-stopped';
+    line.append(mark); if(retry) line.append(retry);
+    stream.append(line);
+  }
+  scroll();
+}
 function endTurn(){
   clearWriting();
   if(current){
-    current.el.innerHTML = md(current.raw);
+    if(paintFrame !== null){ cancelAnimationFrame(paintFrame); paintFrame = null; }
+    paintReply(current, false);
+    copyRow(current.el.parentElement, current.raw, 'Copy this reply');
+    stream.querySelector('.msg.dream.latest')?.classList.remove('latest');
+    current.el.parentElement.classList.add('latest');   // the last finished reply: its row is always visible (chat.css)
     // Scan only on completion: a half-streamed fence is not an artifact yet.
     if(!replayingHistory) try{ scanForArtifacts(current.raw, current.seq); }catch(e){ console.error(e); }
     current = null;
@@ -558,8 +884,14 @@ function handle(m){
   const replay = replayOnConnect;
   if(!['hello','history','permission'].includes(m.kind) && !replayingHistory) replayOnConnect = false;
   try{ vitalsFeed(m.kind, m.data); }catch(e){ console.error(e); }   // a monitor never stops the chat
+  try{ artifactsFeed(m.kind, m.data); }catch(e){ console.error(e); }   // the panel's turn state (DREAM-233); never stops the chat
   if(COMPANION && ['text_delta', 'thinking_delta', 'tool_use', 'tool_preview'].includes(m.kind)) busy(true);
   switch(m.kind){
+    case 'artifact': {
+      // Dream's registry: what a turn built, by id (gui/artifacts.py). Content comes from /api/artifact/{id}.
+      try{ artifactEvent(m.data, replayingHistory); }catch(e){ console.error(e); }
+      break;
+    }
     case 'project_view_reset': {
       artifacts.clear(); artOpen = null; artVerIdx = 0;
       closeArtifactFrame(); panel.classList.remove('open');
@@ -569,7 +901,7 @@ function handle(m){
     }
     case 'history': {
       const liveSteeringTarget = steeringTarget;
-      replayingHistory = true; endTurn(); current = null; thinking = null; tools.clear(); feed.reset(); nTool = 0; nMsg = 0;
+      replayingHistory = true; endTurn(); current = null; turnReply = null; turn = null; ownerPending = null; thinking = null; tools.clear(); feed.reset(); nTool = 0; nMsg = 0;
       stream.querySelectorAll('.msg,.tool,.think,.sys,.permission-card,.turn-timing').forEach(el => el.remove());
       $('plan-panel').hidden = true;
       busy(false); replayingHistory = true;
@@ -588,13 +920,27 @@ function handle(m){
       const wrapped = m.data && typeof m.data === 'object' ? m.data : null;
       // A "Read ×2" message is stored doubled; show the words once.
       const said = String((wrapped ? wrapped.text : m.data) || ''), again = said.indexOf(READ_AGAIN);
-      block('you','You').textContent = again >= 0 ? said.slice(0, again) : said;
-      if(wrapped && typeof wrapped.origin === 'string' && wrapped.origin.startsWith('dream:') && wrapped.note)
-        sysline(`${dreamNote(wrapped.origin)}, not from you: ${wrapped.note}`, 'dream-note');
+      const shown = again >= 0 ? said.slice(0, again) : said, bubble = block('you','You');
+      bubble.textContent = shown;
+      copyRow(bubble.parentElement, shown, 'Copy this message');
+      const dreams = wrapped && typeof wrapped.origin === 'string' && wrapped.origin.startsWith('dream:');
+      if(dreams && wrapped.note) sysline(`${dreamNote(wrapped.origin)}, not from you: ${wrapped.note}`, 'dream-note');
+      ownerPending = dreams ? null : resendFor(shown, said);   // a guided task is Dream's prompt around the goal: not one to send again
+      clearRetry(); turnReply = null;
       nMsg++; counts(); scroll(true); break;
     }
-    case 'turn_start': busy(true); break;
-    case 'turn_end': steeringTarget = null; endTurn(); finishTools(m.data?.interrupted ? 'Interrupted' : 'No result returned'); busy(false); break;
+    case 'turn_start': turn = {owner: ownerPending, failed: false, continued: false}; ownerPending = null; clearRetry(); turnReply = null; busy(true); break;
+    case 'turn_end': {
+      steeringTarget = null; endTurn(); finishTools(m.data?.interrupted ? 'Interrupted' : 'No result returned');
+      const ended = turn; turn = null;
+      if(m.data?.interrupted) markStopped(ended?.owner);
+      else if(COMPANION && ended?.failed && !ended.continued && ended.owner){
+        // The turn failed: the error is in the column above; this sends the same message once more.
+        const line = document.createElement('div'); line.className = 'sys turn-retry';
+        line.append(retryButton(ended.owner)); stream.append(line); scroll();
+      }
+      turnReply = null; busy(false); break;
+    }
     case 'steering': steeringNotice(m.data); break;
     case 'steering_ready': steeringTarget = m.data; break;
     case 'permission': renderPermission(m.data); break;
@@ -616,10 +962,9 @@ function handle(m){
     }
     case 'text_delta': {
       thinking = null;
-      if(!current){ current = {el: block('dream','Dream'), raw: '', seq: ++nMsg}; }
+      if(!current){ current = {el: block('dream','Dream'), raw: '', seq: ++nMsg}; turnReply = current.el.parentElement; companion?.writing?.(); }
       current.raw += m.data;
-      current.el.innerHTML = md(current.raw) + '<span class="cursor"></span>';
-      scroll();
+      paintSoon();
       break;
     }
     case 'tool_preview': {
@@ -652,6 +997,7 @@ function handle(m){
     case 'assistant_done': endTurn(); break;
     case 'tool_use': {
       endTurn();   // also removes the live preview of this very call
+      turnReply = null;
       const d = m.data || {}, name = String(d.name||'tool').split('__').pop();
       if(!replayingHistory && /^(write_file|Write|Edit|MultiEdit)$/.test(name)){
         try{ artifactFromWrite(d.input || {}); }catch(e){ console.error(e); }
@@ -693,7 +1039,7 @@ function handle(m){
       if(d.op === 'show' && d.kind === 'image'){
         // A screenshot the model saved, or an image a tool wrote (DREAM-104).
         mirroring = d.source === 'mirror';
-        try{ openImage(d, replay); }
+        try{ openImage(d, replay, showBesideChat(mirroring)); }
         catch(e){ console.error(e); companion?.error('The image could not be shown. Ask Dream to show it again.'); }
         finally{ mirroring = false; }
         break;
@@ -707,12 +1053,19 @@ function handle(m){
         // A mirrored show is the model's own view, not a handoff (DREAM-104): a reload
         // of the page already open keeps the view the owner chose.
         const mirror = d.source === 'mirror';
+        // A show while the owner is in the Chat view with room beside the chat opens the panel there and the
+        // view stays Chat: an explicit one (done / show_to_user, DREAM-233) always, the model's own view
+        // (DREAM-104) while the panel is showing or the never-steal rules allow an open (DREAM-235: there is no
+        // Studio tab to bring up). Under 1000 px, and from another view, the Artifacts tab's viewer.
+        const chat = showBesideChat(mirror);
         if(COMPANION && !(mirror && artOpen === `file:${d.path}`)) artView = 'preview';
         // Every paint this show causes (addArtifact repaints an open artifact before
         // openArtifact runs) must say it is mirrored, or the navigation would switch views.
         mirroring = mirror;
         try{ const a = artifactFromWrite({path: d.path, content: d.content});
-          if(a) openArtifact(a.key, {mirror}); else companion?.error('This file cannot be previewed. Ask Dream to show an HTML or SVG version.'); }
+          if(!a) companion?.error('This file cannot be previewed. Ask Dream to show an HTML or SVG version.');
+          else if(chat !== null) openArtifact(a.key, {mirror, chat});   // null: the model's view waits, the owner is busy in the chat
+        }
         catch(e){ console.error(e); companion?.error('The preview could not be opened. Ask Dream to show it again.'); }
         finally{ mirroring = false; }
       } else if(d.op === 'eval' || d.op === 'snapshot'){
@@ -726,15 +1079,26 @@ function handle(m){
       }
       break;
     }
-    case 'turn_timing':
-      stream.appendChild(DreamTurnTiming.render(m.data)); companion?.message?.(); scroll(); break;
+    case 'turn_timing': {
+      const card = DreamTurnTiming.render(m.data), foot = COMPANION && turnReply && ['completed', 'success'].includes(m.data?.outcome) ? msgFoot(turnReply) : null;
+      const shown = foot?.querySelector('.msg-meta'), numbers = shown?.textContent || (typeof m.data?.elapsed_s === 'number' ? `${m.data.elapsed_s.toFixed(1)} s` : '');
+      if(foot && numbers){
+        // A completed turn's numbers sit in its reply's row, and the timing card is their detail, one click away.
+        const meta = footButton('msg-meta', numbers, 'Turn timing: show or hide the detail');
+        meta.setAttribute('aria-expanded', 'false');
+        meta.onclick = () => { card.hidden = !card.hidden; card.open = !card.hidden; meta.setAttribute('aria-expanded', String(!card.hidden)); };
+        if(shown) shown.replaceWith(meta); else foot.append(meta);
+        card.hidden = true; turnReply.after(card);
+      } else stream.appendChild(card);   // no reply to carry them, or a turn that did not complete: the card stays in view
+      companion?.message?.(); scroll(); break;
+    }
     case 'background_work': {
       const status = DreamTurnTiming.background(m.data);
       if(status) sysline(status);
       break;
     }
     case 'system': sysline(String(m.data ?? '')); break;
-    case 'error':  clearWriting(); sysline(String(m.data ?? ''), 'error'); busy(false); break;
+    case 'error':  clearWriting(); sysline(String(m.data ?? ''), 'error'); if(turn) turn.failed = true; busy(false); break;
     case 'result': {
       endTurn(); busy(false);
       if(!replayingHistory && turnFiles.size){
@@ -746,6 +1110,7 @@ function handle(m){
       if(m.data?.subtype === 'length'){
         const notice = document.createElement('div'); notice.className = 'sys incomplete-answer';
         notice.textContent = 'This answer reached the output limit and may be incomplete. ';
+        if(turn) turn.continued = true;   // its own Continue button, not "Try again"
         const more = document.createElement('button'); more.textContent = 'Continue answer';
         more.onclick = async () => {
           more.disabled = true;
@@ -757,6 +1122,7 @@ function handle(m){
         // The per-turn step budget ran out; the work so far is real (Dream fix #19).
         const notice = document.createElement('div'); notice.className = 'sys incomplete-answer';
         notice.textContent = 'This turn used its tool-step budget. ';
+        if(turn) turn.continued = true;
         const more = document.createElement('button'); more.textContent = 'Continue';
         more.onclick = async () => {
           more.disabled = true;
@@ -766,9 +1132,16 @@ function handle(m){
         notice.appendChild(more); stream.appendChild(notice); scroll();
       } else if(m.data?.is_error) {
         sysline('The turn did not complete successfully. Review the reported error and partial results before retrying.', 'error');
+        if(turn) turn.failed = true;
       }
       const st = (m.data && m.data.stats) || {};
-      if(st.gen_tps) sysline(`${st.gen_tps.toFixed(1)} tok/s · ${(st.duration_s||0).toFixed(1)}s`);
+      if(st.gen_tps && COMPANION && turnReply){
+        // The reply's speed and time, at the right of its row; a time the engine did not report is not shown.
+        const foot = msgFoot(turnReply), meta = foot.querySelector('.msg-meta') || foot.appendChild(document.createElement('span'));
+        meta.className = 'msg-meta';
+        meta.textContent = `${st.gen_tps.toFixed(1)} tok/s` + (typeof st.duration_s === 'number' ? ` · ${st.duration_s.toFixed(1)} s` : '');
+      }
+      else if(st.gen_tps) sysline(`${st.gen_tps.toFixed(1)} tok/s · ${(st.duration_s||0).toFixed(1)}s`);
       break;
     }
   }
@@ -959,6 +1332,9 @@ function steeringNotice(receipt){
     (receipt.status === 'retained' && receipt.recovery_path ? ' Receipt: ' + receipt.recovery_path : ''));
 }
 function grow(){ input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,190)+'px'; }
+// The draft restore (attachments.js) sizes the box while the page is still loading, before its last stylesheets
+// apply: a page loaded at a phone width kept a two-line empty box. Size it again once everything has loaded.
+addEventListener('load', grow);
 async function submit(delivery = 'queue'){
   const typed = input.value.trim(), fileIds = draftAttachments.ids();
   if((!typed && !fileIds.length) || sending) return;
@@ -988,10 +1364,14 @@ async function submit(delivery = 'queue'){
 async function postPrompt(text, attachments = [], delivery = 'queue', steering, twice = false){
   const wasWorking = working;
   busy(true);
+  if(delivery === 'queue') pendingPost = {text, attachments};   // "Try again" on this message sends its files too
+  // The artifact open in the panel (DREAM-233): Dream tells the model which file "it" is, under the owner's words.
+  const openArt = artOpen && artifacts.get(artOpen);
   try{
     const r = await fetch('/api/prompt', {method:'POST',
       headers:{'Content-Type':'application/json','X-Dream-Token':TOKEN},
-      body: JSON.stringify({prompt:text, attachments, ...(twice ? {read_twice:true} : {}), ...(delivery === 'steer' ? {delivery, steering_id:steering.id, steering_target:steering.target} : {})})});
+      body: JSON.stringify({prompt:text, attachments, ...(twice ? {read_twice:true} : {}), ...(openArt && openArt.id && !openArt.old ? {artifact: openArt.id} : {}),
+        ...(delivery === 'steer' ? {delivery, steering_id:steering.id, steering_target:steering.target} : {})})});
     if(!r.ok) { const data = await r.json().catch(() => ({})); sysline(data.error || `Could not send (HTTP ${r.status})`,'error'); busy(wasWorking); return false; }
     if(delivery === 'steer') steeringNotice((await r.json()).steering);
     if($('studio-error')) $('studio-error').hidden = true;
@@ -1307,16 +1687,45 @@ undobody.addEventListener('click', async e => {
      could reach the parent DOM and the session token in the URL. Apart, the
      frame gets a unique opaque origin and can do neither.
    - srcdoc, never a src URL, so nothing is fetched to build the frame.
-   - a CSP inside the document that blocks every network destination, so a
-     generated page cannot phone home with what it can see.
+   - a CSP inside the document that decides what the page may reach: with the
+     header's "internet" switch ON (the default, DREAM-234) the PUBLIC internet
+     over https — CDN scripts, fonts, images, fetch/XHR — the same line the
+     sandbox's run_bash has through its proxy; never http:, never file:, so no
+     plain-http loopback service and no local file. OFF: nothing at all.
    - no allow-top-navigation, no allow-popups, no allow-forms.
    Together: scripts run so a page is actually testable, and that is all. */
 
 // 'unsafe-eval' is the one addition for the bridge below (eval_js_user_view).
-// Inside a sandboxed, network-less, opaque-origin frame that already runs the
-// artifact's own inline scripts, eval adds no reach the frame did not have.
+// Inside a sandboxed, opaque-origin frame that already runs the artifact's own
+// inline scripts, eval adds no reach the frame did not have. Neither does data:
+// in script-src: it is how the page's own local ES modules arrive (DREAM-238,
+// gui/bundle.py puts them in one importmap of data: URLs), inline code by another name.
 const ART_CSP = "default-src 'none'; style-src 'unsafe-inline'; " +
-                "img-src data: blob:; media-src data: blob:; font-src data:; script-src 'unsafe-inline' 'unsafe-eval'";
+                "img-src data: blob:; media-src data: blob:; font-src data:; script-src 'unsafe-inline' 'unsafe-eval' data:";
+// The switch ON: every directive above plus https: (and blob: workers, which
+// three.js and friends spawn). The owner's rule (2026-10-02): a page that needs
+// three.js from a CDN or a Google font must work here, as it does in the sandbox.
+const ART_CSP_NET = "default-src 'none'; style-src 'unsafe-inline' https:; img-src data: blob: https:; " +
+                    "media-src data: blob: https:; font-src data: https:; connect-src https:; worker-src blob:; " +
+                    "script-src 'unsafe-inline' 'unsafe-eval' data: blob: https:";
+let previewNet = true;
+try{ previewNet = localStorage.getItem('dream.previewNet') !== '0'; }catch(e){}
+function artCsp(){ return previewNet ? ART_CSP_NET : ART_CSP; }
+function paintNetPill(){
+  const b = $('netpill'); if(!b) return;
+  b.classList.toggle('off', !previewNet);
+  b.title = previewNet
+    ? 'Previews may load from the public internet over https (scripts, fonts, images). Click to turn off.'
+    : 'Previews load nothing from the network. Click to turn on.';
+}
+paintNetPill();
+$('netpill')?.addEventListener('click', () => {
+  previewNet = !previewNet;
+  try{ localStorage.setItem('dream.previewNet', previewNet ? '1' : '0'); }catch(e){}
+  paintNetPill();
+  // The open page runs under the old policy until it is rebuilt: rebuild it now.
+  if(artOpen && artView === 'preview') paintArtifact({chat: artChat});
+});
 
 // Injected ahead of every artifact body. Answers Dream's questions about the
 // page the user is looking at: __dream_eval (run code; an expression returns its
@@ -1376,6 +1785,9 @@ const ART_BRIDGE = `<script>(function(){
     return c;
   };
   window.addEventListener('load', function(){ setTimeout(function(){ rep.loaded = true; repSend('load'); }, 800); });
+  // This document is leaving (a navigation, a reload): the parent closes the frame unless what replaces it
+  // answers a ping (A0: a page merely busy at the ping is no longer taken for one that left).
+  window.addEventListener('pagehide', function(){ parent.postMessage({type:'__dream_unload'}, '*'); });
   var pointing = false, ccN = 0;
   function reactChain(el){
     var key = Object.keys(el).find(function(k){ return k.indexOf('__reactFiber') === 0; });
@@ -1417,10 +1829,18 @@ const ART_BRIDGE = `<script>(function(){
   });
 })();<\/script>`;
 
-const artifacts = new Map();       // key -> {key,title,kind,versions:[str]}
+const artifacts = new Map();       // key -> {key,title,kind,versions:[str]}  (+ id, vn, path, bytes, at for Dream's registry)
+// The kinds (DREAM-236). A text kind's version is its content; a binary kind's is a load stamp (the file itself comes
+// from the download route). The registry's type names (gui/artifacts.py) map onto the page's.
+const ART_KIND = {page:'html', svg:'svg', report:'report', image:'image', video:'video', audio:'audio', document:'document'};
+const ART_LABEL = {html:'Page', svg:'Diagram', report:'Report', image:'Image', video:'Video', audio:'Audio', document:'Document'};
+const ART_GLYPH = {html:'&lt;/&gt;', svg:'SVG', report:'MD', image:'IMG', video:'VID', audio:'AUD', document:'DOC'};
+const ART_TEXT = new Set(['html', 'svg', 'report']);
+const ART_PLAY_MAX = 8 * 1024 * 1024;   // a media file the panel plays: the per-file embed cap of docs/desktop.md
 let artOpen = null, artVerIdx = 0, artView = 'preview';
 let mirroring = false;             // a mirrored show (the model's own view) is being applied (DREAM-104)
 let lastLive = null;               // the last live page shown, for "Back to live page" under a still (DREAM-111)
+let artChat = false;               // the panel is open beside the chat, in the Chat view (DREAM-233)
 const panel = $('artpanel'), artbody = $('artbody');
 
 /* ---------- the owner's view, reported to Dream (DREAM-111) ----------------- */
@@ -1463,7 +1883,7 @@ function artKind(lang, body){
 
 function addArtifact(key, title, kind, body){
   let a = artifacts.get(key);
-  if(!a){ a = {key, title, kind, versions:[]}; artifacts.set(key, a); }
+  if(!a){ a = {key, title, kind, versions:[], at: Date.now() / 1000}; artifacts.set(key, a); }
   // Identical re-emission isn't a new version — streaming re-renders the same
   // block many times as it completes.
   if(a.versions[a.versions.length-1] === body) return a;
@@ -1475,19 +1895,45 @@ function addArtifact(key, title, kind, body){
   return a;
 }
 
+// The card in the conversation (DREAM-233): one per artifact, at the point it first appeared, updated in place as
+// versions grow; it survives a reload (the `artifact` event replays) and re-opens the panel. A file the model wrote
+// gets its card from Dream's registry once the write succeeded (a.id), never from the tool call's input.
 function renderChip(a){
-  if(COMPANION) return;
-  let chip = document.querySelector(`.artchip[data-k="${CSS.escape(a.key)}"]`);
-  const n = a.versions.length;
-  const html = `<div class="ic">${a.kind === 'svg' ? 'SVG' : a.kind === 'image' ? 'IMG' : '&lt;/&gt;'}</div>
-    <div class="t"><b>${esc(a.title)}</b>
-      <span>${a.kind.toUpperCase()} · ${n} version${n>1?'s':''} · click to open</span></div>
-    <div class="go">open →</div>`;
-  if(chip){ chip.innerHTML = html; return; }
-  chip = document.createElement('div');
-  chip.className = 'artchip'; chip.dataset.k = a.key; chip.innerHTML = html;
-  chip.onclick = () => openArtifact(a.key);
-  stream.appendChild(chip); scroll();
+  if(!a.id && a.key.startsWith('file:') && (COMPANION || a.kind !== 'image')) return;
+  let card = stream.querySelector(`.artcard[data-k="${CSS.escape(a.key)}"]`);
+  const n = a.id ? (a.vn || 1) : a.versions.length;
+  const kind = ART_LABEL[a.kind] || 'Page';
+  const html = `<span class="ic" aria-hidden="true">${ART_GLYPH[a.kind] || ART_GLYPH.html}</span>
+    <span class="t"><b>${esc(a.title)}</b> <span class="meta">· ${kind} · v${n} ·</span></span>
+    <button type="button" class="go">Open</button>`;
+  if(card){ card.innerHTML = html; return; }
+  card = document.createElement('div');
+  card.className = 'artcard'; card.dataset.k = a.key; card.innerHTML = html;
+  card.setAttribute('role', 'group'); card.setAttribute('aria-label', `${a.title}, ${kind}`);
+  card.onclick = () => { openCard(a.key); };
+  stream.appendChild(card); companion?.message?.(); scroll();
+}
+function pulseCard(a){
+  const card = stream.querySelector(`.artcard[data-k="${CSS.escape(a.key)}"]`);
+  if(!card) return;
+  card.classList.remove('pulse'); void card.offsetWidth; card.classList.add('pulse');
+  card.addEventListener('animationend', () => card.classList.remove('pulse'), {once: true});
+}
+// The owner opens a card (or a row of the Artifacts tab, `tab`: its full-width viewer): a registry artifact's
+// content comes from the route when this page has not fetched it.
+async function openCard(key, tab){
+  const a = artifacts.get(key); if(!a) return;
+  openIntent++;
+  if(a.id && !(await loadVersion(a, a.vn || 1))){
+    sysline('The artifact could not be loaded from Dream. Is the terminal still running?', 'error'); return;
+  }
+  if(a.kind !== 'image') artView = 'preview';
+  if(!tab){ openArtifact(key, {chat: chatPanelMode()}); return; }
+  if(document.documentElement.dataset.dreamView !== 'studio') $('studio-preview')?.click();
+  // Full width, unless a question is waiting in the conversation: then the conversation stays beside it.
+  document.body.classList.remove('art-home');
+  document.body.classList.toggle('art-full', !stream.querySelector('.qform'));
+  openArtifact(key, {});
 }
 
 function openArtifact(key, opts){
@@ -1495,12 +1941,260 @@ function openArtifact(key, opts){
   artOpen = key; artVerIdx = a.versions.length - 1;
   // Three columns is one too many at laptop widths — the transcript ends up
   // narrower than either thing flanking it. The rail steps aside; the toggle
-  // brings it back if you want both.
+  // brings it back if you want both. Close puts the rail back only if it was showing: in the desktop's Chat
+  // view the rail is the inspector drawer over the whole conversation (companion.css), hidden to begin with.
+  if(!panel.classList.contains('open')) rail._hiddenBefore = rail.classList.contains('hide');
   if(window.innerWidth < 1500) rail.classList.add('hide');
+  // Beside the chat (DREAM-233): the view stays Chat, the drawer stays, and the panel's first appearance slides
+  // in from the right (chat.css transitions the transform; none under reduced motion).
+  const chat = !!(opts && opts.chat), appearing = chat && !document.body.classList.contains('has-artifact');
+  artChat = chat;
   panel.classList.add('open');
   companion?.openArtifact(opts);
+  if(appearing){ panel.classList.add('entering'); panel.getBoundingClientRect(); requestAnimationFrame(() => panel.classList.remove('entering')); }
   paintArtifact(opts);
 }
+
+/* ---------- the session's artifacts: the panel beside the chat (DREAM-233) ------------------------------------ */
+// Dream's registry (gui/artifacts.py) says what a turn built -- `artifact` events with metadata only; the content
+// of a version comes from /api/artifact/{id}?v=N. `open` is Dream's wish; this page decides with its never-steal
+// rules: opening never calls focus(), never touches the composer's text, caret or selection, and does not happen
+// while the owner typed in the last 3 s, has a selection in the conversation, has a dialog or permission card
+// open, is on another view, closed the panel during this turn, or turned the switch off (this browser). Under
+// 1000 px the panel is a sheet over the chat, so it also needs an unfocused, empty composer.
+let lastTyped = 0, closedThisTurn = false, previewArt = null;
+let openIntent = 0;   // the latest open asked for (Dream's, the model's or the owner's): an older one whose content arrives later does not take its place
+let autoOpen = true; try{ autoOpen = localStorage.getItem('dream.artifactAutoOpen') !== '0'; }catch(e){}
+input.addEventListener('input', () => { lastTyped = Date.now(); });
+input.addEventListener('keydown', () => { lastTyped = Date.now(); });
+// The Nested view too (DREAM-243): there the panel is the right-hand pane's Preview (nested-pane.js lays it out).
+function chatPanelMode(){ return COMPANION && ['chat', 'nested'].includes(document.documentElement.dataset.dreamView); }
+// Where a `studio` show lands (DREAM-235): true = the panel beside the chat (the Chat view with room for it, or the
+// panel already showing there); false = the Artifacts tab's viewer, as the Studio tab before it; null = nowhere yet
+// -- the model's own view while the panel is closed and the never-steal rules say not now (its next reload asks again).
+function showBesideChat(mirror){
+  if(!chatPanelMode()) return false;
+  if(artChat) return true;
+  if(innerWidth < 1000) return false;
+  return !mirror || wantsAutoOpen() ? true : null;
+}
+// The Chat view shows an artifact one way: the panel beside the conversation. One opened in the Artifacts tab comes
+// along when the owner returns to Chat with room for it; the frame is not rebuilt.
+function panelBesideChat(){
+  const a = artifacts.get(artOpen);
+  if(!a || artChat || !chatPanelMode() || innerWidth < 1000) return;
+  artChat = true; companion?.openArtifact({chat: true}); paintChatControls(a);
+}
+function wantsAutoOpen(){
+  if(!autoOpen || closedThisTurn || Date.now() - lastTyped < 3000) return false;
+  const sel = getSelection();
+  if(sel && !sel.isCollapsed && sel.anchorNode && main.contains(sel.anchorNode)) return false;
+  if(document.querySelector('dialog[open], .permission-card, #new-chat-ask')) return false;
+  if(COMPANION){
+    if(!chatPanelMode() || document.documentElement.classList.contains('understand-open')) return false;
+    if(innerWidth < 1000 && (document.activeElement === input || input.value.trim())) return false;
+  }
+  return true;
+}
+function artifactsFeed(kind, d){
+  if(kind === 'history') stream.querySelectorAll('.artcard').forEach(el => el.remove());   // the replay draws them again
+  else if(kind === 'turn_start'){ closedThisTurn = false; clearPreviewArt(); }
+  else if(kind === 'tool_preview' && !replayingHistory) previewArtifact(String(d ?? ''));
+  else if(kind === 'tool_use' && previewArt){
+    // The call's text is complete: a streamed page waits for the file to land (the registry's event); anything else is done with.
+    if(previewArt.key && previewArt.key !== 'none') previewArt.landed = true; else previewArt = null;
+  }
+  else if(kind === 'tool_result' && previewArt && previewArt.landed && d && d.is_error) clearPreviewArt();   // the write failed
+  else if(kind === 'turn_end' || kind === 'error') clearPreviewArt();
+}
+function setVersion(a, n, body){
+  // Versions are numbered by the registry: index n-1 holds vN; a version this page never fetched stays empty.
+  a.versions.length = Math.max(Math.min(a.versions.length, n - 1), 0);
+  a.versions[n - 1] = body; a.vn = Math.max(a.vn || 0, n);
+}
+// What paints version n of a registry artifact: a text kind's content from the route; a binary kind's load stamp.
+async function loadVersion(a, n){
+  if(a.versions[n - 1] != null) return true;
+  const body = ART_TEXT.has(a.kind) ? await fetchArtifact(a, n) : String(a.at || n);
+  if(body == null) return false;
+  setVersion(a, n, body);
+  return true;
+}
+async function fetchArtifact(a, n){
+  try{
+    const from = a.old ? `&session=${encodeURIComponent(a.session)}` : '';
+    const r = await fetch(`/api/artifact/${encodeURIComponent(a.id)}?v=${encodeURIComponent(n)}${from}`, {headers:{'X-Dream-Token':TOKEN}, cache:'no-store'});
+    if(!r.ok) return null;
+    const j = await r.json();
+    if(typeof j.content !== 'string') return null;
+    if(j.title) a.title = String(j.title);
+    return j.content;
+  }catch(e){ return null; }
+}
+async function artifactEvent(d, replay){
+  if(!d || typeof d !== 'object' || !d.id || typeof d.path !== 'string' || !d.path) return;
+  const key = `file:${d.path}`, kind = ART_KIND[d.type] || 'html';
+  let a = artifacts.get(key);
+  if(!a){ a = {key, title: d.path.split('/').pop(), kind, versions: []}; artifacts.set(key, a); }
+  a.id = String(d.id); a.kind = kind; a.path = d.path;
+  if(d.title) a.title = String(d.title);
+  if(Number.isInteger(d.version) && d.version > 0) a.vn = Math.max(a.vn || 0, d.version);
+  if(Number.isFinite(d.bytes)){ a.bytes = d.bytes; a.size = fileSize(d.bytes); }
+  if(Number.isFinite(d.at) && d.at > 0) a.at = d.at;
+  renderChip(a);
+  companion?.artifacts();
+  if(replay) return;   // a reconnect: the cards; the owner re-opens
+  const n = a.vn || 1, landed = !!(previewArt && previewArt.key === key);   // the streamed write is on disk now
+  if(landed){ a.streaming = false; previewArt = null; }
+  // A text kind's content comes from the route; a binary kind is the file itself, named by its version's stamp.
+  const version = () => ART_TEXT.has(kind) ? fetchArtifact(a, n) : String(d.at || n);
+  if(artOpen === key){
+    // The open page changed (a new version, or a file it depends on): it reloads in place, keeping the view.
+    const body = await version();
+    if(body == null || artOpen !== key) return;
+    const changed = a.versions[n - 1] !== body;
+    if(changed) setVersion(a, n, body);
+    if(landed) artView = 'preview';
+    if(changed || landed){ artVerIdx = n - 1; paintArtifact({mirror: true}); }
+    else { $('artname').textContent = a.title; paintChatControls(a); }   // the same bytes the call's input painted: the registry's title and version
+    return;
+  }
+  // The model's own choice (`done` / `show_to_user` on a report, an image, a media file or a document) opens like
+  // its explicit show of a page: whatever the owner is doing, beside the chat when there is room, else in the
+  // Artifacts tab. Dream's automatic choice asks the never-steal rules.
+  const explicit = d.open && d.reason === 'explicit';
+  if(explicit || (d.open && wantsAutoOpen())){
+    const mine = ++openIntent, body = await version();
+    if(body == null || mine !== openIntent || artOpen === key || !(explicit || wantsAutoOpen())) return;
+    setVersion(a, n, body);
+    artView = 'preview';
+    openArtifact(key, {chat: explicit ? !!showBesideChat(false) : chatPanelMode(), auto: true});
+    return;
+  }
+  if(d.open) pulseCard(a);
+}
+function fileSize(bytes){
+  return bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + ' MB' : bytes >= 1024 ? (bytes / 1024).toFixed(1) + ' KB' : bytes + ' bytes';
+}
+// MachX streams a tool call's text while the model writes it (tool_preview). When its head reads as a write of a
+// previewable file, the panel opens at once in Code view and shows the raw text as it comes; the file's landing
+// (the registry's event after the write) flips it to Preview.
+function previewArtifact(piece){
+  if(previewArt && previewArt.landed) return;
+  if(!previewArt){
+    previewArt = {text: '', key: null};
+  }
+  previewArt.text += piece;
+  if(previewArt.text.length > 400000) previewArt.text = previewArt.text.slice(-400000);
+  if(!previewArt.key){
+    const head = previewArt.text.slice(0, 600);
+    if(!/\b(write_file|Write)\b/.test(head)) return;
+    const m = /["']?(?:file_)?path["']?\s*[:=]\s*["']([^"'\n]{1,500})["']/.exec(head) || /<parameter=(?:file_)?path>\s*([^<\n]{1,500})/.exec(head);
+    if(!m) return;
+    const path = m[1].trim().replace(/^\.\//, ''), ext = path.split('.').pop().toLowerCase();
+    // What the registry will make an artifact of when it lands as text: a page, a diagram, a report (never Dream's
+    // own plan and instruction files).
+    if(!/^(html?|svg|md)$/.test(ext) || /(^|\/)(PLAN|DREAM|CLAUDE|AGENTS)\.md$/.test(path)) { previewArt.key = 'none'; return; }
+    if(!wantsAutoOpen()){ previewArt.key = 'none'; return; }
+    const key = `file:${path}`;
+    let a = artifacts.get(key);
+    if(!a){ a = {key, title: path.split('/').pop(), kind: ext === 'svg' ? 'svg' : ext === 'md' ? 'report' : 'html', versions: []}; artifacts.set(key, a); }
+    a.streaming = true; previewArt.key = key;
+    artView = 'code';
+    openArtifact(key, {chat: chatPanelMode(), auto: true});
+    return;
+  }
+  if(previewArt.key !== 'none' && artOpen === previewArt.key){
+    const pre = artbody.querySelector('pre');
+    if(pre){ pre.textContent = previewArt.text; artbody.scrollTop = artbody.scrollHeight; }
+  }
+}
+function clearPreviewArt(failed){
+  if(!previewArt) return;
+  const a = previewArt.key && previewArt.key !== 'none' ? artifacts.get(previewArt.key) : null;
+  previewArt = null;
+  if(a && a.streaming){
+    // The call never landed as a version: an empty entry is removed; a page that has versions returns to them.
+    a.streaming = false;
+    if(!a.versions.length){
+      artifacts.delete(a.key);
+      if(artOpen === a.key){ artOpen = null; closeArtifactFrame(); panel.classList.remove('open'); artChat = false; companion?.closeArtifact(); }
+      companion?.artifacts();
+    } else if(artOpen === a.key){ artView = 'preview'; paintArtifact({mirror: true}); }
+  }
+}
+// The panel's own header beside the chat: title · vN · Preview | Code · Open in browser · More (Open in app · Refresh
+// · Copy · Download · Artifacts · auto-open) · ×. The title keeps its room; the secondary actions are the menu while
+// the bar is narrower than they are (artifacts.css). Each action shows only for a kind it applies to.
+function paintChatControls(a){
+  document.body.classList.toggle('chat-art', !!artChat);
+  const show = !!(artChat && a), file = show ? artifactLinkPath() : null, set = (id, on) => { $(id).style.display = on ? '' : 'none'; };
+  panel.dataset.kind = a ? a.kind : '';
+  set('artmore', show); set('artstudio', show); set('artauto', show);
+  // The version: a still the model saved has load stamps, not versions; where the version select shows, it says it.
+  set('artvn', show && (a.id || a.kind !== 'image') && $('artver').style.display === 'none');
+  set('artrefresh', show && a.id && !a.old);
+  set('artcopy', show && ART_TEXT.has(a.kind));
+  set('artdl', !!file);
+  set('artapp', !!file && !['html', 'svg'].includes(a.kind));
+  if(!show){ closeArtMenu(); return; }
+  $('artvn').textContent = `v${a.vn || a.versions.length || 1}`;
+  $('artautobox').checked = autoOpen;
+  if(file) $('artdl').href = '/api/download?path=' + encodeURIComponent(file) + '&token=' + encodeURIComponent(TOKEN);
+  else $('artdl').removeAttribute('href');
+}
+function closeArtMenu(){ $('artmenu').classList.remove('open'); $('artmore').setAttribute('aria-expanded', 'false'); }
+$('artmore').onclick = e => {
+  e.stopPropagation();
+  const open = !$('artmenu').classList.contains('open');
+  $('artmenu').classList.toggle('open', open); $('artmore').setAttribute('aria-expanded', String(open));
+};
+// The menu closes on a choice, on a click anywhere else and on Escape (the auto-open box and Copy, which answers
+// "Copied" on its own button, keep it open).
+document.addEventListener('click', e => { if(!e.target.closest?.('#artauto, #artcopy')) closeArtMenu(); });
+document.addEventListener('keydown', e => {
+  if(e.key !== 'Escape' || !$('artmenu').classList.contains('open')) return;
+  e.stopPropagation(); closeArtMenu(); $('artmore').focus();
+}, true);
+$('artrefresh').onclick = async () => {
+  const a = artifacts.get(artOpen); if(!a || !a.id) return;
+  const n = a.vn || 1, body = ART_TEXT.has(a.kind) ? await fetchArtifact(a, n) : String(Date.now() / 1000);
+  if(body == null || artOpen !== a.key) return;
+  setVersion(a, n, body); artVerIdx = n - 1; paintArtifact({mirror: true});
+};
+// "Open in app": the desktop's own application for a report, an image, a media file or a document. What the server
+// answers is said where the owner asked.
+async function openInApp(path, say){
+  try{
+    const r = await fetch('/api/open_file', {method:'POST', headers:{'Content-Type':'application/json','X-Dream-Token':TOKEN}, body: JSON.stringify({path})});
+    const j = await r.json();
+    say(r.ok ? `Opened ${j.name} in its application.` : (j.error || 'It could not be opened in an application.'), !r.ok);
+  }catch(e){ say('Dream could not be reached. Is the terminal still running?', true); }
+}
+$('artapp').onclick = () => {
+  const path = artifactLinkPath(); if(!path) return;
+  openInApp(path, (text, failed) => { $('artnote').textContent = text; if(failed) sysline(text, 'error'); });
+};
+$('artcopy').onclick = async () => {
+  const a = artifacts.get(artOpen), b = $('artcopy'); if(!a) return;
+  const code = a.versions[artVerIdx] || '';
+  let copied = false;
+  try{ await navigator.clipboard.writeText(code); copied = true; }
+  catch(err){
+    const area = document.createElement('textarea');
+    area.value = code; area.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.append(area); area.select();
+    try{ copied = document.execCommand('copy'); }catch(e2){ copied = false; }
+    area.remove(); b.focus();
+  }
+  b.textContent = copied ? 'Copied' : 'Copy failed';
+  clearTimeout(b._reset); b._reset = setTimeout(() => { b.textContent = 'Copy'; }, 2000);
+};
+$('artstudio').onclick = () => { if(artOpen) openCard(artOpen, true); };
+$('artautobox').onchange = e => {
+  autoOpen = !!e.target.checked;
+  try{ localStorage.setItem('dream.artifactAutoOpen', autoOpen ? '1' : '0'); }catch(err){}
+};
 
 /* ---------- following the model's view (DREAM-104) --------------------------- */
 // The pane mirrors what the model loads in its hidden frame, each edit to that file
@@ -1528,18 +2222,19 @@ function imageHref(path, stamp){
   return '/api/download?path=' + encodeURIComponent(String(path || '')) + '&token=' + encodeURIComponent(TOKEN)
     + '&v=' + encodeURIComponent(String(stamp || ''));
 }
-function openImage(d, replay){
+function openImage(d, replay, chat){
   const path = String(d.path || ''); if(!path) return;
   const key = `file:${path}`, stamp = String(d.stamp || Date.now());
   let a = artifacts.get(key);
-  if(!a || a.kind !== 'image'){ a = {key, title: path.split('/').pop(), kind: 'image', versions: []}; artifacts.set(key, a); }
+  if(!a || a.kind !== 'image'){ a = {key, title: path.split('/').pop(), kind: 'image', versions: [], at: Date.now() / 1000}; artifacts.set(key, a); }
   if(a.versions[a.versions.length-1] !== stamp) a.versions.push(stamp);
   else if(replay && artOpen === key) return;   // reconnect replays what is already showing
   a.path = path; a.size = d.size ? (d.size / 1024).toFixed(1) + ' KB' : '';
   renderChip(a);
   companion?.artifacts();
+  if(chat === null) return;   // the model's view waits: the owner is busy in the chat (showBesideChat)
   if(COMPANION && artOpen !== key) artView = 'preview';
-  openArtifact(key, {mirror: d.source === 'mirror'});
+  openArtifact(key, {mirror: d.source === 'mirror', chat: !!chat});
 }
 
 /* ---------- open in browser (DREAM-111) ------------------------------------- */
@@ -1547,7 +2242,7 @@ function openImage(d, replay){
 // that holds no Dream token (the desktop hands the click to the default browser), where ES
 // modules load -- a file:// page cannot import them.
 async function updatePageLink(){
-  const link = $('artext'), path = artifactFilePath(), key = artOpen;
+  const link = $('artext'), path = artifactLinkPath(), key = artOpen;
   link.style.display = 'none'; link.removeAttribute('href');
   if(!path) return;
   try{
@@ -1562,22 +2257,25 @@ function paintArtifact(opts){
   const a = artifacts.get(artOpen); if(!a) return;
   $('artname').textContent = a.title;
   const sel = $('artver');
-  sel.innerHTML = a.versions.map((_, i) =>
+  sel.innerHTML = Array.from(a.versions, (_, i) =>
     `<option value="${i}"${i===artVerIdx?' selected':''}>v${i+1}${i===a.versions.length-1?' (latest)':''}</option>`
   ).join('');
-  // An image's versions are only load stamps; the route serves the file as it is now.
-  sel.style.display = a.versions.length > 1 && a.kind !== 'image' ? '' : 'none';
+  // A binary kind's versions are only load stamps; the route serves the file as it is now.
+  sel.style.display = a.versions.length > 1 && ART_TEXT.has(a.kind) ? '' : 'none';
   $('artprev').classList.toggle('on', artView === 'preview');
   $('artcode').classList.toggle('on', artView === 'code');
+  paintChatControls(a);
   companion?.paintArtifact(a);
   updatePageLink();
   // The workspace navigation listens: a mirrored show is the model's own view and must
-  // not pull the owner away from the page they chose (DREAM-104, gate 1).
+  // not pull the owner away from the page they chose (DREAM-104, gate 1); a paint of the
+  // panel beside the chat (DREAM-233) keeps the Chat view.
   const mirror = mirroring || !!(opts && opts.mirror);
-  window.dispatchEvent(new CustomEvent("dream:artifact", {detail: {mirror}}));
+  window.dispatchEvent(new CustomEvent("dream:artifact", {detail: {mirror, chat: artChat}}));
   if(a.kind === 'image'){
     tweaksAvail = false; $('arttweaks').style.display = 'none';
     frameReady = false;
+    if(a.old && !a.exists){ paintFile(a); return; }   // an earlier session's picture that has left the workspace
     if(artView === 'code'){
       artbody.className = 'code';
       artbody.innerHTML = `<pre>${esc(a.path)}${a.size ? '\n' + esc(a.size) : ''}</pre>`;
@@ -1592,36 +2290,64 @@ function paintArtifact(opts){
     img.addEventListener('error', () => { $('artnote').textContent = 'the image could not be loaded from the workspace'; companion?.frameLoaded(); }, {once: true});
     img.src = imageHref(a.path, a.versions[artVerIdx]);
     // A still says it is one (DREAM-111): live, a saved screenshot in this pane read as an
-    // animation that froze. When a live page was showing, one click brings it back.
+    // animation that froze. When a live page was showing, one click brings it back. An image the
+    // turn built (the registry's, DREAM-236) is not a still of anything: the picture alone, fitted.
+    const live = lastLive && lastLive !== artOpen && artifacts.get(lastLive);
+    if(a.id && !live){
+      artbody.replaceChildren(img);
+      $('artnote').textContent = 'image · ' + a.path + (a.size ? ' · ' + a.size : '');
+      return;
+    }
     const bar = document.createElement('div');
     bar.className = 'stillbar'; bar.setAttribute('role', 'note');
     const tag = document.createElement('span');
-    tag.className = 'stilltag'; tag.textContent = 'Still image: ' + a.path; tag.title = tag.textContent;
+    tag.className = 'stilltag'; tag.textContent = a.id ? 'Image: ' + a.path : 'Still image: ' + a.path; tag.title = tag.textContent;
     bar.append(tag);
-    const live = lastLive && lastLive !== artOpen && artifacts.get(lastLive);
     if(live){
       const back = document.createElement('button');
       back.type = 'button'; back.id = 'artlive'; back.textContent = 'Back to live page · ' + live.title;
-      back.onclick = () => { artView = 'preview'; openArtifact(lastLive); };
+      back.onclick = () => { artView = 'preview'; openArtifact(lastLive, {chat: artChat}); };
       bar.append(back);
     }
     artbody.replaceChildren(bar, img);
     $('artnote').textContent = 'still image · ' + a.path + ' · a saved picture, not the running page';
     return;
   }
-  lastLive = artOpen;
-  const body = a.versions[artVerIdx] || '';
+  if(a.kind === 'video' || a.kind === 'audio' || a.kind === 'document'){
+    tweaksAvail = false; $('arttweaks').style.display = 'none';
+    frameReady = false;
+    paintFile(a);
+    return;
+  }
+  if(a.kind !== 'report') lastLive = artOpen;
+  // A write MachX is still streaming (DREAM-233): the Code view shows the call's raw text as it comes.
+  const streaming = a.streaming && previewArt && previewArt.key === a.key;
+  const body = streaming ? previewArt.text : (a.versions[artVerIdx] || '');
   const file = artifactFilePath();
-  if(artView === 'code'){
+  if(artView === 'code' || streaming){
     artbody.className = 'code';
     artbody.innerHTML = `<pre>${esc(body)}</pre>`;
-    $('artnote').textContent = `${body.length.toLocaleString()} chars`;
+    $('artnote').textContent = streaming ? 'Dream is writing this file…' : `${body.length.toLocaleString()} chars`;
+    if(streaming){ artbody.scrollTop = artbody.scrollHeight; return; }
     // The page is not running here; the model hears that instead of silence (DREAM-111).
-    if(file) studioReport({path: file, digest: studioDigest(body), status: 'code', phase: 'load', errors: [], webgl_lost: 0});
+    if(file && a.kind !== 'report') studioReport({path: file, digest: studioDigest(body), status: 'code', phase: 'load', errors: [], webgl_lost: 0});
+    return;
+  }
+  if(a.kind === 'report'){
+    // A report (DREAM-236): its Markdown through the page's own renderer (escape first, as a reply), at a
+    // document's width. No frame: nothing in it runs.
+    tweaksAvail = false; $('arttweaks').style.display = 'none';
+    frameReady = false;
+    const at = artbody.classList.contains('report') && artbody._report === a.key ? artbody.scrollTop : 0;   // a rewrite keeps the reader's place
+    artbody.className = 'report'; artbody._report = a.key;
+    artbody.innerHTML = `<article class="artdoc body">${md(body)}</article>`;
+    artbody.scrollTop = at;
+    $('artnote').textContent = `report · ${a.path || a.title} · ${body.length.toLocaleString()} chars`;
+    companion?.frameLoaded();
     return;
   }
   artbody.className = '';
-  const csp = `<meta http-equiv="Content-Security-Policy" content="${ART_CSP}">`;
+  const csp = `<meta http-equiv="Content-Security-Policy" content="${artCsp()}">`;
   // A widget (visualize_show_widget) gets the tokens visualize_read_me promised.
   const tokens = a.widget ? WIDGET_STYLE : '';
   // Dream's own head goes FIRST, before a single byte of the artifact, for every
@@ -1645,7 +2371,8 @@ function paintArtifact(opts){
   f._report = file ? {path: file, digest: studioDigest(body)} : null;
   f.srcdoc = doc;
   artbody.innerHTML = ''; artbody.appendChild(f);
-  $('artnote').textContent = (a.widget ? 'widget · ' : '') + 'sandboxed · no network, no access to this page';
+  $('artnote').textContent = (a.widget ? 'widget · ' : '') + 'sandboxed · '
+    + (previewNet ? 'internet on (https only)' : 'internet off — no network') + ' · no access to this page';
   frameReady = false;
   f.addEventListener('load', () => {
     frameReady = true;
@@ -1657,16 +2384,64 @@ function paintArtifact(opts){
     // A load counter misses a page that navigates while still parsing (one
     // load: the destination's), so every load is asked: the bridge answers a
     // ping, and a document without the bridge is not Dream's.
-    f._pong = setTimeout(() => {
+    // A page merely busy when the ping lands (a scene compiling its shaders, a
+    // 5 s task queued at load) answered late and was closed as one that left
+    // (A0: 2 runs in 3 in headless Chromium). So the ping is repeated, up to
+    // four over 15 s, before the frame is closed -- and a document that really
+    // left says so itself (the bridge's pagehide, __dream_unload below), so the
+    // one replacing it gets a single ping and 3 s, as before.
+    clearTimeout(f._pong);
+    let tries = 0;
+    const ping = () => {
       if(!f.isConnected) return;   // already replaced by a newer paint
-      f.remove();
-      $('artnote').textContent = 'closed — the page navigated away from its own document';
-      sysline('artifact closed — it navigated away from its own document', 'error');
-      companion?.frameClosed();
-    }, 3000);
-    f.contentWindow.postMessage({type:'__dream_ping'}, '*');
+      if(++tries > (f._left ? 1 : 4)){ closeNavigatedFrame(f); return; }
+      f.contentWindow.postMessage({type:'__dream_ping'}, '*');
+      f._pong = setTimeout(ping, tries === 1 ? 3000 : 4000);
+    };
+    ping();
     if(pointOn) f.contentWindow.postMessage({type:'__dream_point_on'}, '*');
   });
+}
+
+// A video or an audio file plays here from the download route while it is within the preview's per-file cap; a
+// document the frame cannot render, a media file over the cap or one this browser cannot decode, and a file that
+// is gone, get a card with the file's name and size, what is wrong, and the ways out: Open in app, Download.
+function paintFile(a){
+  const path = artifactLinkPath(), kind = ART_LABEL[a.kind], size = a.size || '';
+  $('artnote').textContent = [kind.toLowerCase(), a.path, size].filter(Boolean).join(' · ');
+  const card = why => {
+    artbody.className = 'file';
+    const el = document.createElement('div');
+    el.className = 'artfile'; el.setAttribute('role', 'group'); el.setAttribute('aria-label', `${a.title}, ${kind}`);
+    el.innerHTML = `<span class="ic" aria-hidden="true">${ART_GLYPH[a.kind]}</span>
+      <div class="t"><b>${esc(a.title)}</b><span>${esc([kind, size, a.path].filter(Boolean).join(' · '))}</span>
+      <p class="why">${esc(why)}</p><p class="said" role="status"></p></div>
+      <div class="acts"><button type="button" class="go" data-act="app">Open in app</button><a class="go" data-act="dl" download>Download</a></div>`;
+    const app = el.querySelector('[data-act=app]'), dl = el.querySelector('[data-act=dl]'), said = el.querySelector('.said');
+    if(path){
+      dl.href = '/api/download?path=' + encodeURIComponent(path) + '&token=' + encodeURIComponent(TOKEN);
+      app.onclick = () => openInApp(path, (text, failed) => { said.textContent = text; said.classList.toggle('bad', !!failed); });
+    } else { app.remove(); dl.remove(); }
+    artbody.replaceChildren(el);
+    companion?.frameLoaded();
+  };
+  if(!path){ card('This file is no longer in the workspace.'); return; }
+  if(a.kind === 'document'){ card('The preview cannot render this kind of file here.'); return; }
+  if((a.bytes || 0) > ART_PLAY_MAX){ card(`This ${a.kind} is ${size}: the preview plays files up to ${ART_PLAY_MAX >> 20} MB.`); return; }
+  artbody.className = 'media ' + a.kind;
+  const m = document.createElement(a.kind);
+  m.controls = true; m.preload = 'metadata'; m.title = a.title;
+  m.addEventListener('loadedmetadata', () => companion?.frameLoaded(), {once: true});
+  m.addEventListener('error', () => { if(m.isConnected) card(`This ${a.kind} could not be played here (the browser reported a media error).`); }, {once: true});
+  m.src = imageHref(path, a.versions[artVerIdx]);
+  artbody.replaceChildren(m);
+}
+
+function closeNavigatedFrame(f){
+  f.remove();
+  $('artnote').textContent = 'closed — the page navigated away from its own document';
+  sysline('artifact closed — it navigated away from its own document', 'error');
+  companion?.frameClosed();
 }
 
 window.addEventListener('message', e => {
@@ -2004,6 +2779,12 @@ async function submitForm(el, form){
 let tweaksOn = false, tweaksAvail = false;
 const tweakBtn = $('arttweaks');
 function artifactFilePath(){ return (artOpen && artOpen.startsWith('file:')) ? artOpen.slice(5) : null; }
+// The workspace file behind the open artifact for a link, a download or its application: this session's file, or an
+// earlier session's while it is still in the workspace (its stored version is a snapshot; nothing is saved to it).
+function artifactLinkPath(){
+  const a = artifacts.get(artOpen);
+  return artifactFilePath() || (a && a.old && a.exists ? a.path : null);
+}
 tweakBtn.onclick = () => {
   tweaksOn = !tweaksOn; tweakBtn.classList.toggle('on', tweaksOn);
   const f = artbody.querySelector('iframe');
@@ -2033,8 +2814,12 @@ pointBtn.onclick = () => {
 };
 window.addEventListener('message', e => {
   const f = artbody.querySelector('iframe');
-  if(!f || e.source !== f.contentWindow) return;   // only the open artifact frame
+  if(!f) return;
   const d = e.data || {};
+  // Only the open artifact frame -- and a document posting from its pagehide is already gone when the
+  // message lands, so Chromium hands it over with source null (A0's gate: the navigate-away page was kept
+  // the watchdog's full 15 s because this guard dropped its __dream_unload).
+  if(e.source !== f.contentWindow && !(e.source === null && d.type === '__dream_unload')) return;
   if(d.type === '__edit_mode_available'){
     tweaksAvail = true; tweakBtn.style.display = '';
     if(tweaksOn) f.contentWindow.postMessage({type:'__activate_edit_mode'}, '*');
@@ -2046,7 +2831,12 @@ window.addEventListener('message', e => {
       body: JSON.stringify({path, edits: d.edits})})
       .then(r => r.json()).then(j => { if(j.error) sysline('tweak not saved — ' + j.error, 'error'); }).catch(() => {});
   } else if(d.type === '__dream_pong'){
-    clearTimeout(f._pong);
+    clearTimeout(f._pong); f._left = false;
+  } else if(d.type === '__dream_unload'){
+    // The document is leaving (pagehide). Unless what replaces it answers a ping within
+    // 3 s -- a reload of the same srcdoc does, a foreign page does not -- the frame closes.
+    f._left = true; clearTimeout(f._pong);
+    f._pong = setTimeout(() => { if(f.isConnected) closeNavigatedFrame(f); }, 3000);
   } else if(d.type === '__dream_send_prompt'){
     // A widget fills the user's composer; only the user sends. Never submitted here,
     // and never over what he was typing: the text joins on a new line.
@@ -2104,11 +2894,28 @@ window.addEventListener('message', e => {
   frameReply(String(d.id), !!d.ok, d.value);
 });
 
-$('artver').onchange = e => { artVerIdx = +e.target.value; paintArtifact(); };
+$('artver').onchange = async e => {
+  artVerIdx = +e.target.value;
+  // A registry version this page never held (DREAM-233) comes from the route first.
+  const a = artifacts.get(artOpen);
+  if(a && a.id && a.versions[artVerIdx] == null){
+    const body = await fetchArtifact(a, artVerIdx + 1);
+    if(body == null || artOpen !== a.key) return;
+    a.versions[artVerIdx] = body;
+  }
+  paintArtifact();
+};
 $('artprev').onclick = () => { artView = 'preview'; paintArtifact(); };
 $('artcode').onclick = () => { artView = 'code'; paintArtifact(); };
 $('artclose').onclick = () => {
-  panel.classList.remove('open'); artOpen = null; rail.classList.remove('hide');
+  // Closed by the owner while a turn runs: this turn opens nothing more by itself (DREAM-233). The body's
+  // chat-art class stays for companion.closeArtifact to read (a close beside the chat moves no focus); it removes it.
+  if(working) closedThisTurn = true;
+  // Closed in the Artifacts tab: back to its list (DREAM-235).
+  if(COMPANION){ document.body.classList.toggle('art-home', !artChat); document.body.classList.remove('art-full'); }
+  artChat = false;
+  panel.classList.remove('open'); artOpen = null;
+  if(!rail._hiddenBefore) rail.classList.remove('hide');
   // Closing only hid the panel: the iframe stayed loaded and kept driving its
   // render loop. A three.js artifact then held the display GPU at 60-90% for
   // hours with nothing on screen (2026-09-20). Tear the frame down; reopening
@@ -2143,6 +2950,7 @@ function artifactFromWrite(input){
   const path = String(input.file_path || input.path || '');
   const body = input.content;
   if(typeof body !== 'string' || !path) return;
+  if(input.append === true) return;   // only a part of the file: Dream's registry reads the whole from disk (DREAM-233)
   const ext = path.split('.').pop().toLowerCase();
   const kind = (ext === 'html' || ext === 'htm') ? 'html' : (ext === 'svg' ? 'svg' : artKind('', body));
   if(!kind) return;
@@ -2191,7 +2999,14 @@ function artifactFromWrite(input){
 <link rel="stylesheet" href="/assets/nested-footer.css">
 <script src="/assets/nested-footer.js"></script>
 <script src="/assets/nested-workflows.js"></script>
+<link rel="stylesheet" href="/assets/nested-pane.css">
+<script src="/assets/nested-pane.js"></script>
 <link rel="stylesheet" href="/assets/branding.css">
+<link rel="stylesheet" href="/assets/chat.css">
+<link rel="stylesheet" href="/assets/artifacts.css">
+<script src="/assets/artifacts.js"></script>
+<link rel="stylesheet" href="/assets/chat-nested.css">
+<script src="/assets/chat-nested.js"></script>
 <script>
 // All frame constants, listeners, and companion controls must exist before a
 // socket can deliver hello followed immediately by the retained Studio show.

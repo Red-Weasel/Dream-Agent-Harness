@@ -28,11 +28,10 @@ from dream.tui.app import App
 ORIGINS = {"session", "env", "global", "default", "not-applied"}
 EDITABLE = {"output.max_tokens", "behaviour.vitals", "roles.subagents.default", "roles.verifier", "roles.filer",
             "roles.critic", "roles.evaluator", "roles.reviewer",      # the last three: S4 (DREAM-145)
-            "engine.parallel", "engine.slot_ctx",                     # the engine lanes (DREAM-151)
             "behaviour.context_overflow", "behaviour.subagent_overflow",  # context management (DREAM-175)
             "behaviour.context_trigger", "behaviour.context_warning",
             "behaviour.response_style",                                   # response styles (DREAM-181)
-            "nested.max_workers"}                                         # the worker cap (DREAM-197)
+            "nested.max_agents"}                     # max agents (2026-10-01; the engine lanes are the load screen's)
 
 
 @pytest.fixture(autouse=True)

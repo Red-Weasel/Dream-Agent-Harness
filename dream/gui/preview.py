@@ -3,11 +3,19 @@ into, reads the console of, evaluates JS in, and screenshots — without disturb
 what the user is looking at in Studio, and without needing Studio to be open at all.
 
 Playwright's bundled Chromium, headless. One page, kept warm and reused, so state
-set by one `eval_js` is still there for the next. Network is blocked wholesale —
-the rule the Studio panel enforces with its CSP — so a page the model wrote can
-render local files but cannot phone home: only file:, data:, blob:, and about:
-requests are allowed through. Closes itself after idling, like the Camoufox
-browser does.
+set by one `eval_js` is still there for the next. Network follows the Studio
+panel's rule (DREAM-234): file:, data:, blob:, about:, and https:// to a PUBLIC
+host — the sandbox proxy's destination rule, so a page may load three.js from a
+CDN or a web font but cannot reach a loopback or private service, and never
+plain http:. Closes itself after idling, like the Camoufox browser does.
+
+The page is loaded the way the owner's pane runs it (A0): the body is the one
+`prepare_studio_media` gives the pane -- local stylesheets, scripts, images, fonts
+and media inlined -- served at the file's own URL, and no other local file loads by
+URL (the pane's srcdoc frame loads nothing by URL). Before, the frame loaded the raw
+file with every local file reachable, and told the model "clean" about pages whose
+module scripts, stylesheets and images the pane could not fetch: the owner saw a
+blank pane while the model read a clean console.
 
 The page itself parks (DREAM-111) -- it goes to about:blank, so nothing of it runs or
 renders -- right after `done` and after PARK_IDLE_S unused; `parked` remembers the
@@ -22,8 +30,10 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .. import config
+from ..core.sandbox_net import _Refused, _public_addresses
 
 VIEWPORT = {"width": 1280, "height": 800}
 # With GPU rendering the BROWSER stays up across a slow local model's steps (minutes
@@ -67,8 +77,60 @@ JPEG_QUALITY = 60
 _ALLOWED_SCHEMES = ("file:", "data:", "blob:", "about:")
 
 
-def _allowed(url: str) -> bool:
-    return url.startswith(_ALLOWED_SCHEMES)
+async def _allowed(url: str) -> bool:
+    """The schemes above as before; and https:// to a public host (DREAM-234) by the sandbox proxy's own rule
+    (not this machine by name, every address it resolves to global). http:, and any name that is local or does
+    not resolve, is refused. Chromium resolves the name again for the connection itself, so this is the proxy's
+    line, not a guarantee against a name that answers differently twice."""
+    if url.startswith(_ALLOWED_SCHEMES):
+        return True
+    if not url.startswith("https://"):
+        return False
+    host = urlsplit(url).hostname
+    if not host:
+        return False
+    try:
+        await _public_addresses(host)
+    except (_Refused, OSError):
+        return False
+    return True
+
+
+_PANE_RULE = ("the Studio frame loads no local file by URL: a local stylesheet, script, ES module (an importmap "
+              "included), image, font or media file is inlined into the page for it; a file the page fetches "
+              "or a module that could not be inlined is not -- put that data in the page")
+
+
+def _pane_document(path: Path) -> tuple[str, str] | None:
+    """An HTML file as the pane gets it (`prepare_studio_media`: the same body the show
+    tools send); None for any other file (an .svg loads from disk as it is)."""
+    path = path.resolve()
+    if path.suffix.lower() not in {".html", ".htm"}:
+        return None
+    from .bundle import prepare_studio_media
+
+    body = path.read_text(encoding="utf-8", errors="replace")
+    try:
+        body = prepare_studio_media(path, body)
+    except ValueError:
+        pass    # a media file it refuses: the show tools report that; the page loads as written
+    return path.as_uri(), body
+
+
+def _why_not_loaded(url: str) -> str:
+    """The line beside a refused local load: the pane's rule, or the cap the file is over."""
+    from urllib.parse import unquote, urlsplit
+
+    from .bundle import MAX_ASSET_BYTES
+    try:
+        size = Path(unquote(urlsplit(url).path)).stat().st_size
+    except (OSError, ValueError):
+        return _PANE_RULE
+    if size > MAX_ASSET_BYTES:
+        return (f"{size / (1024 * 1024):.1f} MB is over the preview's {MAX_ASSET_BYTES >> 20} MB per-file "
+                "limit, so it was left as a URL, which the Studio frame cannot load")
+    return _PANE_RULE
+
 
 
 def _same_document(url: str, loaded: Path | None) -> bool:
@@ -101,6 +163,9 @@ class Preview:
         # What WebGL renders with in this frame, told to the model with every load.
         self.renderer = ""
         self.gpu = False
+        # The HTML document being loaded, as the pane gets it: (its file URL, the prepared
+        # body); `_route` serves it for that navigation and nothing else local.
+        self._document: tuple[str, str] | None = None
         self.logs: list[str] = []
         self.blocked: list[str] = []
         # PNG captures stashed by key for a later `run_script` (Phase 7).
@@ -121,12 +186,12 @@ class Preview:
             from playwright.async_api import async_playwright
 
             self._pw = await async_playwright().start()
-            # --allow-file-access-from-files: Babel loads a `<script type="text/babel"
-            # src="x.jsx">` by XHR, and Chromium refuses file→file XHR by default,
-            # which would make every multi-file JSX page fail in the hidden frame.
-            # A page can then read local files into itself — the same reads the
-            # model already has for free — but still cannot send them anywhere:
-            # the network stays blocked.
+            # --allow-file-access-from-files: so that a page's fetch() or XHR of a local
+            # file reaches the route (Chromium refuses file→file fetches itself otherwise,
+            # with a line about the scheme) and is refused there with the pane's rule
+            # (`_route_file`): since A0 nothing local loads by URL in this frame; the
+            # page's own stylesheets, scripts (a `text/babel` .jsx included), images,
+            # fonts and media are inlined into it, as for the pane.
             node = display_render_node()
             if node:
                 self._browser = await self._pw.chromium.launch(
@@ -216,17 +281,41 @@ class Preview:
     async def _route(self, route: Any) -> None:
         url = route.request.url
         try:
-            if _allowed(url):
+            if url.startswith("file:"):
+                await self._route_file(route, url)
+                return
+            if await _allowed(url):
                 await route.continue_()
                 return
             if len(self.blocked) < MAX_LOG_LINES:
                 self.blocked.append(url)
-            self._log(f"blocked: {url} (the preview has no network, like the Studio panel)")
+            self._log(f"blocked: {url} (the preview reaches the public internet over https only, like the Studio panel)")
             await route.abort()
         except Exception:
             # A request still in flight when the page or browser went away. There
             # is nothing to deliver it to; a traceback here is noise.
             pass
+
+    async def _route_file(self, route: Any, url: str) -> None:
+        """A local file: the document itself is served as the pane gets it (the prepared
+        body at the file's URL); a navigation elsewhere goes through as before (the load
+        then says the page navigated away); every other local load -- a script, a
+        stylesheet, an image, a module, a fetch -- is refused as the pane refuses it, with
+        a line that says why, so the model fixes the page and not its guess."""
+        request = route.request
+        page = self._page
+        main = (page is not None and request.is_navigation_request()
+                and request.frame == page.main_frame)
+        if main and self._document is not None and url == self._document[0]:
+            await route.fulfill(status=200, content_type="text/html; charset=utf-8", body=self._document[1])
+            return
+        if main:
+            await route.continue_()
+            return
+        if len(self.blocked) < MAX_LOG_LINES:
+            self.blocked.append(url)
+        self._log(f"blocked: {url} ({_why_not_loaded(url)})")
+        await route.abort()
 
     async def _reset(self) -> None:
         async with self._lock:
@@ -307,6 +396,7 @@ class Preview:
         self.logs.clear()
         self.blocked.clear()
         self._dropped = 0
+        self._document = await asyncio.to_thread(_pane_document, path)
         try:
             await asyncio.wait_for(
                 self._page.goto(path.resolve().as_uri(), wait_until="load",

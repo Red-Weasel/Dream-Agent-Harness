@@ -35,8 +35,11 @@ async def test_send_stays_visible_and_clickable_with_the_understand_panel_open(s
         await view.locator('#nd-compose').fill(LONG)
         found = await _send_is_fully_usable(s.page)
         panel = await s.page.locator('#dream-understand').bounding_box()
-        app = await view.locator('.nd-app').bounding_box()
-        assert app['x'] + app['width'] <= panel['x'] + 1, (app, panel)       # the whole view sits beside the panel
+        orch = await view.locator('.nd-orch').bounding_box()
+        # DREAM-243: in this view the panel is the right-hand pane's Map, over the workers' area; the orchestrator
+        # column keeps its width beside it (it flowed beside the whole view before, squeezing it into three columns)
+        assert orch['x'] + orch['width'] <= panel['x'] + 1 and orch['width'] >= 360, (orch, panel)
+        await expect(s.page.locator('html')).to_have_attribute('data-nd-pane', 'map')
         assert found['width'] > 20 and found['inColumn'] and found['inViewport'] and found['onTop'], found
         assert s.errors == []
 

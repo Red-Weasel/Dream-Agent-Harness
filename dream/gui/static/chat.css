@@ -1,0 +1,187 @@
+/* Dream Chat (DREAM-228, batch B1): the conversation as one centered column -- the owner's messages as right
+   bubbles, Dream's replies as plain text -- and the composer as one rounded box under it. Linked last. Every rule
+   is scoped to the desktop Chat view (html.dream-design.companion): the plain browser page and the classic
+   presentation keep their look. Presentation only. Colours are Dream's theme tokens (theme.css), read through the
+   --ch-* aliases: flat surfaces, ember as the single action colour, no gradient, glow or blur. Type sizes
+   12/14/16/18/20/24, weights 400/500/600, spacing on the 4 px scale. */
+html.dream-design.companion{--ch-col:768px;--ch-gutter:16px;--ch-surface:var(--bg);--ch-code:var(--bg0);--ch-bubble:var(--raised);--ch-field:var(--panel);--ch-line:var(--line);--ch-line-strong:var(--line-strong);--ch-text:var(--fg);--ch-quiet:var(--dim);--ch-faint:var(--faint);--ch-action:var(--ember);--ch-action-hover:var(--ember-soft);--ch-action-ink:var(--ember-ink);--ch-focus:var(--ember-soft)}
+
+/* The pane. The eclipse stays behind it (the welcome shows it in full); once a conversation has started the
+   column is a flat opaque band, so plain reply text is readable. Both scrollbar gutters are kept, so the column
+   and the composer under it share one centre whether or not the pane scrolls. */
+html.dream-design.companion #main{scrollbar-gutter:stable both-edges}
+html.dream-design.companion #main:has(#studio-interactions-empty[hidden]){padding:0 var(--ch-gutter) 24px;background:linear-gradient(var(--ch-surface),var(--ch-surface)) center top/min(100%,calc(var(--ch-col) + 96px)) 100% no-repeat,color-mix(in srgb,var(--bg0) 62%,transparent)}
+html.dream-design.companion #main .wrap,html.dream-design.companion #main .feed-toolbar{max-width:var(--ch-col);margin-inline:auto}
+html.dream-design.companion #main .feed-toolbar{margin-block:0;padding:16px 0 20px;font-size:12px;color:var(--ch-faint)}
+
+/* Messages. The "You" / "Dream" labels stay in the document for a screen reader and take no room. */
+html.dream-design.companion .msg{position:relative;margin:0 0 24px;font:400 16px/1.65 var(--sans);animation:none}
+html.dream-design.companion .msg .who{position:absolute;width:1px;height:1px;min-height:0;margin:-1px;padding:0;border:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+html.dream-design.companion .msg .who::before{content:none}
+html.dream-design.companion .msg .body{padding:0;line-height:1.65}
+html.dream-design.companion .you{display:flex;flex-direction:column;align-items:flex-end;max-width:none;margin-left:0}
+html.dream-design.companion .you .body{max-width:70%;padding:10px 16px;border:0;border-radius:20px;background:var(--ch-bubble);box-shadow:none;line-height:1.5}
+html.dream-design.companion .dream{padding:0;border:0;border-radius:0;background:none;box-shadow:none}
+
+/* Markdown in a reply. */
+html.dream-design.companion .body :is(p,ul,ol){max-width:none;margin:0 0 16px}
+html.dream-design.companion .body :is(h1,h2,h3,h4){margin:24px 0 8px;font-weight:600;line-height:1.3;letter-spacing:-.01em}
+html.dream-design.companion .body h1{font-size:24px}
+html.dream-design.companion .body h2{font-size:20px}
+html.dream-design.companion .body h3{font-size:18px}
+html.dream-design.companion .body h4{font-size:16px}
+html.dream-design.companion .body>:first-child{margin-top:0}
+html.dream-design.companion .body>:last-child{margin-bottom:0}
+html.dream-design.companion .body :is(ul,ol){padding-left:24px}
+html.dream-design.companion .body li{margin:4px 0}
+html.dream-design.companion .body li>:is(ul,ol){margin:4px 0 0}
+html.dream-design.companion .body li>.codeblock{margin:8px 0}
+html.dream-design.companion .body hr{margin:24px 0;border:0;border-top:1px solid var(--ch-line)}
+html.dream-design.companion .body blockquote{margin:0 0 16px;padding:0 0 0 16px;border-left:2px solid var(--ch-line-strong);color:var(--ch-quiet)}
+html.dream-design.companion .body del{color:var(--ch-quiet)}
+html.dream-design.companion .body a{text-underline-offset:3px}
+html.dream-design.companion .body code{padding:2px 6px;border-radius:6px;background:var(--ch-bubble);color:var(--violet-soft);font:14px/1.4 var(--mono)}
+/* A table keeps its words whole and scrolls sideways inside the column. */
+html.dream-design.companion .body .md-table{margin:0 0 16px;overflow-x:auto;overflow-wrap:normal;scrollbar-width:thin;scrollbar-color:var(--ch-line-strong) transparent}
+html.dream-design.companion .body table{margin:0;border-collapse:collapse;font-size:14px;line-height:1.5}
+html.dream-design.companion .body :is(th,td){padding:8px 16px 8px 0;border:0;border-bottom:1px solid var(--ch-line);background:none;text-align:left;vertical-align:top}
+html.dream-design.companion .body th{border-bottom-color:var(--ch-line-strong);font-weight:600;white-space:nowrap}
+/* A code block: the language and Copy in a header, the code under it; a long line scrolls inside the block. */
+html.dream-design.companion .codeblock{margin:0 0 16px;border:1px solid var(--ch-line);border-radius:12px;background:var(--ch-code);overflow:hidden}
+html.dream-design.companion .codehead{min-height:36px;padding:4px 4px 4px 16px;border-bottom:1px solid var(--ch-line);background:var(--ch-field);color:var(--ch-quiet);font:12px/1.4 var(--sans)}
+html.dream-design.companion .codecopy{min-height:28px;padding:4px 12px;border:0;border-radius:8px;background:none;color:var(--ch-quiet);font:500 12px/1.4 var(--sans)}
+html.dream-design.companion .codecopy:hover{background:var(--ch-bubble);color:var(--ch-text)}
+html.dream-design.companion .body .codeblock pre{max-width:100%;margin:0;padding:12px 16px;border:0;border-radius:0;background:none;overflow-x:auto;scrollbar-width:thin;scrollbar-color:var(--ch-line-strong) transparent}
+html.dream-design.companion .body pre code{padding:0;border-radius:0;background:none;color:var(--ch-text);font:14px/1.6 var(--mono)}
+
+/* Streaming (DREAM-230). The cursor sits at the end of the text being written; a stopped reply says so under its text. */
+html.dream-design.companion .cursor{width:2px;height:1.1em;margin-left:2px;border-radius:1px;background:var(--ch-text);vertical-align:-.18em}
+
+/* Message actions (DREAM-231). Under a finished reply, a quiet row: "Stopped" on a stopped reply, Copy, "Try again" on a
+   stopped turn, and the turn's speed and time at the right (a button when the timing card is its detail). Under the
+   owner's own bubble, a Copy. The last reply's row is in the flow and always visible. An earlier row lies in the gap
+   under its message, taking no room, and shows while the pointer is on the message or the keyboard's focus is in the row;
+   "Stopped" always shows. Without a pointer that hovers, and at a phone width, every row is visible. */
+html.dream-design.companion .msg-foot{display:flex;align-items:center;gap:4px;flex-wrap:nowrap;min-height:28px;margin-top:4px;color:var(--ch-faint);font:12px/1.4 var(--sans)}
+html.dream-design.companion .msg-foot button{min-height:24px;padding:3px 10px;border:0;border-radius:8px;background:none;box-shadow:none;color:var(--ch-quiet);font:500 12px/1.4 var(--sans);white-space:nowrap}
+html.dream-design.companion .msg-foot button:hover:not(:disabled){background:var(--ch-bubble);color:var(--ch-text)}
+html.dream-design.companion .msg-stopped{margin-right:8px;color:var(--ch-quiet)}
+html.dream-design.companion .msg-foot .msg-meta{margin-left:auto;font-weight:400;font-variant-numeric:tabular-nums;white-space:nowrap}
+html.dream-design.companion .msg-foot span.msg-meta{padding:0 2px}
+html.dream-design.companion .you .msg-foot{position:absolute;top:100%;right:0;min-height:0;height:24px;margin:0}
+@media (hover:hover) and (min-width:701px){
+  html.dream-design.companion .dream:not(.latest):not(.stopped) .msg-foot{position:absolute;top:100%;left:0;right:0;min-height:0;height:24px;margin:0}
+  html.dream-design.companion .dream:not(.latest):not(:hover) .msg-foot:not(:has(:focus-visible))>:not(.msg-stopped),html.dream-design.companion .you:not(:hover) .msg-foot:not(:has(:focus-visible))>*{opacity:0}
+}
+/* "Try again" after a failed turn, and beside "Stopped" when the turn was stopped before any text. */
+html.dream-design.companion .sys:is(.turn-retry,.turn-stopped){display:flex;align-items:center;gap:8px;color:var(--ch-quiet)}
+html.dream-design.companion :is(.msg-foot,.sys) .msg-retry{min-height:24px;margin:0;padding:3px 12px;border:1px solid var(--ch-line-strong);border-radius:999px;background:none;box-shadow:none;color:var(--ch-text);font:500 12px/1.4 var(--sans)}
+html.dream-design.companion :is(.msg-foot,.sys) .msg-retry:hover:not(:disabled){background:var(--ch-bubble)}
+
+/* Dream's own lines and cards in the column: quiet, flat, no accent borders. */
+html.dream-design.companion .sys{margin:0 0 16px;padding:0;border:0;border-radius:0;background:none;color:var(--ch-faint);font:12px/1.6 var(--sans)}
+html.dream-design.companion .sys.error{color:var(--err)}
+html.dream-design.companion .sys.dream-note{color:var(--violet)}
+html.dream-design.companion .sys.incomplete-answer{color:var(--warn)}
+html.dream-design.companion .think{margin:0 0 16px;padding:0;border:0;color:var(--ch-quiet);font:400 14px/1.6 var(--sans)}
+html.dream-design.companion .think summary{padding:4px 0;font-size:12px}
+html.dream-design.companion .think div{padding:4px 0 0;border:0}
+html.dream-design.companion .tool{margin:0 0 12px;border-radius:12px;background:var(--bg2)}
+
+/* The composer: one rounded box as wide as the column, "+" inside at the left, the round primary button at the
+   right. It grows with the text to about 200 px (grow() in index.html stops at 190), then scrolls. */
+html.dream-design.companion footer{padding:8px var(--ch-gutter) 12px;background:var(--ch-surface)}
+html.dream-design.companion :is(#chat-progress,#attachments,.mention,.composer,footer .hint){max-width:var(--ch-col);margin-inline:auto}
+html.dream-design.companion #chat-progress{margin-block:0 8px;padding:0 8px;color:var(--ch-faint);font:12px/1.6 var(--sans)}
+html.dream-design.companion .composer{min-height:0;margin-block:0;padding:8px;gap:8px;align-items:flex-end;border:1px solid var(--ch-line-strong);border-radius:26px;background:var(--ch-field);box-shadow:none}
+html.dream-design.companion .composer:focus-within{border-color:var(--ch-focus);box-shadow:none}
+html.dream-design.companion #input{flex:1 1 150px;min-width:0;min-height:36px;max-height:200px;padding:6px 4px;overflow-y:auto;color:var(--ch-text);font:400 16px/1.5 var(--sans)}
+html.dream-design.companion #input::placeholder{color:var(--ch-faint)}
+/* The plan strip keeps its place (fix #88): left of the box from 1000 px, on its own line above it below that. */
+html.dream-design.companion #plan-panel{padding:2px 8px 0}
+@media (min-width:1000px){html.dream-design.companion #plan-panel{align-self:flex-end;padding:0 4px 8px}}
+
+/* "Jump to latest": a round button centered above the composer, over the end of the conversation, while the reader is
+   more than 120 px from it. Only in Chat: another view has no conversation under it. */
+html.dream-design.companion footer{position:relative}
+html.dream-design.companion #to-latest{display:grid;place-items:center;place-content:center;bottom:calc(100% + 12px);width:36px;min-width:36px;height:36px;min-height:36px;padding:0;border:1px solid var(--ch-line-strong);border-radius:50%;background:var(--ch-field);box-shadow:0 2px 8px rgb(0 0 0 / .35);color:var(--ch-text);font-size:0}
+html.dream-design.companion #to-latest:hover{background:var(--ch-bubble)}
+html.dream-design.companion #to-latest::before{content:"";width:18px;height:18px;background:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 5v13M6 12.5l6 6 6-6'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 5v13M6 12.5l6 6 6-6'/%3E%3C/svg%3E") center/contain no-repeat}
+html.dream-design.companion #to-latest[hidden],html.dream-design.companion:not([data-dream-view=chat]) #to-latest{display:none}
+
+/* Round 36 px controls with line icons; the button's word stays as its accessible name. */
+html.dream-design.companion #attach,html.dream-design.companion #stop,html.dream-design.companion .composer:not(.working) #send{display:grid;place-items:center;place-content:center;align-self:flex-end;flex:0 0 36px;width:36px;min-width:36px;height:36px;min-height:36px;padding:0;border:0;border-radius:50%;box-shadow:none;font-size:0}
+html.dream-design.companion #attach::before,html.dream-design.companion #stop::before,html.dream-design.companion .composer:not(.working) #send::before{content:"";width:18px;height:18px;background:currentColor}
+html.dream-design.companion #attach{background:none;color:var(--ch-quiet)}
+html.dream-design.companion #attach:hover:not(:disabled){background:var(--ch-bubble);color:var(--ch-text)}
+html.dream-design.companion #attach::before{-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M12 5v14M5 12h14'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M12 5v14M5 12h14'/%3E%3C/svg%3E") center/contain no-repeat}
+/* The primary button: Send (an up arrow) when idle, Stop (a square) while a turn runs, in the same place. */
+html.dream-design.companion #stop,html.dream-design.companion .composer:not(.working) #send{margin-left:auto;background:var(--ch-action);color:var(--ch-action-ink)}
+html.dream-design.companion #stop:hover:not(:disabled),html.dream-design.companion .composer:not(.working) #send:hover:not(:disabled){background:var(--ch-action-hover);color:var(--ch-action-ink)}
+html.dream-design.companion .composer:not(.working) #send::before{-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 19V6M6 11.5l6-6 6 6'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 19V6M6 11.5l6-6 6 6'/%3E%3C/svg%3E") center/contain no-repeat}
+html.dream-design.companion #stop::before{width:12px;height:12px;border-radius:2px}
+/* Nothing to send yet: the button is dimmed (pressing it sends nothing). A draft that holds only files can be sent. */
+html.dream-design.companion .composer:not(.working) #input:placeholder-shown~#send{opacity:.45}
+html.dream-design.companion #attachments:not([hidden])~.composer:not(.working) #send{opacity:1}
+/* While a turn runs, Queue (#send) and Steer stay beside Stop as quiet word buttons. */
+html.dream-design.companion .composer.working #send,html.dream-design.companion #steer{align-self:flex-end;min-width:0;height:36px;min-height:36px;padding:0 14px;border:1px solid var(--ch-line-strong);border-radius:999px;background:none;box-shadow:none;color:var(--ch-text);font:500 14px/1 var(--sans)}
+html.dream-design.companion .composer.working #send{margin-left:auto}
+html.dream-design.companion .composer.working #stop{margin-left:0}
+html.dream-design.companion .composer.working #send:hover:not(:disabled),html.dream-design.companion #steer:hover:not(:disabled){border-color:var(--ch-line-strong);background:var(--ch-bubble);color:var(--ch-text)}
+/* A phone-width box has no room for the text and three buttons in one line: the buttons take the line under it,
+   together. The 480 px desktop pane keeps one line (its preview keeps its height: test_desktop_companion.py). */
+@media (max-width:460px){html.dream-design.companion .composer.working #input{flex-basis:calc(100% - 44px)}}
+
+/* The line under the composer: the same controls, quiet, in one row that wraps. */
+html.dream-design.companion footer .hint{margin-block:8px 0;padding:0 8px;gap:4px 12px;align-items:center;flex-wrap:wrap;color:var(--ch-faint);font:12px/1.4 var(--sans)}
+html.dream-design.companion :is(#chat-mode,#read-twice,#fresh-start){min-height:24px;padding:2px 10px;border:1px solid var(--ch-line);border-radius:999px;background:none;color:var(--ch-quiet);font:inherit}
+html.dream-design.companion :is(#chat-mode,#read-twice,#fresh-start):hover:not(:disabled){border-color:var(--ch-line-strong);background:none;color:var(--ch-text)}
+html.dream-design.companion #read-twice.on{border-color:var(--plum-line);background:var(--plum);color:var(--ch-text)}
+html.dream-design.companion #preset-pick select{min-height:22px;color:var(--ch-quiet);border-color:var(--ch-line)}
+/* The two selects of the Chat view. WebKitGTK (the desktop's engine) paints its own themed menu button for a select whatever
+   the background says -- grey, about 29 px tall -- where Chromium draws the flat control (tests/test_chat_webkit.py). They are
+   drawn here instead, with a chevron in the quiet text colour (the theme's --dim, #b6b9ce: a data URI cannot read a token). */
+html.dream-design.companion :is(#preset-pick select,.feed-toolbar select){-webkit-appearance:none;appearance:none;padding-right:22px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%23b6b9ce' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.5l3 3 3-3'/%3E%3C/svg%3E");background-position:right 6px center;background-size:12px;background-repeat:no-repeat}
+/* The keyboard hint has no room beside the controls in a 768 px row (it was cut to "Enter to sen..."); the Send button's tooltip says it. */
+html.dream-design.companion footer .hint .keys{display:none}
+/* A phone-width window: narrower gutters, the same for the column and the composer. */
+@media (max-width:700px){html.dream-design.companion{--ch-gutter:12px}html.dream-design.companion footer{padding-bottom:8px}}
+
+/* The preview panel beside the chat (DREAM-233, batch A1): the same #artpanel frame as the Studio tab, open in the Chat
+   view (body.chat-art, set while the panel is open there). From 1000 px the chat keeps 44 % (at least 360 px) and the
+   panel takes the rest; below that it is a sheet anchored at the right over the chat, with the same close button. The
+   panel's first appearance slides in from the right over 200 ms (companion.css removes every transition under
+   prefers-reduced-motion). The view stays Chat throughout. */
+@media (min-width:1000px){
+  html.dream-design.companion[data-dream-view=chat] body.chat-art.has-artifact #main{flex:0 0 var(--dream-chat-share,44%);min-width:360px}
+  html.dream-design.companion[data-dream-view=chat] body.chat-art.has-artifact #artpanel{flex:1 1 auto;min-width:0;border-left:1px solid var(--ch-line-strong)}
+}
+@media (max-width:999px){
+  html.dream-design.companion[data-dream-view=chat] body.chat-art.has-artifact #artpanel{display:flex;position:absolute;top:0;right:0;bottom:0;width:min(100%,560px);z-index:6;border-left:1px solid var(--ch-line-strong);box-shadow:-16px 0 40px #0008}
+}
+html.dream-design.companion body.chat-art.has-artifact #artpanel{transition:transform .2s ease-out}
+html.dream-design.companion body.chat-art.has-artifact #artpanel.entering{transform:translateX(100%)}
+/* The panel's header beside the chat: the artifact's title and version, Preview | Code, the secondary actions (a menu
+   while the bar is narrow: artifacts.css) and the close button; the Artifacts tab's own controls (the artifact select,
+   Point, Tweaks, follow, the output tools) wait there. */
+html.dream-design.companion body.chat-art #artname{display:block;flex:1 1 120px;min-width:0;color:var(--ch-text);font:600 14px/1.4 var(--sans)}
+html.dream-design.companion body.chat-art :is(#dream-output-tools,#studio-artifacts,#artpoint,#arttweaks,#artfollow){display:none}
+html.dream-design.companion body.chat-art .artbar{flex-wrap:nowrap;gap:6px;padding:8px 12px;background:var(--ch-surface);border-bottom:1px solid var(--ch-line)}
+html.dream-design.companion body.chat-art .artbar :is(.artmode,.seg button,.artfollow){font:500 12px/1.3 var(--sans)}
+html.dream-design.companion body.chat-art #artvn{color:var(--ch-faint);font:12px/1.4 var(--sans)}
+html.dream-design.companion body.chat-art #artauto{color:var(--ch-faint)}
+/* The card in the column: flat, one line, the Open button in ember like every action. */
+html.dream-design.companion .artcard{max-width:none;margin:0 0 16px;padding:10px 10px 10px 14px;border:1px solid var(--ch-line);border-radius:12px;background:var(--ch-field);box-shadow:none}
+html.dream-design.companion .artcard:hover{border-color:var(--ch-line-strong)}
+html.dream-design.companion .artcard .ic{background:var(--ch-bubble);color:var(--ch-quiet);font:600 10px var(--mono)}
+html.dream-design.companion .artcard .t b{font:500 14px/1.4 var(--sans)}
+html.dream-design.companion .artcard .t .meta{font:12px/1.4 var(--sans);color:var(--ch-faint)}
+html.dream-design.companion .artcard .go{min-height:28px;padding:4px 14px;border:0;border-radius:999px;background:var(--ch-action);color:var(--ch-action-ink);font:500 12px/1.4 var(--sans)}
+html.dream-design.companion .artcard .go:hover{background:var(--ch-action-hover)}
+
+/* The owner (2026-10-03): [feedback] -- the round square alone read as decoration. From 600 px the
+   primary button says Stop beside its square; narrower it stays the round icon, so Queue, Steer and Stop still fit
+   one line beside a usable prompt box. */
+@media(min-width:600px){
+  html.dream-design.companion #stop:not([hidden]){display:inline-flex;align-items:center;gap:8px;flex:0 0 auto;width:auto;min-width:0;padding:0 16px 0 13px;border-radius:999px;font:600 13px/1 var(--sans)}
+}

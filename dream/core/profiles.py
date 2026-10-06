@@ -301,6 +301,9 @@ def resolve_profile(provider: Provider, name: str | None = None, *, overrides: d
         raise ValueError("model must be a string or None")
     model_settings = saved.get("models", {}).get(f"{provider.key}:{model}", {}) if model else {}
     values.update(model_settings)
+    # A saved max_parallel (Parallel workers) is retired: the owner's nested.max_agents says how many sub-agents run at
+    # once (core/settings), so an old saved value is accepted and caps nothing here.
+    values.pop("max_parallel", None)
     for key, (env, cast) in PROFILE_ENVS.items():
         if env in os.environ:
             try:

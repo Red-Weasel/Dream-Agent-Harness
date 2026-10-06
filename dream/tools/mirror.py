@@ -270,13 +270,19 @@ async def after_shell(mark: int | None) -> None:
 
 
 def _newest_image_since(root: Path, mark_ns: int) -> Path | None:
-    """The newest image under ``root`` modified at or after ``mark_ns``. Never follows a
-    symlink (a linked file or folder may lead out of the workspace), skips hidden,
-    installed and vendored trees, and stops at SCAN_MAX_ENTRIES entries or SCAN_MAX_S
-    seconds with what it found so far."""
+    """The newest image under ``root`` modified at or after ``mark_ns``, or None."""
+    found = files_since(root, mark_ns, SHELL_IMAGE_SUFFIXES)
+    return found[-1] if found else None
+
+
+def files_since(root: Path, mark_ns: int, suffixes: set[str]) -> list[Path]:
+    """The files with one of ``suffixes`` under ``root`` modified at or after ``mark_ns``, oldest first (the
+    newest last). The artifact registry asks for the pages a run_bash call wrote (DREAM-233). Never follows a
+    symlink (a linked file or folder may lead out of the workspace), skips hidden, installed and vendored trees,
+    and stops at SCAN_MAX_ENTRIES entries or SCAN_MAX_S seconds with what it found so far."""
     global _CAP_LOGGED
     start, seen, capped = time.monotonic(), 0, False
-    best: tuple[int, str] | None = None
+    found: list[tuple[int, str]] = []
     stack = [str(root.resolve())]
     while stack and not capped:
         folder = stack.pop()
@@ -304,7 +310,7 @@ def _newest_image_since(root: Path, mark_ns: int) -> Path | None:
                     if entry.is_dir(follow_symlinks=False):
                         if name not in _SKIP_DIRS:
                             subdirs.append(entry.path)
-                    elif (os.path.splitext(name)[1].lower() in SHELL_IMAGE_SUFFIXES
+                    elif (os.path.splitext(name)[1].lower() in suffixes
                             and entry.is_file(follow_symlinks=False)):
                         mtime = entry.stat(follow_symlinks=False).st_mtime_ns
                         if mtime >= mark_ns:
@@ -314,10 +320,8 @@ def _newest_image_since(root: Path, mark_ns: int) -> Path | None:
         if installed:
             continue
         stack.extend(subdirs)
-        for candidate in images:
-            if best is None or candidate > best:
-                best = candidate
-    return Path(best[1]) if best is not None else None
+        found.extend(images)
+    return [Path(p) for _, p in sorted(found)]
 
 
 _SHELL: dict[str, Any] = {"last": float("-inf"), "pending": None, "timer": None, "scanned": 0}

@@ -13,6 +13,7 @@ regression to an eager import fails on the missing hook rather than opening Fire
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import sys
 import types
@@ -49,11 +50,18 @@ def test_tui_import_does_not_pull_in_web_stack():
     assert leaked == "", f"importing dream.tui.app eagerly imported: {leaked}"
 
 
-def test_tui_import_stays_under_ceiling():
-    # Measured ~290ms here; the ceiling is deliberately loose so it fires only when a
-    # genuinely heavy dependency moves back onto the import path, not on a slow box.
-    ceiling_us = 500_000
-    proc = _run("import dream.tui.app", "-X", "importtime")
+# The suite's absolute time ceilings were measured on the owner's machine. DREAM_TEST_TIME_SCALE says how many times
+# slower this machine is (the CI workflow sets it: its runner measured 2.2 to 2.9 times slower, run 36980971824);
+# unset, the ceilings are as measured. The sharp guard above (sys.modules) does not depend on the machine at all.
+_TIME_SCALE = float(os.environ.get("DREAM_TEST_TIME_SCALE", "1"))
+
+
+def _tui_import_us(cache) -> int:
+    """`import dream.tui.app` in a fresh interpreter that keeps its bytecode in `cache`: the cumulative microseconds."""
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONDONTWRITEBYTECODE"}
+    env["PYTHONPYCACHEPREFIX"] = str(cache)
+    proc = subprocess.run([sys.executable, "-X", "importtime", "-c", "import dream.tui.app"],
+                          capture_output=True, text=True, timeout=180, env=env)
     assert proc.returncode == 0, proc.stderr
     cumulative = None
     for line in proc.stderr.splitlines():
@@ -61,7 +69,20 @@ def test_tui_import_stays_under_ceiling():
         if len(parts) == 3 and parts[2].strip() == "dream.tui.app":
             cumulative = int(parts[1])
     assert cumulative is not None, proc.stderr
-    assert cumulative < ceiling_us, f"dream.tui.app import cost {cumulative}us"
+    return cumulative
+
+
+def test_tui_import_stays_under_ceiling(tmp_path):
+    # Measured ~290ms here; the ceiling is deliberately loose so it fires only when a
+    # genuinely heavy dependency moves back onto the import path, not on a slow box.
+    ceiling_us = 500_000 * _TIME_SCALE
+    # What a session pays is the import with its bytecode cached. A fresh checkout (CI) or a run that writes no
+    # bytecode also pays for compiling every module: 699 ms in CI's one run, 470 to 510 ms here where the cached import
+    # is 310 to 330. So the bytecode goes to this test's own folder, one run fills it, and the best of three counts.
+    _tui_import_us(tmp_path)
+    cumulative = min(_tui_import_us(tmp_path) for _ in range(3))
+    assert cumulative < ceiling_us, (f"dream.tui.app import cost {cumulative}us (ceiling {ceiling_us:.0f}us; on a "
+                                     "slower machine set DREAM_TEST_TIME_SCALE)")
 
 
 def test_extract_text_still_works_both_paths():

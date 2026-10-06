@@ -531,7 +531,8 @@ def test_a_local_engine_with_lanes_lets_one_steps_tasks_go_out_together(lanes_en
 
 async def _one_step(engine, profile, calls, refused=0):
     """One lead reply holding `calls` task calls, then the final answer: the sub-agents' results in order. The last
-    `refused` calls are past the owner's worker cap (DREAM-197): answered in their place, never sent."""
+    `refused` calls would be answered in their place, never sent (DREAM-197's refusal; since the owner's plan of
+    2026-10-01 a call past max agents waits its turn instead, so no test passes one any more)."""
     engine.lead = [{"calls": [("task", {"subagent_type": "researcher", "prompt": f"part {i}"}) for i in range(calls)]},
                    {"text": "all done"}]
     b = _backend(engine, profile=profile)
@@ -547,10 +548,11 @@ async def _one_step(engine, profile, calls, refused=0):
     return engine.peak
 
 
-# (lanes the server reports, Parallel workers, task calls in one reply, the most sub-agent requests in flight)
+# (lanes the server reports, the profile's max_parallel -- once Parallel workers, retired -- task calls in one reply,
+# the most sub-agent requests in flight)
 @pytest.mark.parametrize("slots, workers, calls, peak", [
-    (2, 1, 2, 2),        # the owner's case: Parallel workers 1, two lanes -- they run together, no second setting
-    (2, 4, 3, 2),        # the lanes bound it, not Parallel workers
+    (2, 1, 2, 2),        # the owner's case: max_parallel 1, two lanes -- they run together, no second setting
+    (2, 4, 3, 2),        # the lanes bound it
     (3, 1, 3, 3),
     (1, 4, 2, 1),        # one lane: one at a time, as today
     (None, 4, 2, 1),
@@ -561,24 +563,26 @@ async def test_one_steps_task_calls_run_as_many_at_once_as_the_engine_has_lanes(
     assert await _one_step(lanes_engine(slots), replace(PROFILES["balanced"], max_parallel=workers), calls) == peak
 
 
-@pytest.mark.parametrize("calls, peak, refused", [(16, 15, 1), (17, 15, 2)])
-async def test_sixteen_lanes_run_fifteen_subagents_of_one_reply_together(lanes_engine, leases, calls, peak, refused):
-    """DREAM-201: on an engine reporting 16 lanes, the `task` calls of one reply are in flight at once with the owner's
-    Parallel workers left at 1. DREAM-197 caps them at the owner's nested.max_workers, at most 15 (sixteen agents with
-    the orchestrator): 15 run together and the calls past the cap are answered without running. The fake engine
-    holds each request 3 s: starting 15 sub-agents takes the harness a while, and a shorter hold under-counts the peak
-    (an artifact of the fake, seen at 0.4 s)."""
+@pytest.mark.parametrize("calls, limit, peak", [(16, None, 16), (17, None, 16), (17, 15, 15)])
+async def test_sixteen_lanes_run_every_subagent_of_one_reply_up_to_the_lanes_and_max_agents(lanes_engine, leases, calls,
+                                                                                          limit, peak):
+    """DREAM-201: on an engine reporting 16 lanes, the `task` calls of one reply are in flight at once with the
+    profile's max_parallel at 1. Max agents (the owner's plan of 2026-10-01) bounds how many run at once, below the
+    lanes; every call runs, the rest wait their turn (none is refused). The fake engine holds each request 3 s:
+    starting 16 sub-agents takes the harness a while, and a shorter hold under-counts the peak (an artifact of the
+    fake, seen at 0.4 s)."""
     from dataclasses import replace
     from dream.core.profiles import settings_path
     path = settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"version": 1, "nested": {"max_workers": 15}}))
+    path.write_text(json.dumps({"version": 1, **({"nested": {"max_agents": limit}} if limit else {})}))
     profile = replace(PROFILES["balanced"], max_parallel=1)
-    assert await _one_step(lanes_engine(16, hold=3.0), profile, calls, refused=refused) == peak
+    assert await _one_step(lanes_engine(16, hold=3.0), profile, calls) == peak
 
 
 async def test_with_the_owners_saved_parallel_workers_of_one_two_lanes_still_run_two(lanes_engine, leases):
-    """The owner's runtime-settings.json holds overrides.max_parallel 1; the local profile resolves to it."""
+    """The owner's runtime-settings.json holds overrides.max_parallel 1 (retired: it caps nothing); a local profile's
+    max_parallel is 1 anyway."""
     from dream.core.profiles import resolve_profile, settings_path
     from dream.core.providers import get_provider
     path = settings_path()
@@ -592,9 +596,13 @@ async def test_with_the_owners_saved_parallel_workers_of_one_two_lanes_still_run
 
 # --- what the model is told -------------------------------------------------------------------------------------
 
-# The `task` tool's sentence at one lane -- DREAM-197 put the owner's worker cap in it (7 unless set) -- and the
-# delegating section's sentence as it was before DREAM-151: one lane keeps it.
-ONE_LANE = "Up to 7 subagents per reply; one runs at a time on this engine, the rest queue."
+# The `task` tool's sentence at one lane -- how many run at once and that the rest wait their turn (max agents, the
+# owner's plan of 2026-10-01; DREAM-197's per-reply cap is gone) -- and the delegating section's sentence as it was
+# before DREAM-151: one lane keeps it.
+ONE_LANE = ("One subagent runs at a time on this engine; send as many task calls as the job needs: the rest wait their "
+            "turn and start as others finish.")
+AT_ONCE = ("Up to {n} subagents run at once on this engine; send as many task calls as the job needs: the rest wait "
+           "their turn and start as others finish.")
 TODAYS_TASK = ("Delegate a scoped, self-contained subtask to a specialist subagent that runs in its OWN isolated "
                "context on this engine and returns a summary. " + ONE_LANE + " Use this "
                "to keep your own context clean on repetitive or research-heavy work — the subagent does the messy "
@@ -624,8 +632,23 @@ async def test_the_task_tool_names_the_lanes_and_the_request_carries_it(lanes_en
     assert _task_description(b) == TODAYS_TASK                            # before the server has said anything
     await b.connect()
     text = _task_description(b)
-    assert text == TODAYS_TASK.replace(ONE_LANE, "Up to 7 subagents per reply; 2 run at once on this engine, the rest "
-                                                 "queue.")
+    assert text == TODAYS_TASK.replace(ONE_LANE, AT_ONCE.format(n=2))
+    engine.lead = [{"text": "ok"}]
+    [event async for event in b.ask("hello")]
+    [sent] = [t for t in engine.bodies[0]["tools"] if t["function"]["name"] == "task"]
+    assert sent["function"]["description"] == text
+    await b.disconnect()
+
+
+async def test_the_task_tool_says_a_lanes_size_when_the_engine_reports_it_and_the_request_carries_it(lanes_engine, leases):
+    engine = lanes_engine(4)
+    props = engine.props()
+    engine.props = lambda: {**props, "slot_ctx": 8192}                  # Mach X v0.2.6+: what a lane after the first holds
+    b = _backend(engine)
+    await b.connect()
+    text = _task_description(b)
+    assert text == TODAYS_TASK.replace(ONE_LANE, AT_ONCE.format(n=4) + " Each has a context of about 8,192 tokens: "
+                                       "give it a task that fits (a few files), and ask for a short report.")
     engine.lead = [{"text": "ok"}]
     [event async for event in b.ask("hello")]
     [sent] = [t for t in engine.bodies[0]["tools"] if t["function"]["name"] == "task"]
@@ -641,8 +664,7 @@ async def test_sixteen_lanes_size_the_lease_and_the_task_tool_alike(lanes_engine
     await b.connect()
     assert b._coordinator().slots == 16 and b._coordinator().capacity == 16
     assert b.subagent_lanes() == 16 and b.concurrent_tasks()
-    assert _task_description(b) == TODAYS_TASK.replace(ONE_LANE, "Up to 7 subagents per reply, all running at once on "
-                                                                 "this engine.")      # the cap (7) is below 16 lanes
+    assert _task_description(b) == TODAYS_TASK.replace(ONE_LANE, AT_ONCE.format(n=16))   # no max agents: the lanes
     await b.disconnect()
 
 
@@ -714,21 +736,18 @@ async def test_the_system_prompt_is_todays_at_one_lane(lanes_engine, leases, her
         await started._cleanup()
 
 
-@pytest.mark.parametrize("slots, sentence", [
-    (2, "Up to 7 subagents per reply; 2 run at once on this engine, the rest queue."),
-    (16, "Up to 7 subagents per reply, all running at once on this engine."),
-])
+@pytest.mark.parametrize("slots, sentence", [(2, AT_ONCE.format(n=2)), (16, AT_ONCE.format(n=16))])
 async def test_at_several_lanes_the_system_prompt_leaves_the_number_to_the_task_tool(lanes_engine, leases, hermetic,
                                                                                     slots, sentence):
     """The delegating section names no number above one lane (DREAM-197's gate, finding 2): the `task` tool says how
-    many per reply and how many at once, so the prompt stays the same bytes when the lanes or the worker cap change."""
+    many run at once, so the prompt stays the same bytes when the lanes or max agents change."""
     started = await _started_engine(lanes_engine(slots), hermetic)
     try:
         prompt = started._assembled_system_prompt
         assert started.backend.messages[0]["content"] == prompt
         section = _delegating(prompt)
         assert section.rstrip().endswith("Several subagents can run at the same time on this engine; the `task` tool "
-                                          "says how many per reply. Independent subtasks can go out together in one "
+                                          "says how many at once. Independent subtasks can go out together in one "
                                           "reply.")
         assert TODAYS_DELEGATING not in section and "Up to" not in section
         assert sentence in _task_description(started.backend)
@@ -740,23 +759,29 @@ REMOTE, LOOPBACK = "https://api.example.com/v1", "http://127.0.0.1:8080/v1"
 
 
 @pytest.mark.parametrize("key", ["openai", "xai"])
-@pytest.mark.parametrize("url, saved, parallel, sentence, task", [
-    pytest.param(REMOTE, None, 4, "Several `task` calls in one reply run at the same time on this provider; "
-                 "independent subtasks can go out together.", "4 run at once on this provider",
-                 id="remote-frontier-4"),
-    pytest.param(REMOTE, 1, 1, "Subagents run one at a time on this provider, not in parallel.",
-                 "one runs at a time on this provider", id="remote-saved-1"),
-    pytest.param(LOOPBACK, None, 1, "Subagents run one at a time on this engine, not in parallel.",
-                 "one runs at a time on this engine", id="loopback-default-1"),
-    pytest.param(LOOPBACK, 4, 4, "Subagents run one at a time on this engine, not in parallel.",
-                 "one runs at a time on this engine", id="loopback-explicit-4"),
+@pytest.mark.parametrize("url, saved, sentence, task", [
+    pytest.param(REMOTE, None, "Several `task` calls in one reply run at the same time on this provider; "
+                 "independent subtasks can go out together.",
+                 "Every task call of a reply runs at the same time on this provider", id="remote-no-limit"),
+    pytest.param(REMOTE, {"overrides": {"max_parallel": 1}}, "Several `task` calls in one reply run at the same time "
+                 "on this provider; independent subtasks can go out together.",
+                 "Every task call of a reply runs at the same time on this provider", id="remote-retired-1"),
+    pytest.param(REMOTE, {"nested": {"max_agents": 3}}, "Several `task` calls in one reply run at the same time on "
+                 "this provider; independent subtasks can go out together.",
+                 "Up to 3 subagents run at once on this provider", id="remote-max-agents-3"),
+    pytest.param(REMOTE, {"nested": {"max_agents": 1}}, "Subagents run one at a time on this provider, not in "
+                 "parallel.", "One subagent runs at a time on this provider", id="remote-max-agents-1"),
+    pytest.param(LOOPBACK, None, "Subagents run one at a time on this engine, not in parallel.",
+                 "One subagent runs at a time on this engine", id="loopback-default"),
+    pytest.param(LOOPBACK, {"nested": {"max_agents": 4}}, "Subagents run one at a time on this engine, not in "
+                 "parallel.", "One subagent runs at a time on this engine", id="loopback-max-agents-4"),
 ])
 def test_a_cloud_keys_delegating_sentence_says_how_its_calls_really_run(hermetic, monkeypatch, key, url, saved,
-                                                                        parallel, sentence, task):
-    """openai and xai: one reply's `task` calls go out together only to a remote server, up to Parallel workers
-    (profile.max_parallel); at a loopback address they run one at a time (OpenAICompatBackend.concurrent_tasks). The
-    system prompt follows the `task` tool's source and says it in the same words, "on this provider" or "on this
-    engine" (DREAM-197's gate, rounds 2 and 3)."""
+                                                                        sentence, task):
+    """openai and xai: one reply's `task` calls go out together only to a remote server, up to the owner's max agents
+    (no limit when unset; the retired Parallel workers caps nothing); at a loopback address they run one at a time
+    (OpenAICompatBackend.concurrent_tasks). The system prompt follows the `task` tool's source and says it in the same
+    words, "on this provider" or "on this engine" (DREAM-197's gate, rounds 2 and 3)."""
     from dataclasses import replace
     from dream.core.engine import Engine
     from dream.core.profiles import settings_path
@@ -766,10 +791,9 @@ def test_a_cloud_keys_delegating_sentence_says_how_its_calls_really_run(hermetic
         monkeypatch.delenv(name, raising=False)
     if saved is not None:
         settings_path().parent.mkdir(parents=True, exist_ok=True)
-        settings_path().write_text(json.dumps({"version": 1, "overrides": {"max_parallel": saved}}))
+        settings_path().write_text(json.dumps({"version": 1, **saved}))
     provider = replace(get_provider(key), base_url=url)
     session = Engine(provider=provider, model="fixture", workspace=hermetic)
-    assert session.profile.max_parallel == parallel
     session._mcp = SimpleNamespace(servers=[])
     session._session_tools, session._local_subs = {}, {"researcher": RESEARCHER}
     session._built_tools = {"tools": [], "server": {}, "exempt_tool_ids": []}
@@ -781,6 +805,7 @@ def test_a_cloud_keys_delegating_sentence_says_how_its_calls_really_run(hermetic
         session.store.close()
     backend = OpenAICompatBackend(provider=provider, model="fixture", system_prompt="S", tools=[], permission_cb=None,
                                   subagents={"researcher": RESEARCHER}, profile=session.profile)
+    backend.apply_worker_cap()                                       # as connect() does
     assert task in _task_description(backend)
 
 
@@ -976,7 +1001,7 @@ async def test_a_connected_backend_with_lanes_offers_no_images(lanes_engine, lea
     await c.connect()
     assert c.vision_status()["enabled"] is True
     [note] = b._settings_notices
-    assert "Images are off" in note and "engine.parallel 1" in note
+    assert "Images are off" in note and "parallel 1 on the load screen" in note
     assert c._settings_notices == []
     await b.disconnect()
     await c.disconnect()
@@ -1066,7 +1091,7 @@ async def test_a_connected_mimo_backend_with_lanes_offers_no_images_whatever_the
     await b.connect()
     assert b.vision_status()["enabled"] is False and b.provider.multimodal is False
     [note] = b._settings_notices
-    assert "Images are off" in note and "engine.parallel 1" in note
+    assert "Images are off" in note and "parallel 1 on the load screen" in note
     await b.disconnect()
 
 
@@ -1075,31 +1100,30 @@ async def test_a_connected_mimo_backend_with_lanes_offers_no_images_whatever_the
 @pytest.mark.parametrize("profile", [None, PROFILES["lean"], PROFILES["frontier"]])
 async def test_the_connect_note_reports_the_lanes(lanes_engine, leases, profile):
     engine = lanes_engine(2)
-    b = _backend(engine, profile=profile)                     # lean: Parallel workers 1; frontier: 4 -- no matter
+    b = _backend(engine, profile=profile)                     # lean: max_parallel 1; frontier: 4 -- no matter
     await b.connect()
     [note] = [n for n in b._settings_notices if "lanes" in n]
     assert note.startswith("Dream's own note: MachX serves 2 lanes")
-    assert "up to 2 sub-agents of one step run at the same time" in note
+    assert "up to 2 sub-agents run at the same time; more wait their turn." in note
     assert "Parallel workers" not in note and "max_parallel" not in note
     await b.disconnect()
 
 
-@pytest.mark.parametrize("slots, cap, at_once", [(16, None, 7), (2, None, 2), (16, 15, 15), (8, 3, 3)])
-async def test_the_connect_note_says_the_smaller_of_the_lanes_and_the_worker_cap(lanes_engine, leases, slots, cap,
-                                                                                 at_once):
-    """DREAM-197's gate, finding 2: sub-agents of one step run at once up to the lanes AND the owner's worker cap
-    (nested.max_workers, 7 unless set), and the note names the cap."""
+@pytest.mark.parametrize("slots, limit, at_once", [(16, None, 16), (2, None, 2), (16, 15, 15), (8, 3, 3), (2, 9, 2)])
+async def test_the_connect_note_says_the_smaller_of_the_lanes_and_max_agents(lanes_engine, leases, slots, limit,
+                                                                             at_once):
+    """DREAM-197's gate, finding 2, kept for max agents: sub-agents run at once up to the lanes AND the owner's max
+    agents (no limit unless set), and the note names max agents when it is what binds."""
     from dream.core.profiles import settings_path
-    if cap is not None:
+    if limit is not None:
         settings_path().parent.mkdir(parents=True, exist_ok=True)
-        settings_path().write_text(json.dumps({"version": 1, "nested": {"max_workers": cap}}))
+        settings_path().write_text(json.dumps({"version": 1, "nested": {"max_agents": limit}}))
     b = _backend(lanes_engine(slots))
     await b.connect()
     [note] = [n for n in b._settings_notices if "lanes" in n]
     assert note.startswith(f"Dream's own note: MachX serves {slots} lanes")
-    assert note.endswith(f"up to {slots} of Dream's requests to it run at once, and up to {at_once} sub-agents of one "
-                         f"step run at the same time (one step may start up to {cap or 7}: the worker limit, "
-                         "nested.max_workers).")
+    assert note.endswith(f"up to {slots} of Dream's requests to it run at once, and up to {at_once} sub-agents run at "
+                         "the same time" + (" (your max agents)" if at_once < slots else "") + "; more wait their turn.")
     await b.disconnect()
 
 
@@ -1184,7 +1208,7 @@ async def test_an_image_the_engine_refuses_leaves_the_history_and_the_next_turn_
     _image_history(b)
     events = [event async for event in b.ask("describe it")]
     [error] = [e.data for e in events if e.kind == "error"]
-    assert "engine refused image input" in error and "engine.parallel 1" in error
+    assert "engine refused image input" in error and "parallel 1 only" in error
     assert b.provider.multimodal is False and b.vision_status()["enabled"] is False
     assert "image_url" not in json.dumps(b.messages)
     assert "[Image omitted: this loaded model refused image input. The image was not inspected.]" in json.dumps(

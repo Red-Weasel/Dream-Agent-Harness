@@ -286,6 +286,7 @@ def app(tmp_path):
     obj._active_loop = None
     obj.studio = None
     obj.bus = EventBus()
+    obj.artifacts = SimpleNamespace(observe=lambda ev: None)   # the event funnel feeds the artifact registry (DREAM-233)
     shown = []
     obj.renderer = SimpleNamespace(console=Console(record=True), system=shown.append, error=shown.append)
     obj.friction = SimpleNamespace(record=lambda *a: None)

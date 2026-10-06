@@ -155,20 +155,29 @@ async def test_isolated_runners_get_an_allowlisted_environment(monkeypatch):
 
 
 # E: a claim re-reads the automation under the lock ---------------------------------------------------------------
-def test_a_claim_never_runs_a_turned_off_or_edited_automation(home):
-    auto = automation()
-    data = store._read()[0]
-    data['automations'][0]['last_slot'] = datetime(2026, 9, 24, 7, 30, tzinfo=NY).isoformat()
-    store._write(store.ROOT / 'automations.json', data)
+def test_a_claim_never_runs_a_turned_off_or_edited_automation(home, monkeypatch):
     slot, now = datetime(2026, 9, 25, 7, 30, tzinfo=NY), datetime(2026, 9, 25, 7, 31, tzinfo=NY)
+    # One clock for the saves and the claims: a save stamps last_slot from schedule.now(), and with the real date
+    # there this test's result changed with the day it ran (it failed from 2026-10-02 on: a last_slot over a week
+    # ahead of the claim's clock is clamped).
+    monkeypatch.setattr(schedule, 'now', lambda: now)
+
+    def the_day_before():                                                  # the 07:30 slot is due again
+        data = store._read()[0]
+        data['automations'][0]['last_slot'] = datetime(2026, 9, 24, 7, 30, tzinfo=NY).isoformat()
+        store._write(store.ROOT / 'automations.json', data)
+    auto = automation()
+    the_day_before()
     stale = store.load()[0]
     store.save({**stale, 'enabled': False})                                # turned off after the tick read it
     assert store.claim(auto['id'], slot, schedule.GRACE, 'Scheduled', now) is None
-    store.save({**stale, 'enabled': True, 'instructions': 'Edited.'})      # a save moves last_slot to now
+    the_day_before()                                                       # the switch alone, without the save's stamp
     assert store.claim(auto['id'], slot, schedule.GRACE, 'Scheduled', now) is None
-    data = store._read()[0]
-    data['automations'][0]['last_slot'] = datetime(2026, 9, 24, 7, 30, tzinfo=NY).isoformat()
-    store._write(store.ROOT / 'automations.json', data)
+    the_day_before()
+    store.save({**stale, 'enabled': True, 'instructions': 'Edited.'})      # a save moves last_slot to now
+    assert store.load()[0]['last_slot'] == now.isoformat()
+    assert store.claim(auto['id'], slot, schedule.GRACE, 'Scheduled', now) is None
+    the_day_before()
     fresh = store.claim(auto['id'], slot, schedule.GRACE, 'Scheduled', now)
     assert fresh['instructions'] == 'Edited.' and fresh['pending'] == ['Scheduled']
 

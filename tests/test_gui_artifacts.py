@@ -90,11 +90,19 @@ def test_the_csp_denies_network_destinations(ui):
 def test_the_csp_is_applied_to_both_svg_and_html_artifacts(ui):
     body = ui[ui.index("function paintArtifact"):]
     head = body[:body.index("$('artver').onchange")]
-    # one meta tag built from ART_CSP, and it is the FIRST thing in the srcdoc for
-    # every kind of body — svg, full document, fragment. Gate 8: splicing it in at
+    # one meta tag built from the frame's policy, and it is the FIRST thing in the srcdoc
+    # for every kind of body — svg, full document, fragment. Gate 8: splicing it in at
     # the first "<head"/"<html" match let a page with '<head>' in a script string
     # push the meta into the body, where Chromium ignores it.
-    assert 'content="${ART_CSP}"' in head
+    # DREAM-234: the policy is chosen by the header's internet switch -- ART_CSP_NET (https
+    # only) when on, ART_CSP (nothing) when off; neither ever grants http:, file: or 'self'.
+    assert 'content="${artCsp()}"' in head
+    assert "function artCsp(){ return previewNet ? ART_CSP_NET : ART_CSP; }" in ui
+    policies = {name: ui.split(f"const {name} = ", 1)[1].split(";\n", 1)[0] for name in ("ART_CSP", "ART_CSP_NET")}
+    assert "default-src 'none'" in policies["ART_CSP"] and "https:" not in policies["ART_CSP"]
+    assert "default-src 'none'" in policies["ART_CSP_NET"] and "connect-src https:" in policies["ART_CSP_NET"]
+    for policy in policies.values():
+        assert " http:" not in policy and "file:" not in policy and "'self'" not in policy, policy
     assert "`<!doctype html>${csp}${ART_BRIDGE}" in head
     assert ".replace(/<head" not in head and ".replace(/<html" not in head
 

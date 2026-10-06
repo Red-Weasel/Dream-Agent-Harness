@@ -7,8 +7,7 @@ from dataclasses import dataclass, replace
 import json
 import math
 import os
-from .models import (DIRECTORY_ARCHITECTURES, LANE_ARCHITECTURES, LANE_IMAGE_ARCHITECTURES, LANE_MODEL_NAMES,
-                     LANE_MODELS_LISTED)
+from .models import DIRECTORY_ARCHITECTURES, LANE_ARCHITECTURES, LANE_IMAGE_ARCHITECTURES, LANE_MODEL_NAMES
 
 
 @dataclass(frozen=True)
@@ -35,7 +34,11 @@ CONTROLS = (
     Control("presence_penalty", 0., "penalty for seen tokens; -2–2", "--presence-penalty", minimum=-2),
     Control("frequency_penalty", 0., "penalty per occurrence; -2–2", "--frequency-penalty", minimum=-2),
     Control("seed", 0, "0 = random", "--seed", "int", 0, 2**53 - 1),
-    Control("max_tokens", 4096, "maximum output per generation; bounded by context", "--max-tokens", "int", 1, 2**32 - 1),
+    # The hint says what the value caps (2026-10-02: the owner's 16,384 here capped every reply of the main agent while
+    # the settings showed a saved 60,000); a refused value is told what it was told before.
+    Control("max_tokens", 4096, "the most tokens one reply of the main agent may use, thinking included; bounded by "
+            "context. Sub-agents on engine lanes use their lane's room instead", "--max-tokens", "int", 1, 2**32 - 1,
+            refusal="maximum output per generation; bounded by context"),
     Control("stop", [], 'JSON string array, e.g. ["END", "\\nUser:"]; [] = none', "--stop", "stop"),
     Control("context_overflow", "compact", "when the context fills: compact old history, handoff (one Handoff, "
             "then keep going) or stop (end the turn with a summary)", kind="overflow",
@@ -46,17 +49,20 @@ CONTROLS = (
     # engine's range. The lanes models' hint (available_controls) says what a lane costs; a refusal is one sentence.
     Control("parallel", 1, "server request slots; 1–16", "--parallel", "int", 1, 16,
             refusal="parallel must be a whole number from 1 to 16"),
+    # The load screen's "sub-agent context" (the owner's plan of 2026-10-01): the context of every lane after the first,
+    # the engine's --slot-ctx. Offered for every lanes model (available_controls) and sent with 2 or more lanes
+    # (engine_lanes); it was the global engine.slot_ctx (DREAM-151).
+    Control("slot_ctx", 0, "context per slot; 0 = automatic, otherwise >=9", "--slot-ctx", "int", 0, 2**31 - 1),
     # DREAM-100: the auto expert tier's per-card headroom (the forward's growth + the vision tower's encode block); raise it
     # for very long contexts. Shown only when the engine advertises it (mimo_v2, deepseek41); unset = the engine's default.
     Control("vram_reserve_gib", None, "VRAM kept free per card in GiB; default = the engine's own; raise for long contexts; 0–24",
             "--vram-reserve-gib", "float", 0, 24),
-    Control("slot_ctx", 0, "context per slot; 0 = automatic, otherwise >=9", "--slot-ctx", "int", 0, 2**31 - 1),
     Control("prompt_cache", True, "reuse eligible prompt state; on/off", "--no-prompt-cache", "bool"),
     Control("thinking", None, "on/off; controls model thinking template", "--thinking", "bool"),
     Control("reasoning_effort", None, "model reasoning effort", "--reasoning-effort", "enum",
             choices=("low", "medium", "high", "max", "xhigh")),
     Control("int8_kv", False, "INT8 KV cache; requires one GPU and one slot", "--int8-kv", "bool"),
-    Control("speculative", False, "MTP speculation; requires temperature 0 and neutral penalties", "--spec", "bool"),
+    Control("speculative", False, "MTP speculation. Qwen3.8-27B Q8 on two cards, one request at a time: works with any sampling (engine v0.2.13+). Other models: only at temperature 0", "--spec", "bool"),
     Control("spec_k", 2, "speculative draft length; 1–64", "--spec-k", "int", 1, 64),
 )
 BY_NAME = {c.name: c for c in CONTROLS}
@@ -106,6 +112,8 @@ def available_controls(capabilities: dict) -> list[Control]:
     advertised = set(capabilities.get("sampling", [])) | set(capabilities.get("load", []))
     if "repeat_window" in advertised:
         advertised.add("repeat_last_n")
+    if capabilities.get("architecture") in LANE_ARCHITECTURES:
+        advertised.add("slot_ctx")       # every lanes engine takes --slot-ctx (engine_lanes), advertised or not
     features = capabilities.get("features", {})
     if features.get("int8_kv"):
         advertised.add("int8_kv")
@@ -122,7 +130,7 @@ def available_controls(capabilities: dict) -> list[Control]:
         if control.name == "parallel" and capabilities.get("architecture") in LANE_ARCHITECTURES:
             architecture = capabilities.get("architecture")
             if architecture in DIRECTORY_ARCHITECTURES:
-                # DREAM-151: the engine serves this model in lanes (P4 B4); Settings engine.parallel wins when set.
+                # DREAM-151: the engine serves this model in lanes (P4 B4); its own parallel is the load screen's.
                 # DREAM-154: V4.1's lanes (P4 B6b) need two cards and keep its images.
                 # DREAM-201: 1-16 (the engine's range since v0.2.0; 4 was its first lanes build's). The words about VRAM
                 # are the engine session's measurements: every extra lane is reserved at load out of the in-VRAM expert
@@ -131,9 +139,9 @@ def available_controls(capabilities: dict) -> list[Control]:
                 control = replace(control, hint="requests served at once, in lanes; 1–16 (every extra lane reserves VRAM "
                                                 "at load out of the expert cache, so more lanes can slow each one, and a "
                                                 "count that does not fit is refused with the engine's numbers: set the "
-                                                "agents really run at once, with a realistic slot_ctx); Settings "
-                                                "engine.parallel replaces it when set; " + ("2 or more need two cards"
-                                                if architecture == "deepseek_v41" else "images need 1"))
+                                                "agents really run at once, with a realistic sub-agent context); "
+                                                + ("2 or more need two cards" if architecture == "deepseek_v41"
+                                                   else "images need 1"))
             else:
                 # DREAM-207: the GGUF lanes models (engine v0.2.0): their lanes run on two cards, and an extra lane is
                 # taken out of VRAM at load (the engine's README: about 0.55 GiB per card at 32K on Qwen3.8-Flash, 0.34
@@ -141,11 +149,14 @@ def available_controls(capabilities: dict) -> list[Control]:
                 # engine refuses them on Qwen3.8-Flash; the 35B class has no vision path). The rails are engine_lanes's.
                 control = replace(control, hint="requests served at once, in lanes; 1–16 (every extra lane reserves VRAM "
                                                 "at load on both cards, and a count that does not fit is refused with "
-                                                "the engine's numbers); Settings engine.parallel replaces it when set; "
-                                                "2 or more need two cards; images need 1")
+                                                "the engine's numbers); 2 or more need two cards; images need 1")
         elif control.name == "parallel" and capabilities.get("architecture") in DIRECTORY_ARCHITECTURES:
             control = replace(control, maximum=1, hint="This model serves one request at a time; parallel = 1",
                               refusal=None)   # its hint is its refusal, not the lanes models' 1-16 sentence
+        if control.name == "slot_ctx" and capabilities.get("architecture") in LANE_ARCHITECTURES:
+            own = 65536 if capabilities.get("architecture") == "qwen35" else 32768
+            control = replace(control, hint=f"sub-agent context: tokens each lane after the first holds, used with "
+                                            f"parallel 2 or more; 0 = the engine's own ({own:,}); at most the context")
         if control.name in defaults:
             value = defaults[control.name]
             # MachX uses zero for automatic thread selection; the UI uses None.
@@ -209,79 +220,53 @@ def validate_options(options: dict, *, ctx: int | None = None, gpus: int | None 
     if architecture in DIRECTORY_ARCHITECTURES and architecture not in LANE_ARCHITECTURES and result.get("parallel", 1) != 1:
         raise ValueError("This model requires parallel = 1")
     if ctx and result.get("slot_ctx", 0) > ctx:
-        raise ValueError("slot_ctx cannot exceed context length")
+        raise ValueError("slot_ctx (sub-agent context) cannot exceed context length")
     if result.get("int8_kv") and ((gpus != -1 and gpus != 1) or result.get("parallel", 1) != 1):
         raise ValueError("INT8 KV requires an explicit one-GPU selection and parallel = 1")
-    if result.get("speculative"):
-        neutral = (result.get("repeat_last_n", 64) == 0 or
-                   (result.get("repeat_penalty", 1) == 1
-                    and result.get("presence_penalty", 0) == 0
-                    and result.get("frequency_penalty", 0) == 0))
-        if result.get("temperature", .7) != 0 or not neutral:
-            raise ValueError("Speculation requires temperature = 0 and neutral penalties or repeat_last_n = 0")
+    # Speculation is no longer tied to temperature 0 (engine v0.2.13): on the Qwen3.8-27B two-card split it runs inside
+    # the normal decode loop with any sampler; on the other models a sampled request decodes without it.
     return result
 
 
 def engine_lanes(options: dict, architecture: str | None, *, ctx: int | None,
                  gpus: int | None = None) -> tuple[dict, int | None, str | None]:
-    """DREAM-151: (the options one `ie serve` launch uses, the lanes it asks for, a sentence to show). The owner's
-    engine.parallel / engine.slot_ctx (the global runtime settings, core/settings.engine_launch) apply to a model whose
-    engine serves requests in lanes (LANE_ARCHITECTURES) and replace its own `parallel`; `slot_ctx` goes only with two
-    or more lanes. Any other model keeps its own setting, and the sentence says why. With neither set, `options` come
-    back as they are (the command is today's, byte for byte, plus --max-queue with 2 or more lanes: DREAM-209,
-    machx.lanes_queue). Lanes are None unless a lanes model asks for 2 or more;
-    an unusable settings file, or a slot_ctx larger than `ctx`, raises before anything loads. `options` is not
-    changed. DREAM-154: DeepSeek-V4.1 serves lanes too; a V4.1 launch with lanes that its engine would refuse
-    (_v41_lanes_refusal; `gpus` is the launch's GPU count) raises before anything loads, and its sentence keeps the
-    images. DREAM-207: Qwen3.8-Flash, the 35B-A3B class and the 27B serve lanes too, with the same precedence (the
-    setting, when set, replaces the model's own `parallel`; unset, the model's own stands and the command is today's)
-    and their own rails: a launch that chose 1 GPU, IE_P2P on Qwen3.8-Flash and INT8 KV on any lanes model are refused
+    """DREAM-151: (the options one `ie serve` launch uses, the lanes it asks for, a sentence to show). The lanes are the
+    model's own launch settings -- the load screen's parallel and sub-agent context, saved per model (the owner's plan
+    of 2026-10-01; Settings no longer replaces them). A model whose engine serves requests in lanes
+    (LANE_ARCHITECTURES) with parallel 2 or more serves that many at once; its sub-agent context (slot_ctx) goes on the
+    command only then and only when set (0 = the engine's own size), so a one-lane command carries no --slot-ctx
+    (--max-queue comes with 2 or more lanes too: DREAM-209, machx.lanes_queue). Any other model keeps its own options
+    as they are. Lanes are None below 2. `options` is not changed. DREAM-154: a DeepSeek-V4.1 launch with lanes
+    that its engine would refuse (_v41_lanes_refusal; `gpus` is the launch's GPU count) raises before anything loads,
+    and its sentence keeps the images. DREAM-207: Qwen3.8-Flash, the 35B-A3B class and the 27B serve lanes too, with
+    their own rails: a launch that chose 1 GPU, IE_P2P on Qwen3.8-Flash and INT8 KV on any lanes model are refused
     before anything loads (_lanes_refusal); speculation on the 27B, the engine's own lanes switches in Dream's
     environment and, with GPUs on auto, the 35B-A3B class's and the 27B's need for two cards are said in the sentence
     (_lanes_notices); the 27B's extra lanes hold 65,536 tokens by default."""
-    from ..core.settings import engine_launch
-    wanted = engine_launch()
-    own = options.get("parallel", 1)
     if architecture not in LANE_ARCHITECTURES:
-        if wanted.get("parallel", 1) > 1:
-            # DREAM-201 gate: Dream's own scope, not an engine limit (GLM-5.3 and DeepSeek-V4-Flash run --parallel as
-            # turns; models.LANE_ARCHITECTURES says which models are in the table and why).
-            return options, None, (f"Settings engine.parallel ({wanted['parallel']}) does not apply to "
-                                   f"{architecture or 'this model'}: Dream applies it to {LANE_MODELS_LISTED} "
-                                   f"only; this model starts with its own parallel setting ({own}), which takes 1–16 "
-                                   "in its launch settings.")
         return options, None, None
     launched = dict(options)
-    if "parallel" in wanted:
-        launched["parallel"] = wanted["parallel"]
     lanes = launched.get("parallel", 1)
-    if lanes > 1 and "slot_ctx" in wanted:
-        if ctx and wanted["slot_ctx"] > ctx:
-            raise ValueError(f"engine.slot_ctx ({wanted['slot_ctx']:,}) is larger than this launch's context "
-                             f"({ctx:,}); lower it in Settings (Engine lanes) or raise the context")
-        launched["slot_ctx"] = wanted["slot_ctx"]
+    if lanes <= 1 or not launched.get("slot_ctx"):
+        launched.pop("slot_ctx", None)
     if lanes <= 1:
-        note = (f"Settings engine.parallel (1) replaces this model's own parallel ({own}): one request at a time."
-                if lanes != own else None)
-        return launched, None, note
+        return launched, None, None
     refusal = _lanes_refusal(architecture, gpus, launched)
     if refusal:
         cause, variable, undo = refusal
-        fix = ("set engine.parallel to 1 (Settings, Engine lanes)" if "parallel" in wanted
-               else "set this model's parallel to 1")
         name = LANE_MODEL_NAMES[architecture]
         raise ValueError(f"{name[0].upper() + name[1:]} cannot serve {lanes} lanes here: {cause}; "
-                         + (f"unset {variable} or " if variable else "") + (f"{undo}, or " if undo else "") + f"{fix}.")
+                         + (f"unset {variable} or " if variable else "") + (f"{undo}, or " if undo else "")
+                         + "set this model's parallel to 1.")
     extra = launched.get("slot_ctx") or 0
     # The engine's --slot-ctx 0: 32,768 tokens on MiMo-V2.6, DeepSeek-V4.1, Qwen3.8-Flash and the 35B-A3B class
     # (q4e_lane_ctx), 65,536 on the 27B (q27_lane_ctx, its joint-step banks' default).
     size = f"{extra:,} tokens" if extra else f"the engine's own {65536 if architecture == 'qwen35' else 32768:,} tokens"
     others = f"lane 2 holds {size}" if lanes == 2 else f"lanes 2-{lanes} hold {size} each"
-    source = "Settings engine.parallel" if "parallel" in wanted else "this model's own parallel setting"
     images = ("images still work (an image prompt prefills while the other lanes wait); no routing profile is "
               "recorded (the engine records one at 1 lane only)." if architecture in LANE_IMAGE_ARCHITECTURES
               else "images need 1 lane, so Dream sends none.")
-    note = (f"{lanes} lanes ({source}): up to {lanes} requests, the main model's and sub-agents', run at once; "
+    note = (f"{lanes} lanes: up to {lanes} requests, the main model's and sub-agents', run at once; "
             f"{others} (at most the context); {images}")
     return launched, lanes, " ".join([note, *_lanes_notices(architecture, launched, gpus)])
 
@@ -379,23 +364,8 @@ def lanes_report(requested: int, served: int | None, architecture: str | None) -
             "" if architecture in LANE_IMAGE_ARCHITECTURES else "; images need 1 lane")
     lanes = f"{served} lane{'' if served == 1 else 's'}"
     return (f"MachX serves {lanes}, not the {requested} asked for" + (
-        f": this engine build does not serve {architecture} in lanes -- update the engine, or set engine.parallel to 1"
-        if served == 1 else ""))
-
-
-def engine_parallel_source(architecture: str | None, source: str) -> str:
-    """The `parallel` row's source in a launch-settings table (DREAM-151): for a lanes model, that Settings
-    engine.parallel replaces it at launch when set."""
-    if architecture not in LANE_ARCHITECTURES:
-        return source
-    from ..core.settings import engine_launch
-    try:
-        wanted = engine_launch().get("parallel")
-    except ValueError:
-        return source
-    if wanted is None:
-        return source
-    return (f"{source} · replaced" if source else "Replaced") + f" at launch by Settings engine.parallel ({wanted})"
+        f": this engine build does not serve {architecture} in lanes -- update the engine, or set this model's "
+        "parallel to 1" if served == 1 else ""))
 
 
 def server_args(options: dict, *, ctx: int | None = None, gpus: int | None = None) -> list[str]:

@@ -1,11 +1,14 @@
 """The hidden model frame: a real headless Chromium, driven the way the Studio
-tools drive it. No network — the frame must block it, and these tests prove it."""
+tools drive it. Network only as the Studio panel allows it — https to a public
+host (DREAM-234), nothing local, never http — and these tests prove it."""
 
 from __future__ import annotations
 
 import pytest
 
-from dream.gui.preview import Preview
+from dream.core.sandbox_net import _Refused
+from dream.gui import preview as preview_mod
+from dream.gui.preview import Preview, _allowed
 
 pytestmark = pytest.mark.asyncio
 
@@ -74,6 +77,38 @@ async def test_network_is_blocked_but_local_files_load(pv, tmp_path):
     assert got == "blocked"
     assert any(u.startswith("http://127.0.0.1:9/") for u in pv.blocked)
     assert any(l.startswith("blocked: http://example.com/") for l in pv.logs)
+    # https to this machine is as blocked as http anywhere (DREAM-234): the rule is https to PUBLIC hosts.
+    got = await pv.eval("fetch('https://127.0.0.1:9/').then(() => 'ok').catch(() => 'blocked')")
+    assert got == "blocked"
+    assert any(l.startswith("blocked: https://127.0.0.1:9/") and "public internet over https only" in l
+               for l in pv.logs)
+
+
+async def test_the_destination_rule_is_https_to_a_public_host(monkeypatch):
+    """DREAM-234: the sandbox proxy's line, applied to the frame -- no real network in this test (the resolver is
+    patched for the public case; the local cases refuse before any lookup or on the literal itself)."""
+    for url in ("file:///tmp/a.html", "data:text/html,hi", "blob:null/x", "about:blank"):
+        assert await _allowed(url), url
+    seen = []
+
+    async def public(host):
+        seen.append(host)
+        if host == "cdn.example":
+            return ["93.184.216.34"]
+        raise _Refused(f"{host} resolves to a private address")
+
+    monkeypatch.setattr(preview_mod, "_public_addresses", public)
+    assert await _allowed("https://cdn.example/three.min.js")
+    assert not await _allowed("https://intranet.example/a.js")
+    assert seen == ["cdn.example", "intranet.example"]
+    assert not await _allowed("http://cdn.example/three.min.js")            # never plain http, public or not
+    assert not await _allowed("https:///no-host")                          # no host, nothing to judge
+    assert seen == ["cdn.example", "intranet.example"]                      # neither reached the resolver
+    monkeypatch.undo()
+    # The real rule on names and literals that are this machine or private: refused without the network.
+    for url in ("https://localhost/x", "https://api.localhost/x", "https://127.0.0.1/x", "https://[::1]/x",
+                "https://10.0.0.7/x", "https://192.168.1.20:8443/x"):
+        assert not await _allowed(url), url
 
 
 async def test_screenshot_steps_capture_in_order_with_prefixes(pv, tmp_path):

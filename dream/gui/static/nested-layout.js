@@ -94,7 +94,9 @@
   N.subscribe(conveyor);
   conveyor();
 
-  $('nd-reset').onclick=()=>{ N.resetLayout(); setAuto(false); apply(); };
+  // Reset layout sits in the Customize panel (nested-customize.js builds it after this module loads).
+  function reset(){ N.resetLayout(); setAuto(false); apply(); }
+  page.addEventListener('click',e=>{ if(e.target.closest&&e.target.closest('#nd-reset')) reset(); });
   apply();
-  window.DreamNestedLayout={apply,setAuto,isAuto:()=>auto};
+  window.DreamNestedLayout={apply,setAuto,isAuto:()=>auto,reset};
 })();

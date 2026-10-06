@@ -19,6 +19,9 @@
   door.onclick=()=>{
     const open=$('dream-create-open'); if(!open) return;
     open.click();
+    // Create's own button sits in a bar this view does not show: when the dialog closes the focus comes back to this door.
+    // (only when the focus is nowhere: the close event can land after the owner has moved on, and must not pull it back)
+    $('dream-create')?.addEventListener('close',()=>{ const a=document.activeElement; if(!open.offsetParent&&(!a||a===document.body||!a.getClientRects().length)) door.focus(); },{once:true});
     const guided=$('mc-guided-open');
     if(guided&&guided.getAttribute('aria-expanded')!=='true') guided.click();
   };

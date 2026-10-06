@@ -1,8 +1,9 @@
-/* Nested Dream, the Customize panel (DREAM-200): text size, the orchestrator's side, which pips show, the card width
-   and thinking on cards. A non-modal dialog opened from the top row, over the workers on either side, closed by Escape
-   from anywhere on the view and never open together with the All-agents drawer; every choice goes through
-   window.DreamNested, which keeps and persists it. No theme choice yet: Dream has one (dark) theme, and the view's
-   tokens are scoped under the page so a light one is a token map. */
+/* Nested Dream, the Customize panel (DREAM-200): text size, the orchestrator's side, which pips show, the card width,
+   thinking on cards, and Reset layout (where the v2 mockup has it). A non-modal dialog opened from the top bar, over
+   the workers on either side, closed by Escape from anywhere on the view and never open together with the All-agents
+   drawer; every choice goes through window.DreamNested, which keeps and persists it. No theme choice yet: Dream has
+   one (dark) theme, and the view's tokens are scoped under the page so a light one is a token map. No font choice:
+   the view uses Dream's own font stack and loads nothing remote. */
 (() => {
   'use strict';
   if(!COMPANION) return;
@@ -15,10 +16,11 @@
     ['side','Orchestrator side',[['left','Left'],['right','Right']]],
     ['pips','Status icons',[['all','Every agent'],['active','Active only']]],
     ['cardw','Card width',[['272','Small'],['320','Medium'],['368','Large']]]];
-  panel.innerHTML=`<div class="nd-wrow"><h2 id="nd-custom-h">Customize</h2><button type="button" class="nd-iconbtn nd-close" id="nd-custom-close" aria-label="Close customize">×</button></div>
+  panel.innerHTML=`<div class="nd-wrow"><h2 id="nd-custom-h">Customize</h2><button type="button" class="nd-iconbtn nd-close" id="nd-custom-close" aria-label="Close customize">${N.ICON.close}</button></div>
     ${GROUPS.map(([k,label,opts])=>`<div class="nd-field"><span id="nd-custom-${k}-l">${label}</span><div class="nd-seg" role="group" aria-labelledby="nd-custom-${k}-l" data-opt="${k}">${opts.map(([v,t])=>`<button type="button" data-v="${v}" aria-pressed="false">${t}</button>`).join('')}</div></div>`).join('')}
     <label class="nd-check"><input type="checkbox" id="nd-custom-think"> Show thinking on cards</label>
-    <p class="nd-muted">Dream's own theme and fonts. These choices, the sizes, the side and the pins stay in this browser; Reset layout in the top row clears them.</p>`;
+    <p class="nd-muted">These choices, the pane sizes, the side and the pins stay in this browser.</p>
+    <button type="button" class="nd-pill nd-reset" id="nd-reset" data-fk="reset" title="Back to the default sizes, side, pins and Customize choices">Reset layout</button>`;
   function sync(){
     const p=N.prefs(), cur={fz:String(p.fz),side:N.layout().side,pips:p.pips,cardw:String(p.cardw)};
     panel.querySelectorAll('[data-opt]').forEach(g=>g.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.v===cur[g.dataset.opt]))));

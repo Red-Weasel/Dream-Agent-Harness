@@ -2,6 +2,7 @@
 """Deterministic steps of Dream's `understand` skill. Copy me to .ua/tmp/ua_glue.py and run from the project root:
   python3 .ua/tmp/ua_glue.py status [--exclude "<p1,p2>"] [--include "<dir>"] [--full]
   python3 .ua/tmp/ua_glue.py imports-input | scan-result | batch-inputs | structure <i> | draft | nodes | assemble | finish
+  python3 .ua/tmp/ua_glue.py tasks | brief <id> | check <id>      (step 4: the worker tasks, one's instruction, its check)
 `status` comes first: the map is current (stop), out of date (update mode: only what changed is redone) or missing.
 The `understand-domain` skill uses two more: domain-context | domain
 Every problem is printed by name with the step that fixes it; a non-zero exit means the map is not done."""
@@ -38,12 +39,22 @@ STEP_OF = {'scan.json': 'scan-project.mjs (step 2)', 'imports-out.json': 'extrac
 # ---- DREAM-106: map once, update after --------------------------------------------------------------------------------
 STATE = os.path.join(UA, 'map-state.json')      # what the last finished map covered: file hashes, rules, the map's digests
 RUN = os.path.join(TMP, 'run.json')             # this run: its id, mode, exclusions and skipped trees (status writes it)
+TASKS = os.path.join(TMP, 'tasks.json')         # step 4's plan: every worker task's files, reads and symbols, and the round
 HASHES = os.path.join(INTER, 'scan-hashes.json')      # the scanned files' hashes and rules (only scan-result writes it)
 FINISHED = os.path.join(INTER, 'finished-graph.json')  # the last map finish passed, for an update after an unfinished run
 DG = os.path.join(UA, 'domain-graph.json')
 MAX_READ = 1 << 20                               # the draft reads at most this much of a file
 DRAFT_OVER = 150                                 # more files to analyse than this: the big-repo (draft) path
 KEY_MAX = 30                                     # the most key files the draft asks the model to summarise for real
+# Step 4's worker tasks. A worker on a local engine has one lane: 32,768 tokens by default, a reply of at most 16,384,
+# and it stops at 80 % full. One task is sized so its brief, the lines it reads and the JSON it writes -- written once
+# more after a failed check -- stay inside that (about 12 tokens a line, 170 a node with its edges: estimates).
+WORKER_LINES = 400                               # source lines one worker reads
+WORKER_NODES = 30                                # nodes one worker writes, in one write_file call
+WORKER_FILES = 8                                 # files in one task
+READ_LINES = 200                                 # lines in one read_file call: its result stays under the tool-result cap
+HEAD_LINES = 100                                 # the top of a long file its first task reads: docstring and imports
+READ_GAP = 30                                    # symbols this close are read in one call, the lines between them too
 DEFAULT_IGNORE = ('.ua/\n.understand-anything/\n.dream/\n.remember/\n*.lock\n*.pyc\n*.so\n*.dll\n*.bin\n*.sqlite*\n'
                   '*.wasm\n')
 DREAM_EXCLUDES = ['.dream/**', '.remember/**']   # Dream's own state: excluded from every scan
@@ -123,7 +134,7 @@ def scan_result():
 
 def batch_inputs():
     update = load(RUN, {}).get('mode') == 'update'
-    for stale in glob.glob(os.path.join(INTER, 'batch*.json')) + [os.path.join(INTER, 'assembled-graph.json')]:
+    for stale in glob.glob(os.path.join(INTER, 'batch*.json')) + [os.path.join(INTER, 'assembled-graph.json'), TASKS]:
         if os.path.exists(stale) and os.path.basename(stale) != 'batches.json' and not (
                 update and os.path.basename(stale) == 'batch-existing.json'):    # the unchanged part of the map
             os.remove(stale)
@@ -139,7 +150,7 @@ def batch_inputs():
         if os.path.exists(os.path.join(INTER, 'summaries.json')):      # the last run's: written for the files as they were
             os.remove(os.path.join(INTER, 'summaries.json'))
         print('%d files in %d batches: the big-repo path. Skip step 4 -- the glue drafts every batch file from the parser '
-              'and you write real summaries only for the key files it names.' % (len(files), batches['totalBatches']))
+              'and only the key files it names get real summaries, from workers.' % (len(files), batches['totalBatches']))
         print('next: run the parser once over every file:\n  %s\nthen glue draft%s.' % (EXTRACT_ALL, UPDATE_TAIL if update else ''))
         return 0
     for b in batches['batches']:
@@ -156,7 +167,8 @@ def batch_inputs():
         for path, near in (b.get('neighborMap') or {}).items():
             print('  %s is linked to other batches: %s' % (path, '; '.join(
                 '%s [%s]' % (n['path'], ', '.join((n.get('symbols') or [])[:8])) for n in near)))
-    print('%d batches: write .ua/intermediate/batch-<i>.json for each' % batches['totalBatches'])
+    print('%d batches. next: run the parser for each (step 4), then glue tasks: it cuts them into worker tasks that '
+          'write .ua/intermediate/batch-<i>.json' % batches['totalBatches'])
     if update:
         print('update mode: only these files changed. next: analyse them (step 4)%s.' % UPDATE_TAIL)
     return 0
@@ -192,6 +204,244 @@ def structure(i):
         print('no parser for: %s -- read them and list their functions yourself' % ', '.join(map(str, out['filesSkipped'])))
     if out.get('filesUnreadable'):
         print('UNREADABLE (wrong path?): %s' % json.dumps(out['filesUnreadable']))
+    return 0
+
+
+# ---- step 4's workers: tasks that fit a worker's lane, each one's instruction, its check -------------------------------
+PROMPT = 'Run `python3 .ua/tmp/ua_glue.py brief <id>` with run_bash and do exactly what it prints.'
+RULES = """Nodes: exactly one per `node` id and one per symbol listed above, no others. Every node has "id", "type" (the part \
+of the id before the first colon), "name" (the file's or the symbol's name), "filePath", "summary" (1-2 specific sentences \
+from the code you read: what it does, its role), "tags" (3-5, lowercase-hyphenated) and "complexity" ("simple" under 50 \
+lines, "moderate" to 200, "complex" beyond); a symbol's node also has "lineRange": [start, end] as listed.
+Edges: {"source", "target", "type", "direction": "forward", "weight"}:
+- contains 1.0: a file's node -> each of its symbol nodes.
+- imports 0.7: a file's node -> EVERY id on its `imports:` line, one edge each.
+- calls 0.8, inherits 0.9, implements 0.9, exports 0.8 (file -> its exported symbol), depends_on 0.6, tested_by 0.5 \
+(production file -> test file).
+- Non-code: configures 0.6, documents 0.5, deploys 0.7, triggers 0.6, defines_schema 0.8, migrates 0.7, related 0.5.
+Only these types. A source or target is a node you write, an id named above, or `file:<path>` of another code file of the \
+project; no self-edges."""
+
+
+def significant_symbols(path, r):
+    """(id, kind, symbol) for the symbols of one parsed file that get a node -- exported ones, functions of 10+ lines,
+    classes with 2+ methods -- each id once."""
+    exported, seen = {e.get('name') for e in r.get('exports') or []}, set()
+    for kind, items in (('function', r.get('functions') or []), ('class', r.get('classes') or [])):
+        for sym in items:
+            name, a, z = sym.get('name'), sym.get('startLine'), sym.get('endLine')
+            if not name or not isinstance(a, int) or not isinstance(z, int) or not 1 <= a <= z:
+                continue
+            if not (name in exported or (kind == 'function' and z - a >= 9) or (kind == 'class' and len(sym.get('methods') or []) >= 2)):
+                continue
+            sid = '%s:%s:%s' % (kind, path, name)
+            if sid not in seen:
+                seen.add(sid)
+                yield sid, kind, sym
+
+
+def reads_of(spans):
+    """Line spans joined where they are at most READ_GAP lines apart, then cut into read_file calls of at most
+    READ_LINES lines."""
+    joined = []
+    for a, z in sorted(spans):
+        if joined and a <= joined[-1][1] + 1 + READ_GAP:
+            joined[-1][1] = max(joined[-1][1], z)
+        else:
+            joined.append([a, z])
+    return [[a, min(a + READ_LINES - 1, z)] for start, z in joined for a in range(start, z + 1, READ_LINES)]
+
+
+def read_lines(unit):
+    return sum(z - a + 1 for a, z in unit['reads'])
+
+
+def file_units(f, r, node, imports, linked):
+    """One file as worker units. A file that fits is one unit, read whole. A long one is its head with the file's node,
+    then runs of its symbols, each run at most WORKER_LINES lines and WORKER_NODES nodes; a symbol longer than a task is
+    read from its start."""
+    path, lines = f['path'], f.get('sizeLines') or r.get('totalLines') or 0
+    unit = {'path': path, 'node': node, 'head': True, 'language': f.get('language') or '', 'category': f.get('fileCategory') or '',
+            'lines': lines, 'binary': binary_kind(read_head(path)), 'imports': imports, 'linked': linked, 'reads': [], 'symbols': []}
+    if unit['binary']:
+        return [unit]
+    symbols = sorted(({'id': sid, 'kind': kind, 'name': sym['name'], 'lines': [sym['startLine'], sym['endLine']]}
+                      for sid, kind, sym in significant_symbols(path, r)), key=lambda sym: sym['lines'])
+    if lines <= WORKER_LINES and len(symbols) < WORKER_NODES:
+        return [dict(unit, symbols=symbols, reads=reads_of([[1, lines]]) if lines else [])]
+    units, run, spans = [], [], [[1, min(lines, HEAD_LINES if symbols else WORKER_LINES)]]
+
+    def close():
+        units.append(dict(unit, head=not units, symbols=run, reads=reads_of(spans),
+                          **({} if not units else {'imports': [], 'linked': []})))
+    for sym in symbols:
+        a, z = sym['lines']
+        span = [a, min(z, a + WORKER_LINES - HEAD_LINES - READ_GAP - 1)]
+        if run and (len(run) >= WORKER_NODES - (0 if units else 1)
+                    or sum(z - a + 1 for a, z in reads_of(spans + [span])) > WORKER_LINES):
+            close()
+            run, spans = [], []
+        run.append(sym)
+        spans.append(span)
+    close()
+    return units
+
+
+def plan_tasks():
+    """Every batch cut into worker tasks: at most WORKER_FILES files, WORKER_LINES lines read and WORKER_NODES nodes
+    written. A batch that is one task writes batch-<i>.json, a cut one batch-<i>-part-<k>.json (the merge reads both)."""
+    batches, scan = load(os.path.join(INTER, 'batches.json')), load(os.path.join(INTER, 'scan-result.json'))
+    ids = {f['path']: '%s:%s' % (node_type(f), f['path']) for f in scan['files']}
+    tasks = []
+    for b in batches['batches']:
+        i = b['batchIndex']
+        out, given = os.path.join(TMP, 'extract-out-%d.json' % i), os.path.join(TMP, 'extract-in-%d.json' % i)
+        if not os.path.isfile(out) or (os.path.isfile(given) and os.path.getmtime(out) < os.path.getmtime(given)):
+            raise Problem('%s is %s -- run extract-structure.mjs for batch %d (step 4), then glue tasks' % (
+                rel(out), 'older than the input glue batch-inputs wrote' if os.path.isfile(out) else 'missing', i))
+        results = {r.get('path'): r for r in load(out).get('results') or []}
+        groups = []
+        for f in b['files']:
+            path = f['path']
+            imports = list(dict.fromkeys(ids[t] for t in (b.get('batchImportData') or {}).get(path) or [] if t in ids and t != path))
+            linked = ['%s [%s]' % (ids.get(n['path'], n['path']), ', '.join((n.get('symbols') or [])[:8]))
+                      for n in ((b.get('neighborMap') or {}).get(path) or [])[:6]]
+            for u in file_units(f, results.get(path) or {}, ids.get(path) or '%s:%s' % (node_type(f), path), imports, linked):
+                g = next((g for g in groups if len(g) < WORKER_FILES and sum(map(read_lines, g + [u])) <= WORKER_LINES
+                          and sum(u2['head'] + len(u2['symbols']) for u2 in g + [u]) <= WORKER_NODES), None)
+                if g is None:                           # first fit: the first task of this batch with room for it
+                    groups.append([u])
+                else:
+                    g.append(u)
+        tasks += [{'id': '%d-%d' % (i, k), 'batch': i, 'units': g,
+                   'file': '.ua/intermediate/batch-%d%s.json' % (i, '' if len(groups) == 1 else '-part-%d' % k)}
+                  for k, g in enumerate(groups, 1)]
+    return tasks
+
+
+def planned(tid=None):
+    """The plan `tasks` wrote, and the task with this id."""
+    if not os.path.isfile(TASKS):
+        raise Problem('no .ua/tmp/tasks.json -- run glue tasks first (step 4)')
+    plan = load(TASKS)
+    task = next((t for t in plan['tasks'] if t['id'] == tid), None)
+    if tid is not None and task is None:
+        raise Problem('no task %s -- the tasks are %s' % (tid, listing([t['id'] for t in plan['tasks']], 40)))
+    return plan, task
+
+
+def known_ids(plan):
+    """Every id an edge may name: the scanned files' nodes, the symbols any task writes, the unchanged map's nodes."""
+    scan = load(os.path.join(INTER, 'scan-result.json'))
+    ids = {'%s:%s' % (node_type(f), f['path']) for f in scan['files']}
+    ids |= {sym['id'] for t in plan['tasks'] for u in t['units'] for sym in u['symbols']}
+    return ids | {n.get('id') for n in load(os.path.join(INTER, 'batch-existing.json'), {}).get('nodes') or []}
+
+
+def task_problems(task, known):
+    """What is wrong with the batch file a task's worker wrote: the file itself, its nodes (exactly the task's), its edges."""
+    name, path = task['file'], os.path.join(ROOT, task['file'])
+    if not os.path.isfile(path):
+        return ['no %s' % name]
+    try:
+        part = load(path)
+    except ValueError as exc:
+        return ['%s is not valid JSON (%s)' % (name, exc)]
+    if not isinstance(part, dict) or not isinstance(part.get('nodes'), list) or not isinstance(part.get('edges'), list):
+        return ['%s lacks the "nodes" and "edges" lists' % name]
+    if not all(isinstance(n, dict) and isinstance(n.get('id'), str) for n in part['nodes']) or not all(
+            isinstance(e, dict) and isinstance(e.get('source'), str) and isinstance(e.get('target'), str) for e in part['edges']):
+        return ['%s: every node needs a string "id", every edge a string "source" and "target"' % name]
+    wanted = [u['node'] for u in task['units'] if u['head']] + [sym['id'] for u in task['units'] for sym in u['symbols']]
+    have = [n['id'] for n in part['nodes']]
+    return (['node %s is missing' % i for i in wanted if i not in have]
+            + ["node %s is not this task's: write only the nodes its brief lists" % i for i in have if i not in wanted]
+            + node_edge_problems(part, NODE_TYPES, EDGE_TYPES, known))
+
+
+def tasks():
+    """Plan the worker tasks, say which are done (the file is there and passes its check) and what the lead does next:
+    round 1 send them all, round 2 the missing ones once more, after that the lead does them."""
+    plan = {'round': int(load(TASKS, {}).get('round') or 0) + 1, 'tasks': plan_tasks()}
+    save(TASKS, plan)
+    known, total = known_ids(plan), len(plan['tasks'])
+    todo = [(t, p) for t, p in ((t, task_problems(t, known)) for t in plan['tasks']) if p]
+    if not todo:
+        update = load(RUN, {}).get('mode') == 'update'
+        print('all %d tasks done: %d batch files. next: %s.' % (total, total, re.sub(
+            r'^then ', '', UPDATE_TAIL.lstrip('; ')) if update else 'the merge (step 5)'))
+        return 0
+    ids = ' '.join(t['id'] for t, _ in todo)
+    if plan['round'] == 1:
+        print('%d worker tasks for %d batches (%d files): a few files each, sized for a worker\'s small context.' % (
+            total, len({t['batch'] for t in plan['tasks']}), len({u['path'] for t in plan['tasks'] for u in t['units']})))
+        print('next: send ALL %d now in ONE reply that holds only `task` calls -- one per id, nothing before or between '
+              'them -- each with subagent_type "coder" and this prompt, <id> replaced:\n  %s\nids: %s' % (len(todo), PROMPT, ids))
+        print('Do not send a few and wait: Dream runs as many workers as it has lanes and queues the rest. When every '
+              'call has returned, rerun glue tasks: it names what is missing.')
+        print('(No `task` tool in this session: do each task yourself -- glue brief <id>, its steps 1 to 3 -- then rerun '
+              'glue tasks.)')
+        return 0
+    print('%d of %d tasks done. Not done: %s' % (total - len(todo), total, listing(
+        ['%s (%s)' % (t['id'], 'no file' if p[0].startswith('no ') else flat(p[0], 90)) for t, p in todo])))
+    if plan['round'] == 2:
+        print('next: send these %d once more in ONE reply that holds only `task` calls, subagent_type "coder", the same '
+              'prompt:\n  %s\nids: %s\nWhen every call has returned, rerun glue tasks.' % (len(todo), PROMPT, ids))
+    else:
+        print('next: these were sent twice. Do each yourself: run glue brief <id> (python3 .ua/tmp/ua_glue.py brief %s) and '
+              'do its steps 1 to 3; then rerun glue tasks.\nids: %s' % (todo[0][0]['id'], ids))
+    return 0
+
+
+def brief(tid):
+    """One worker's whole instruction: what to read (by line), what to write, how to check it, what to answer."""
+    task = planned(tid)[1]
+    print('Worker task %s of the understand skill: write %s, check it, answer three lines. Your context is small: do '
+          'exactly these four steps and nothing else.\n' % (tid, task['file']))
+    print('1. Read each file below with read_file and its LINE parameters, one call per `read:` entry (start_line and '
+          'line_count -- never offset or limit: those count characters). Summaries come from the code, not the name.')
+    for u in task['units']:
+        what = ', '.join(x for x in (u['language'], '%d lines' % u['lines'], u['category']) if x)
+        if u['binary']:
+            print('- %s (binary: %s) -> node %s -- do not read it; its summary is its type and size' % (u['path'], u['binary'], u['node']))
+            continue
+        if u['head']:
+            print('- %s (%s) -> node %s%s' % (u['path'], what, u['node'], ' -- a long file: read only the lines below'
+                                              if read_lines(u) < u['lines'] else ''))
+        else:
+            print('- %s, lines %d-%d of %d (%s) -- another task writes its node %s: do not write that node; it is the '
+                  'source of your `contains` edges' % (u['path'], u['reads'][0][0], u['reads'][-1][1], u['lines'],
+                                                       u['language'], u['node']))
+        if u['reads']:
+            print('    read: ' + ' | '.join('start_line=%d line_count=%d' % (a, z - a + 1) for a, z in u['reads']))
+        if u['imports']:
+            print('    imports: ' + ', '.join(u['imports']))
+        if u['symbols']:
+            print('    symbols (id <kind>:%s:<name>): %s' % (u['path'], '; '.join(
+                '%s %s [%d, %d]' % (sym['kind'], sym['name'], sym['lines'][0], sym['lines'][1]) for sym in u['symbols'])))
+        if u['linked']:
+            print('    linked to: ' + '; '.join(u['linked']))
+    print('\n2. write_file %s = {"nodes": [...], "edges": [...]} in ONE call, as compact JSON (no indentation).\n%s' % (
+        task['file'], RULES))
+    print('\n3. run_bash: python3 .ua/tmp/ua_glue.py check %s\nIf it prints problems, write the whole file again with them '
+          'fixed and rerun the check, until it prints `ok`.' % tid)
+    print('\n4. Your whole reply is these three lines -- never the JSON, never an analysis:\ntask %s: %s\n'
+          'check: <the last line the check printed>\nnotes: <one line: what you could not read or left out, or none>' % (
+              tid, task['file']))
+    return 0
+
+
+def check(tid):
+    plan, task = planned(tid)
+    problems = task_problems(task, known_ids(plan))
+    if problems:
+        for text in problems[:20]:
+            print('problem: ' + text)
+        print('%swrite the whole file again (%s) with these fixed, then rerun this check'
+              % ('... and %d more. ' % (len(problems) - 20) if len(problems) > 20 else '', task['file']))
+        return 1
+    part = load(os.path.join(ROOT, task['file']))
+    print('ok: %s -- %d files, %d nodes, %d edges' % (task['file'], len(task['units']), len(part['nodes']), len(part['edges'])))
     return 0
 
 
@@ -380,7 +630,8 @@ def assemble():
     return rc
 
 
-def check_graph(graph, ntypes, etypes, layered):
+def node_edge_problems(graph, ntypes, etypes, known=()):
+    """The node and edge checks of a graph or of one batch file; `known`: ids outside it that its edges may name."""
     problems, ids = [], set()
     for n in graph.get('nodes') or []:
         nid = n.get('id')
@@ -404,12 +655,18 @@ def check_graph(graph, ntypes, etypes, layered):
         label = '%s -> %s' % (e.get('source'), e.get('target'))
         if e.get('type') not in etypes:
             problems.append("edge %s: type '%s' is not in the schema" % (label, e.get('type')))
-        problems += ['edge %s: %s is not a node' % (label, e.get(end)) for end in ('source', 'target') if e.get(end) not in ids]
+        problems += ['edge %s: %s is not a node' % (label, e.get(end)) for end in ('source', 'target')
+                     if e.get(end) not in ids and e.get(end) not in known]
         w = e.get('weight')
         if isinstance(w, bool) or not isinstance(w, (int, float)) or not 0 <= w <= 1:
             problems.append('edge %s: weight %r must be a number from 0 to 1' % (label, w))
         if e.get('direction') not in ('forward', 'backward', 'bidirectional'):
             problems.append('edge %s: direction must be forward' % label)
+    return problems
+
+
+def check_graph(graph, ntypes, etypes, layered):
+    problems, ids = node_edge_problems(graph, ntypes, etypes), {n.get('id') for n in graph.get('nodes') or []}
     problems += ['project lacks %s' % k for k in ('name', 'languages', 'frameworks', 'description', 'analyzedAt', 'gitCommitHash')
                  if k not in (graph.get('project') or {})]
     if not isinstance(graph.get('layers'), list) or not isinstance(graph.get('tour'), list):
@@ -1568,30 +1825,32 @@ def draft_file(f, r, text, ids, imports, roles):
 
     def edge(target, kind, weight):
         edges.append({'source': fid, 'target': target, 'type': kind, 'direction': 'forward', 'weight': weight})
-    for kind, items in (('function', r.get('functions') or []), ('class', r.get('classes') or [])):
-        for s in items:
-            name, a, z = s.get('name'), s.get('startLine'), s.get('endLine')
-            if not name or not isinstance(a, int) or not isinstance(z, int) or not 1 <= a <= z:
-                continue
-            if not (name in exported or (kind == 'function' and z - a >= 9) or (kind == 'class' and len(s.get('methods') or []) >= 2)):
-                continue
-            sid = '%s:%s:%s' % (kind, path, name)
-            if any(n['id'] == sid for n in nodes):
-                continue
-            doc = first_paragraph(docs.get((name, a)) or docs.get(name) or comment_above(lines, a, language))
-            doc = '' if only_the_name(doc, name) else doc
-            what =('Class %s%s' % (name, ' with methods ' + listing(s.get('methods') or [], 6) if s.get('methods') else '')
-                    if kind == 'class' else 'Function %s(%s)' % (name, ', '.join(s.get('params') or [])))
-            nodes.append({'id': sid, 'type': kind, 'name': name, 'filePath': path, 'lineRange': [a, z],
-                          'summary': sentence(doc or '%s, lines %d-%d' % (what, a, z)),
-                          'tags': draft_tags(path, language, kind), 'complexity': size_complexity(z - a + 1)})
-            edge(sid, 'contains', 1.0)
-            if name in exported:
-                edge(sid, 'exports', 0.8)
+    for sid, kind, s in significant_symbols(path, r):
+        name, a, z = s['name'], s['startLine'], s['endLine']
+        doc = first_paragraph(docs.get((name, a)) or docs.get(name) or comment_above(lines, a, language))
+        doc = '' if only_the_name(doc, name) else doc
+        what =('Class %s%s' % (name, ' with methods ' + listing(s.get('methods') or [], 6) if s.get('methods') else '')
+                if kind == 'class' else 'Function %s(%s)' % (name, ', '.join(s.get('params') or [])))
+        nodes.append({'id': sid, 'type': kind, 'name': name, 'filePath': path, 'lineRange': [a, z],
+                      'summary': sentence(doc or '%s, lines %d-%d' % (what, a, z)),
+                      'tags': draft_tags(path, language, kind), 'complexity': size_complexity(z - a + 1)})
+        edge(sid, 'contains', 1.0)
+        if name in exported:
+            edge(sid, 'exports', 0.8)
     for target in dict.fromkeys(imports.get(path) or []):
         if target in ids and target != path:
             edge(ids[target], 'imports', 0.7)
     return nodes, edges
+
+
+KEY_NEXT = ('next: the %(todo)d key files on drafts go to workers, all at once: ONE reply that holds only `task` calls, one per '
+            'file, subagent_type "explorer" (Dream runs as many as it has lanes and queues the rest), each prompt:\n'
+            '  Read <path> with read_file(path, start_line=1, line_count=200), then at most two more 200-line reads of its '
+            'main code (start_line and line_count -- never offset or limit). Reply with ONLY 1-2 specific sentences: what the '
+            'file does and its role in this project.\n'
+            'Then write_file .ua/intermediate/summaries.json = {"<path>": "<its worker\'s sentences>", ...} and rerun glue '
+            'draft (it applies them). A file still on a draft then: ask once more, after that read it yourself the same '
+            'way. (No `task` tool: read each yourself.) %(after)s.')
 
 
 def draft():
@@ -1653,7 +1912,7 @@ def draft():
     unknown = sorted(k for k in real if k not in used)
     if unknown:
         print('summaries.json names no node for: %s -- use a file path or a node id' % listing(unknown))
-    print('key files -- read each and write a real summary from its code; every other file keeps its draft:')
+    print('key files -- each gets a real summary written from its code; every other file keeps its draft:')
     for path, why in keys:
         text, done = summary[path]
         print('  %s (%s) -- %s: %s' % (path, why, 'real' if done else 'draft', flat(text, 110)))
@@ -1661,19 +1920,19 @@ def draft():
     after = (UPDATE_TAIL.lstrip('; ') if run.get('mode') == 'update' and os.path.isfile(os.path.join(INTER, 'batch-existing.json'))
              else 'then the merge (step 5) and step 6 (glue nodes lists the folders)')
     if todo:
-        print('next: write_file .ua/intermediate/summaries.json = {"<path>": "<1-2 sentences from the code>", ...} for '
-              'the %d key files on drafts, then rerun glue draft (it applies them); %s.' % (todo, after))
+        print(KEY_NEXT % {'todo': todo, 'after': after[0].upper() + after[1:]})
     else:
         print('every key file has its real summary. next: %s.' % re.sub(r'^then ', '', after))
     return 0
 
 
 def main(argv):
-    commands = {'imports-input': imports_input, 'scan-result': scan_result, 'batch-inputs': batch_inputs,
+    commands = {'imports-input': imports_input, 'scan-result': scan_result, 'batch-inputs': batch_inputs, 'tasks': tasks,
                 'draft': draft, 'nodes': nodes, 'assemble': assemble, 'finish': finish,
                 'domain-context': domain_context, 'domain': domain}
+    with_id = {'structure': structure, 'brief': brief, 'check': check}
     if argv[:1] != ['status'] and not (len(argv) == 1 and argv[0] in commands) and not (
-            len(argv) == 2 and argv[0] == 'structure'):
+            len(argv) == 2 and argv[0] in with_id):
         print(__doc__ if argv != ['structure'] else 'structure needs a batch index: python3 .ua/tmp/ua_glue.py structure <i>')
         return 2
     if os.path.isdir(LEGACY):
@@ -1684,8 +1943,8 @@ def main(argv):
     try:
         if argv[0] == 'status':
             return status(argv[1:])
-        if argv[0] == 'structure':
-            return structure(argv[1])
+        if argv[0] in with_id:
+            return with_id[argv[0]](argv[1])
         return commands[argv[0]]() or 0
     except FileNotFoundError as exc:
         name = os.path.basename(str(exc.filename or ''))

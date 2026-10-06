@@ -30,9 +30,18 @@ def _sh(command: str, workspace: Path):
     return result
 
 
-def _needs_sandbox():
+@pytest.fixture
+def sandbox(tmp_path):
+    """Skip where run_bash's sandbox cannot run, with the probe's reason. On the public CI runner (Ubuntu 24.04: AppArmor
+    restricts unprivileged user namespaces) the three tests below failed with "sandbox unavailable: bwrap: loopback:
+    Failed RTM_NEWADDR: Operation not permitted" (run 36980971824). The suite's other real-sandbox tests skip this
+    way, and test_execution_foundation's canary fails if Dream's probe is what is broken."""
+    from dream.core.execution import ExecutionScope, probe_sandbox
     if shutil.which("bwrap") is None or not GLUE.is_file():
         pytest.skip("needs bubblewrap and Dream's understand skill")
+    capability = asyncio.run(probe_sandbox(ExecutionScope(tmp_path)))
+    if not capability.available:
+        pytest.skip(f"run_bash needs verified OS containment, unavailable here: {capability.reason}")
 
 
 def test_dreams_skills_folder_is_a_read_only_script_root():
@@ -41,8 +50,7 @@ def test_dreams_skills_folder_is_a_read_only_script_root():
     assert skill_runtime.script_env()["DREAM_SKILLS"] == str(SKILLS)
 
 
-def test_the_shell_reads_a_bundled_skill_file_whole_and_copies_it_byte_for_byte(tmp_path):
-    _needs_sandbox()
+def test_the_shell_reads_a_bundled_skill_file_whole_and_copies_it_byte_for_byte(tmp_path, sandbox):
     size = _sh('wc -c < "$DREAM_SKILLS/understand/glue.py"', tmp_path)
     assert size.returncode == 0 and int(size.output.decode().strip()) == GLUE.stat().st_size > 50_000
     copy = _sh('mkdir -p .ua/tmp && cp "$DREAM_SKILLS/understand/glue.py" .ua/tmp/ua_glue.py', tmp_path)
@@ -51,18 +59,16 @@ def test_the_shell_reads_a_bundled_skill_file_whole_and_copies_it_byte_for_byte(
     assert hashlib.sha256(copied.read_bytes()).digest() == hashlib.sha256(GLUE.read_bytes()).digest()
 
 
-def test_the_shell_cannot_write_into_dreams_skills(tmp_path):
-    _needs_sandbox()
+def test_the_shell_cannot_write_into_dreams_skills(tmp_path, sandbox):
     before = sorted(p.name for p in SKILLS.iterdir())
     result = _sh('touch "$DREAM_SKILLS/written-by-the-shell" || echo REFUSED', tmp_path)
     assert b"REFUSED" in result.output
     assert sorted(p.name for p in SKILLS.iterdir()) == before
 
 
-def test_a_skills_folder_inside_the_workspace_stays_writable(tmp_path, monkeypatch):
+def test_a_skills_folder_inside_the_workspace_stays_writable(tmp_path, monkeypatch, sandbox):
     """Working on Dream itself: its skills folder is part of the workspace, writable as before -- the read-only mount
     of a script root must not cover a folder inside the workspace."""
-    _needs_sandbox()
     inner = tmp_path / "skills"
     (inner / "understand").mkdir(parents=True)
     monkeypatch.setattr(skill_runtime, "_dream_skill_roots", lambda: (inner.resolve(),))

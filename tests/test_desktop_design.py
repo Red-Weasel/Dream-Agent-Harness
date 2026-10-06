@@ -173,6 +173,25 @@ class NativeNavigation(unittest.TestCase):
                 window.workspace.set_visible_child_name.assert_not_called()
                 window.studio.run_javascript.assert_not_called()
 
+    def test_the_artifacts_tab_is_the_studio_view_under_its_new_name(self):
+        """DREAM-235: the sidebar's entry and the title bar read Artifacts; the page's view id stays 'studio', so
+        the dispatch and the highlight are the ones the Studio tab had."""
+        import inspect
+
+        window = self.window()
+        window.nav_buttons = {'chat': Mock(), 'studio': Mock()}
+        DreamWindow._highlight_navigation(window, 'studio')
+        window.view_label.set_text.assert_called_once_with('Artifacts')
+        window.nav_buttons['studio'].get_style_context.return_value.add_class.assert_called_once_with('selected')
+        window.nav_buttons['chat'].get_style_context.return_value.remove_class.assert_called_once_with('selected')
+        window = self.window()
+        self.assertTrue(DreamWindow.navigate(window, 'studio'))
+        self.assertEqual(window.native_view, 'studio')
+        window._dispatch_view.assert_called_once_with()
+        source = inspect.getsource(DreamWindow.__init__)
+        self.assertIn("('studio', 'Artifacts',", source)
+        self.assertNotIn("'Studio', 'applications-graphics-symbolic'", source)
+
 
 if __name__ == '__main__':
     unittest.main()

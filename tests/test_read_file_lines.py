@@ -49,3 +49,22 @@ async def test_schema_says_characters_and_offers_lines():
     props = read_file.input_schema["properties"]
     assert "CHARACTERS" in props["limit"]["description"] and "CHARACTERS" in props["offset"]["description"]
     assert "start_line" in props and "line_count" in props
+
+
+async def test_the_description_names_the_line_parameters_and_says_limit_is_never_lines():
+    """2026-10-02: a model told "read at most 200 lines" called read_file with limit=200 and got 200 characters.
+    The wording must say which parameters read LINES and that offset / limit never do. Key phrases, pinned."""
+    said = read_file.description
+    assert "To read LINES, use start_line and line_count" in said
+    assert "start_line=1, line_count=200" in said, "an example of the first 200 lines"
+    assert "offset and limit count CHARACTERS, never lines" in said
+    assert "limit=200 returns 200 characters" in said
+    assert said.index("start_line") < said.index("limit"), "the line parameters come first"
+    assert said.startswith("Read text or PDF/DOCX/XLSX/PPTX extracts."), "the catalog line (first sentence) is kept"
+    props = read_file.input_schema["properties"]
+    assert props["limit"]["description"].startswith("A number of CHARACTERS, not lines")
+    assert "line_count" in props["limit"]["description"]
+    assert props["offset"]["description"].startswith("A position in CHARACTERS, not a line number")
+    assert "start_line" in props["offset"]["description"]
+    assert props["start_line"]["description"].startswith("First LINE to read")
+    assert props["line_count"]["description"].startswith("Number of LINES to read")

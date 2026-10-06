@@ -3,8 +3,9 @@
 `delegate_local` (dream.tools.delegate_tools) hands a Claude-led session's sub-tasks to the local engine in one tool
 call. A helper OpenAICompatBackend for the MachX provider runs each task as a full worker, exactly as a local lead's
 `task` calls run (_bounded_task: a lane, a Nested card with the owner's Stop, Pause and Message through the Claude
-backend's worker_control, the engine's leases), all at once up to the engine's lanes. The call returns every result
-together, bounded. One call, because the SDK may not run several MCP calls in parallel.
+backend's worker_control, the engine's leases), at once up to the engine's lanes and the owner's max agents (the
+smaller); the rest wait their turn, and every task runs. The call returns every result together, bounded. One call,
+because the SDK may not run several MCP calls in parallel.
 """
 from __future__ import annotations
 
@@ -17,9 +18,11 @@ from anyio import CancelScope
 
 # What one call returns, all of it: the CLI cuts an MCP tool's output at 25,000 tokens by default
 # (MAX_MCP_OUTPUT_TOKENS), and a cut there would not say which task lost what. The header takes its part, and the
-# tasks that ran share the rest equally, each its heading, its text and any cut note (DREAM-213 gate, round 1). With
-# at most 15 tasks run per call (nested.max_workers), each gets about 3,990 characters or more.
+# tasks share the rest equally, each its heading, its text and any cut note (DREAM-213 gate, round 1): about 3,990
+# characters each for 15 tasks. Every task runs now (no per-call cap), so a share never drops below RESULT_FLOOR -- a
+# call of more than about 290 tasks can then pass the limit, and the CLI cuts the end.
 RESULT_LIMIT = 60_000
+RESULT_FLOOR = 200
 
 
 class LocalHelpers:
@@ -51,11 +54,11 @@ class LocalHelpers:
         return None
 
     async def delegate(self, tasks: Any, *, meter: Any = None) -> tuple[str, bool]:
-        """Run `tasks` ([{subagent_type, prompt}, ...]) on the local engine's workers at once -> (what the lead gets,
-        whether nothing ran). The model is the one the engine serves; of several, the one roles.main.model names.
-        Tasks past the owner's worker limit are not run; one line says so. Cancelled (the owner's interrupt), it stops
-        every worker, so every card ends, and the cancellation goes on. The local tokens are recorded on `meter` as
-        their own entry (source delegate_local)."""
+        """Run every one of `tasks` ([{subagent_type, prompt}, ...]) on the local engine's workers -> (what the lead
+        gets, whether nothing ran): at once up to the engine's lanes and the owner's max agents, the rest waiting their
+        turn. The model is the one the engine serves; of several, the one roles.main.model names. Cancelled (the
+        owner's interrupt), it stops every worker, so every card ends, and the cancellation goes on. The local tokens
+        are recorded on `meter` as their own entry (source delegate_local)."""
         lead = self._lead() if self._lead is not None else None
         if lead is not None and lead.kind != "anthropic":
             return (f"[Dream] delegate_local serves a Claude lead, and this session's lead is now {lead.label}: "
@@ -82,15 +85,14 @@ class LocalHelpers:
             await helper.disconnect()
             return (f"[Dream] delegate_local could not connect to the local engine at {url}: {type(exc).__name__}: "
                     f"{exc}. Nothing was run."), True
-        cap = helper._worker_cap
-        runnable = tasks[:cap]
         started = time.monotonic()
         self.running.append(helper)
-        scopes = [CancelScope() for _ in runnable]
-        # Each task its own loop-guard history: two tasks alike are two workers, not one worker repeating itself.
+        scopes = [CancelScope() for _ in tasks]
+        # Each task its own loop-guard history: two tasks alike are two workers, not one worker repeating itself. Past
+        # what runs at once (the helper's gate: lanes, max agents) a worker waits its turn, queued on its card.
         futures = [asyncio.ensure_future(helper._bounded_task(
             {"subagent_type": task["subagent_type"], "prompt": task["prompt"]}, {}, scope))
-            for task, scope in zip(runnable, scopes)]
+            for task, scope in zip(tasks, scopes)]
         try:
             outcomes = await asyncio.gather(*(asyncio.shield(future) for future in futures), return_exceptions=True)
         except asyncio.CancelledError:
@@ -105,19 +107,16 @@ class LocalHelpers:
         if meter is not None:
             try:
                 meter.record("delegate_local", source="delegate_local", model=model, tasks=len(tasks),
-                             ran=len(runnable), prompt_tokens=helper._delegated_usage["prompt_tokens"],
+                             ran=len(tasks), prompt_tokens=helper._delegated_usage["prompt_tokens"],
                              completion_tokens=helper._delegated_usage["completion_tokens"], wall_s=round(wall, 3))
             except Exception:
                 pass
-        lanes, ran = helper._task_lanes(), len(runnable)
-        header = (f"[Dream] delegate_local ran {ran} of {len(tasks)} tasks on the local engine's {model} "
-                  f"({lanes} lane{'s' if lanes != 1 else ''}) in {wall:.0f} s.")
-        if ran < len(tasks):                                  # one line for them all (DREAM-213 gate, round 1)
-            which = f"Task {len(tasks)} was" if ran + 1 == len(tasks) else f"Tasks {ran + 1}-{len(tasks)} were"
-            header += f"\n{which} not run: the worker limit is {cap} per call."
-        share = (RESULT_LIMIT - len(header)) // ran - 2       # a task's section, and the blank line before it
+        at_once, ran = helper._task_lanes(), len(tasks)
+        header = (f"[Dream] delegate_local ran {ran} task{'s' if ran != 1 else ''} on the local engine's {model}, "
+                  f"{at_once} at a time, in {wall:.0f} s.")
+        share = max(RESULT_FLOOR, (RESULT_LIMIT - len(header)) // ran - 2)  # a task's section and the blank line before
         sections = [header]
-        for number, (task, outcome) in enumerate(zip(runnable, outcomes), 1):
+        for number, (task, outcome) in enumerate(zip(tasks, outcomes), 1):
             if isinstance(outcome, BaseException):
                 body, failed = f"Error: {type(outcome).__name__}: {outcome}", True
             else:

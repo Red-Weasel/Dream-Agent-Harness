@@ -4,6 +4,7 @@ from test_workspace_library_ui import library
 from test_desktop_chat import chat
 from dream.core.backends.base import Event
 from playwright.async_api import expect
+from chat_more import more
 
 async def test_atmosphere(library):
     srv,page,prompts,_,_=library
@@ -39,6 +40,8 @@ async def test_atmosphere(library):
     for width,height in [(720,520),(390,844)]:
         await page.set_viewport_size({'width':width,'height':height})
         await page.locator('#dream-nav-studio').click()
+        # the Artifacts tab's home is its list (DREAM-235); a row opens the page in the tab
+        await page.locator('#art-home-list .art-row', has_text='fixture.html').get_by_role('button', name='Open', exact=True).click()
         await expect(page.locator('#artbody iframe')).to_be_visible()
         await page.screenshot(path=f'/tmp/dream-atmosphere-studio-{width}.png')
         assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
@@ -46,13 +49,13 @@ async def test_atmosphere(library):
     await page.emulate_media(reduced_motion='reduce')
     assert await page.locator('.dream').first.evaluate('(e)=>getComputedStyle(e).animationName')=='none'
     await page.locator('#input').focus()
-    assert await page.locator('.composer').evaluate('(e)=>getComputedStyle(e).borderTopColor')=='rgb(255, 195, 142)'
+    assert await page.locator('.composer').evaluate('(e)=>getComputedStyle(e).borderTopColor')=='rgb(179, 174, 186)'   # the Nested view's focused box (DREAM-240)
     await page.keyboard.press('Tab')
     assert await page.evaluate('getComputedStyle(document.activeElement).outlineStyle')=='solid'
     await page.evaluate("document.documentElement.dataset.atmosphere='quiet'")
     assert 'dream-eclipse' not in await page.locator('.split').evaluate('(e)=>getComputedStyle(e).backgroundImage')
     await page.evaluate("delete document.documentElement.dataset.atmosphere")
-    await page.locator('#dream-inspect-toggle').click()
+    await more(page,'dream-inspect-toggle')
     await page.get_by_role('button',name='Use classic presentation',exact=True).click()
     assert await page.locator('.split').evaluate('(e)=>getComputedStyle(e).backgroundImage')=='none'
     await expect(page.locator('#input')).to_have_value('Keep the eclipse atmosphere in the workspace')

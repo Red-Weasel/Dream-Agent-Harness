@@ -202,10 +202,6 @@ async def _choose_model_settings(console: Console, r: Renderer, path: Path, capa
         values.update({k: selection[k] for k in ("gpus", "ctx")})
         values["options"].update(selection["options"])
         sources.update({k: "Saved for this model" for k in ["gpus", "ctx", *selection["options"]]})
-    if "parallel" in values["options"]:
-        from .settings import engine_parallel_source
-        sources["parallel"] = engine_parallel_source(capabilities.get("architecture"),
-                                                     sources.get("parallel", "Your edit"))
     for note in rec["notes"]:
         r.system(note)
     if rec["context_limit"]:
@@ -355,13 +351,12 @@ async def serve_and_run(
             r.system("not loading.")
             return
 
-    # DREAM-151: the owner's engine lanes (Settings engine.parallel / engine.slot_ctx) for a model that serves lanes;
-    # the preset below keeps the model's own choices. DREAM-155: after the preflight, which checks the GPU count
-    # first (a directory model's saved gpus=1 gets its "all visible GPUs" message, not the lanes one).
+    # DREAM-151: the model's own lanes (its parallel and sub-agent context, saved with it) for a model that serves
+    # lanes. DREAM-155: after the preflight, which checks the GPU count first (a directory model's saved gpus=1 gets
+    # its "all visible GPUs" message, not the lanes one).
     from .settings import engine_lanes, lanes_report
     try:
         launch, lanes, lanes_note = engine_lanes(options, capabilities.get("architecture"), ctx=ctx, gpus=gpus)
-        machx.lanes_queue(launch)       # DREAM-209: an unusable worker cap refuses a lanes launch here, not mid-load
     except ValueError as exc:
         r.error(str(exc))
         return
@@ -388,7 +383,7 @@ async def serve_and_run(
     mark = machx.log_mark()
     try:
         proc = machx.serve(path, gpus=gpus, ctx=ctx, options=launch, keep_hot=keep_hot)
-    except ValueError as exc:       # DREAM-209: e.g. a lanes launch whose worker cap cannot be read; nothing loaded
+    except ValueError as exc:       # a launch serve() refuses (its arguments); nothing loaded
         r.error(str(exc))
         return
     if not await asyncio.to_thread(machx.wait_ready, proc):

@@ -283,24 +283,14 @@ def capabilities(model_path: Path) -> dict:
 
 
 def lanes_queue(options: dict | None) -> int | None:
-    """DREAM-209: `--max-queue` for a launch with these options, or None at one lane, where nothing is read and the
-    command is today's. Past --max-queue waiting requests the engine answers 429 at once (its default is 8). With
-    lanes -- from engine.parallel or the model's own `parallel` -- there is room for every worker one reply may start
-    and the lead: max(8, nested.max_workers + 1). It is read at each launch (an engine already running keeps its
-    queue). An unusable nested section raises, naming the file and the fix; the launchers ask before they announce
-    the load, as they do for their other refusals."""
-    if (options or {}).get("parallel", 1) <= 1:
-        return None
-    from ..core.settings import _MAX_WORKERS_TEXT, _NESTED_SHAPE_TEXT, nested_max_workers
-    try:
-        cap = nested_max_workers()
-    except ValueError as exc:
-        fix = ("set nested.max_workers to 3, 7, 11 or 15, or remove it" if _MAX_WORKERS_TEXT in str(exc) else
-               "make nested an object holding only max_workers (3, 7, 11 or 15), or remove the nested section"
-               if _NESTED_SHAPE_TEXT in str(exc) else "repair the file")
-        raise ValueError(f"{exc}. A launch with lanes sizes the engine's queue from it: {fix}, then load the model "
-                         "again.") from exc
-    return max(8, cap + 1)
+    """DREAM-209: `--max-queue` for a launch with these options, or None at one lane, where the command is today's.
+    Past --max-queue waiting requests the engine answers 429 at once (its default is 8). Dream queues its own agents
+    (the owner's max agents and the engine's lanes: a session runs no more workers than the lanes) and its lease lets
+    no more than the lanes into one model from this computer, so the engine's queue only holds what arrives besides
+    (a role naming another model on a plain `ie serve`, a client that is not Dream): room for one more full set of
+    lanes and a lead, max(8, parallel + 1). It comes from the launch's own options; no setting is read."""
+    lanes = (options or {}).get("parallel", 1)
+    return max(8, lanes + 1) if lanes > 1 else None
 
 
 def serve(model_path: Path, gpus: int | None = None, ctx: int | None = None,
@@ -321,7 +311,7 @@ def serve(model_path: Path, gpus: int | None = None, ctx: int | None = None,
             raise ValueError("Context must be an integer from 9 to 2147483647")
         args.extend(["--ctx", str(ctx)])
     args.extend(server_args(options or {}, ctx=ctx or 8192, gpus=gpus))
-    queue = lanes_queue(options)            # DREAM-209: raises before anything loads when the cap cannot be read
+    queue = lanes_queue(options)            # DREAM-209: the engine's queue, with 2 or more lanes
     if queue is not None:
         args.extend(["--max-queue", str(queue)])
     # DREAM-154: Dream's routing-profile default goes on a one-lane launch only: the V4.1 engine refuses

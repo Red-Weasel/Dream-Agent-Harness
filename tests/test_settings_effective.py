@@ -50,9 +50,11 @@ def test_every_row_has_a_value_and_a_source():
         assert source.split(" ", 1)[0] in settings.SOURCES or source.startswith(settings.NOT_APPLIED), (key, source)
     # The families the design names are all there.
     for key in ("profile", "output.max_tokens", "behaviour.vitals", "roles.main", "roles.subagents.default",
-                "roles.verifier", "roles.filer", "overrides.context_limit", "overrides.max_parallel",
+                "roles.verifier", "roles.filer", "overrides.context_limit", "nested.max_agents",
                 "numeric.subagent_rounds", "behaviour.auto_verify", "output.ceiling"):
         assert key in rows, key
+    # Retired (the owner's plan of 2026-10-01): Parallel workers is max agents now; the engine lanes are the load screen's.
+    assert not {"overrides.max_parallel", "engine.parallel", "engine.slot_ctx", "nested.max_workers"} & set(rows)
 
 
 def test_defaults_with_no_file_and_no_environment():
@@ -63,9 +65,9 @@ def test_defaults_with_no_file_and_no_environment():
     assert rows["roles.subagents.default"] == ("same as main", "default")
     assert rows["roles.verifier"] == ("same as main", "default")
     assert rows["numeric.subagent_rounds"] == (60, "default")
-    # A local provider resolves auto to lean and runs one request at a time.
+    # A local provider resolves auto to lean.
     assert rows["overrides.context_limit"].source == "default"
-    assert rows["overrides.max_parallel"] == (1, "default")
+    assert rows["nested.max_agents"] == (None, "default")                # no limit
     assert rows["overrides.output_tokens"] == (PROFILES["lean"].output_tokens, "default")
 
 
@@ -115,7 +117,8 @@ async def test_the_ceiling_row_is_what_a_request_actually_asks_for(monkeypatch):
 
 def test_the_ceiling_row_follows_a_preset_and_the_performance_mode():
     rows = settings.effective(session={"output.preset_max_tokens": 16384})
-    assert rows["output.ceiling"] == (16384, "global (local model preset)")
+    # The launch's max_tokens is the load screen's, not the global file's ("global (local model preset)" before).
+    assert rows["output.ceiling"] == (16384, "from this model's load screen (max tokens; Max output on its card)")
     rows = settings.effective(session={"output.preset_max_tokens": 16384, "output.max_tokens": 40000})
     assert rows["output.ceiling"] == (40000, "session")                        # /maxtokens wins over a preset
     rows = settings.effective(session={"output.preset_max_tokens": 16384, "output.performance": 4096})
@@ -139,13 +142,13 @@ def test_numeric_rows_come_from_the_environment(monkeypatch):
 def test_the_profile_row_values_match_resolve_profile(monkeypatch):
     """Values are the resolved profile's, so the table cannot drift from what a session gets."""
     from dream.core.profiles import resolve_profile
-    _write({"profile": "balanced", "overrides": {"max_parallel": 2}})
+    _write({"profile": "balanced", "overrides": {"idle_timeout_s": 77}})
     monkeypatch.setenv("DREAM_CONTEXT_WINDOW", "65536")
     resolved = resolve_profile(get_provider("openai"))
     rows = settings.effective(provider="openai")
-    for field in ("context_limit", "output_tokens", "max_parallel", "idle_timeout_s", "auto_filer"):
+    for field in ("context_limit", "output_tokens", "idle_timeout_s", "auto_filer"):
         assert rows[f"overrides.{field}"].value == getattr(resolved, field), field
-    assert rows["overrides.max_parallel"].source == "global"
+    assert rows["overrides.idle_timeout_s"].source == "global"
 
 
 def test_flag_and_project_are_stubs_in_s0():

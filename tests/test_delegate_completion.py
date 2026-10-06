@@ -53,8 +53,8 @@ def prepared(tmp_path, monkeypatch, first, local):
 
 @pytest.mark.parametrize('local', [False, True], ids=['remote', 'local'])
 @pytest.mark.parametrize('mode', ['text', 'structured', 'xml'])
-@pytest.mark.parametrize('reason', ['length', 'content_filter', 'unknown_vendor_reason', '', False, 0, [], {}],
-                         ids=['length', 'filtered', 'unknown', 'empty', 'bool', 'number', 'array', 'object'])
+@pytest.mark.parametrize('reason', ['content_filter', 'unknown_vendor_reason', '', False, 0, [], {}],
+                         ids=['filtered', 'unknown', 'empty', 'bool', 'number', 'array', 'object'])
 async def test_explicit_unsuccessful_completion_cannot_dispatch_or_report_success(tmp_path, monkeypatch, local, mode, reason):
     b, effects, events = prepared(tmp_path, monkeypatch, {'choices': [choice(mode, reason)]}, local)
     text, failed = await b._run_subagent('worker', 'Do the fixture')
@@ -62,9 +62,24 @@ async def test_explicit_unsuccessful_completion_cannot_dispatch_or_report_succes
     assert len(b._client.posted) == 1
     assert 'selected partial text' in text
     assert 'incomplete' in text
-    if reason == 'length':
-        assert 'truncated' in text
     assert events[-1].data['status'] == 'failed'
+    assert not any(e.data['kind'] == 'tool_use' for e in events)
+    if local:
+        assert b.coordination_status()['state'] == 'idle'
+
+
+@pytest.mark.parametrize('local', [False, True], ids=['remote', 'local'])
+@pytest.mark.parametrize('mode', ['text', 'structured', 'xml'])
+async def test_a_reply_cut_at_the_limit_cannot_dispatch_and_the_worker_is_asked_again(tmp_path, monkeypatch, local, mode):
+    """2026-10-02: a dispatched worker cut at the reply limit is no longer failed at once (it was, with 'output
+    truncated'): a cut answer is continued, a reply cut inside a tool call is asked for its final report. The cut
+    reply's tool still never runs."""
+    b, effects, events = prepared(tmp_path, monkeypatch, {'choices': [choice(mode, 'length')]}, local)
+    text, failed = await b._run_subagent('worker', 'Do the fixture')
+    assert not failed and effects == []
+    assert len(b._client.posted) == 2
+    assert text == ('selected partial textcomplete summary' if mode == 'text' else 'complete summary')
+    assert events[-1].data['status'] == 'completed'
     assert not any(e.data['kind'] == 'tool_use' for e in events)
     if local:
         assert b.coordination_status()['state'] == 'idle'
@@ -132,7 +147,10 @@ async def test_later_bad_completion_retains_prior_effect_and_usage(tmp_path, mon
                          'usage': {'prompt_tokens': 20, 'completion_tokens': 7}})
     del b._client._p[1]
     text, failed = await b._run_subagent('worker', 'Do the fixture')
-    assert failed and len(effects) == 1 and len(b._client.posted) == 2
-    assert 'no tools from this response ran' in text
-    assert b._delegated_usage == {'prompt_tokens': 20, 'completion_tokens': 7}
+    # 2026-10-02: the reply cut inside a tool call is asked once for its final report; that reply is cut the same
+    # way, so the run comes back marked incomplete after three requests (two of them with usage).
+    assert failed and len(effects) == 1 and len(b._client.posted) == 3
+    assert text.startswith('(incomplete: cut off again when asked for its final report)')
+    assert 'no tools from a cut reply ran' in text
+    assert b._delegated_usage == {'prompt_tokens': 40, 'completion_tokens': 14}
     assert events[-1].data['status'] == 'failed'

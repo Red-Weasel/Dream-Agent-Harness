@@ -18,7 +18,7 @@
   const brand=el('div',null,{class:'dream-nav-brand'});
   const brandText=el('div','DREAM');brandText.append(el('small','Build · Explore · Align'));
   brand.append(el('img',null,{src:'/assets/dream-mark.svg',alt:'',width:'44',height:'44'}),brandText);nav.append(brand);
-  const views=[['home','◉','Home'],['chat','◌','Chat'],['nested','▦','Nested Dream'],['studio','◇','Studio'],['projects','▱','Projects'],['optimizer','✎','Prompt Optimizer'],['skills','✧','Skills'],['memory','▧','Lucid Control'],['files','▤','Files'],['sleepwalk','☾','Sleepwalk'],['settings','⚙','Settings']];
+  const views=[['home','◉','Home'],['chat','◌','Chat'],['nested','▦','Nested Dream'],['studio','◇','Artifacts'],['projects','▱','Projects'],['optimizer','✎','Prompt Optimizer'],['skills','✧','Skills'],['memory','▧','Lucid Control'],['files','▤','Files'],['sleepwalk','☾','Sleepwalk'],['settings','⚙','Settings']];
   const toggles=[['understand','⌬','Understand']];   // panels beside the chat: switches, not pages
   for(const [view,icon,label] of views){const b=button('',()=>navigate(view),'dream-nav-'+view);b.title=label;b.setAttribute('aria-label','Go to '+label);b.append(el('i',icon,{'aria-hidden':'true'}),el('span',label));nav.append(b);}
   // Below a divider, panels that open beside the chat: switches, not places (owner, 2026-09-28).
@@ -52,7 +52,7 @@
   function toolLayout(){utilityMenu.open=!narrowTools.matches;}
   narrowTools.addEventListener('change',toolLayout);toolLayout();
   utilityMenu.addEventListener('keydown',e=>{if(e.key==='Escape'&&narrowTools.matches){e.preventDefault();utilityMenu.open=false;utilityMenu.querySelector('summary').focus();}});
-  workbar.append(workspace,model,effort,vision,context,utilityMenu);utilityNav.after(workbar);
+  workbar.append(model,workspace,effort,vision,context,utilityMenu);utilityNav.after(workbar);   // the model leads the bar (DREAM-228)
   const home=el('section',null,{id:'dream-home','aria-label':'Dream Home'});home.hidden=true;
   home.innerHTML='<div class="dream-hero"><div class="dream-hero-copy"><span class="dream-eyebrow">Welcome to Dream</span><h1>Your ideas<br>have a <em>higher state.</em></h1><p>Your models. Your workspace.<br>A place to think, build, and create.</p><div class="dream-actions"></div></div></div><div class="dream-home-grid"><section class="dream-home-card"><h2>YOUR WORKSPACE</h2><p id="dream-home-path">Workspace unreported</p><p id="dream-home-session"></p><div id="dream-home-project"></div></section><section class="dream-home-card"><h2>RECENT WORK</h2><div id="dream-recovery">Open Home to read saved run records.</div></section></div>';
   home.querySelector('.dream-actions').append(button('Resume work →',()=>navigate('chat'),'dream-resume'),button('Open project',()=>navigate('projects')));
@@ -77,7 +77,8 @@
   const destinations={chat:'studio-interactions',studio:'studio-preview',projects:'studio-project',skills:'studio-skills',settings:'dream-controls-open'};
   function navigate(view){
     if(!views.some(v=>v[0]===view)&&!toggles.some(v=>v[0]===view))return;
-    if(view==='understand'){window.DreamLibrary?.hide();window.PromptOptimizer?.hide(false);root.classList.remove('dream-expanded');home.hidden=true;inspector.hidden=true;root.dataset.dreamView='chat';$('studio-interactions')?.click();window.DreamUnderstand?.toggle();return;}   // a dock beside the chat, not a page (DREAM-087)
+    if(view==='understand'){if(root.dataset.dreamView==='nested'){window.DreamUnderstand?.toggle();return;}   // in the Nested view it is the right-hand pane's Map (DREAM-243)
+      window.DreamLibrary?.hide();window.PromptOptimizer?.hide(false);root.classList.remove('dream-expanded');home.hidden=true;inspector.hidden=true;root.dataset.dreamView='chat';$('studio-interactions')?.click();window.DreamUnderstand?.toggle();return;}   // a dock beside the chat, not a page (DREAM-087)
     window.DreamLibrary?.hide();
     window.PromptOptimizer?.hide(false);
     root.classList.remove('dream-expanded');
@@ -114,12 +115,14 @@
   const output=el('div',null,{id:'dream-output-tools'});output.append(el('span','Output not selected',{id:'dream-output-evidence'}),button('Expand',()=>{root.classList.toggle('dream-expanded');},'dream-output-expand'),button('Compare',compare,'dream-output-compare'),button('History',history,'dream-output-history'));
   const resize=el('input',null,{id:'dream-split-size',type:'range',min:'30',max:'65',value:'45','aria-label':'Conversation share of split view'});resize.oninput=()=>root.style.setProperty('--dream-chat-share',resize.value+'%');output.append(resize);$('artbody').before(output);
   const compareDialog=el('dialog',null,{id:'dream-compare','aria-label':'Compare preserved output revisions'});compareDialog.append(el('h2','Preserved source revisions'),el('p','Comparison is read-only. It does not overwrite files or establish visual quality.'),el('div',null,{class:'dream-compare-grid'}),button('Close',()=>compareDialog.close()));document.body.append(compareDialog);
-  async function history(){const dialog=compareDialog,grid=dialog.querySelector('.dream-compare-grid');dialog.querySelector('h2').textContent='Registered output history';grid.replaceChildren(el('p','Reading saved media records…'));dialog.showModal();try{const data=await read('/api/media/history');grid.replaceChildren();for(const row of data.outputs||[]){const col=el('section',null);col.append(el('h3',row.name),el('p',row.path),el('p','Saved '+row.created),el('p','Asset '+row.id),el('p','Revision '+(row.provenance?.revision??'unreported')+' · task '+(row.provenance?.job_id??'unreported')),el('p','Verification '+row.verification));grid.append(col);}if(!grid.children.length)grid.append(el('p','No registered outputs. Studio source revisions remain available in Compare for this session.'));}catch(e){if(e.stale)return;grid.replaceChildren(el('p',e.message));}}
-  function compare(){compareDialog.querySelector('h2').textContent='Preserved source revisions';const a=artifacts.get(artOpen);if(!a)return;const grid=compareDialog.querySelector('.dream-compare-grid');grid.replaceChildren();for(const i of [...new Set([Math.max(0,artVerIdx-1),artVerIdx])]){const col=el('section',null);col.append(el('h3',a.title+' · v'+(i+1)),el('pre',a.versions[i]));grid.append(col);}compareDialog.showModal();}
+  async function history(){const dialog=compareDialog,grid=dialog.querySelector('.dream-compare-grid');dialog.querySelector('h2').textContent='Registered output history';grid.replaceChildren(el('p','Reading saved media records…'));dialog.showModal();try{const data=await read('/api/media/history');grid.replaceChildren();for(const row of data.outputs||[]){const col=el('section',null);col.append(el('h3',row.name),el('p',row.path),el('p','Saved '+row.created),el('p','Asset '+row.id),el('p','Revision '+(row.provenance?.revision??'unreported')+' · task '+(row.provenance?.job_id??'unreported')),el('p','Verification '+row.verification));grid.append(col);}if(!grid.children.length)grid.append(el('p','No registered outputs. An artifact\'s source revisions remain available in Compare for this session.'));}catch(e){if(e.stale)return;grid.replaceChildren(el('p',e.message));}}
+  // A registry artifact's version this page never fetched comes from the route first (DREAM-235).
+  async function compare(){compareDialog.querySelector('h2').textContent='Preserved source revisions';const a=artifacts.get(artOpen);if(!a)return;const grid=compareDialog.querySelector('.dream-compare-grid');grid.replaceChildren();for(const i of [...new Set([Math.max(0,artVerIdx-1),artVerIdx])]){if(a.id&&a.versions[i]==null&&!(await loadVersion(a,i+1)))continue;const col=el('section',null);col.append(el('h3',a.title+' · v'+(i+1)),el('pre',a.versions[i]));grid.append(col);}compareDialog.showModal();}
   let mirrorBroughtStudio=false;   // the first mirrored show of a session may bring Studio up once (DREAM-104)
   window.addEventListener('dream:artifact',e=>{
     const a=artifacts.get(artOpen);
-    const evidence=()=>{$('dream-output-evidence').textContent=a?`${a.title} · v${artVerIdx+1} · output received · visual review unreported`:'No output selected';$('dream-output-compare').disabled=!a||a.versions.length<2;};
+    const evidence=()=>{$('dream-output-evidence').textContent=a?`${a.title} · v${artVerIdx+1} · output received · visual review unreported`:'No output selected';$('dream-output-compare').disabled=!a||a.versions.length<2||!ART_TEXT.has(a.kind);};
+    if(e.detail?.chat){evidence();return;}   // the panel beside the chat (DREAM-233): the view stays Chat
     if(e.detail?.mirror){
       // The model's own view, not a handoff: it never pulls the owner away from Files, Settings, an open dialog or the Understand dock.
       // Once per session, from the default chat/home view, it brings Studio up so the owner sees the model working.
@@ -127,7 +130,8 @@
       if(mirrorBroughtStudio||!onDefault){evidence();return;}
       mirrorBroughtStudio=true;
     }
-    window.DreamLibrary?.hide();home.hidden=true;root.dataset.dreamView='studio';nav.querySelectorAll('[aria-current]').forEach(n=>n.removeAttribute('aria-current'));$('dream-nav-studio').setAttribute('aria-current','page');evidence();
+    // The Artifacts tab (the view id stays 'studio') shows its viewer for a show, not its list (DREAM-235).
+    window.DreamLibrary?.hide();home.hidden=true;root.dataset.dreamView='studio';document.body.classList.remove('art-home');nav.querySelectorAll('[aria-current]').forEach(n=>n.removeAttribute('aria-current'));$('dream-nav-studio').setAttribute('aria-current','page');evidence();
   });
   const councilTasks=new Map();
   window.addEventListener('dream:council-activity',e=>{const row=e.detail;if(!row||typeof row.task_id!=='string')return;councilTasks.set(row.task_id,row);if(councilTasks.size>32)councilTasks.delete(councilTasks.keys().next().value);$('dream-council-activity').replaceChildren(...[...councilTasks.values()].slice(-8).map(r=>el('p',[r.member,r.model,r.state,r.ownership,r.observed_at,r.detail].filter(Boolean).join(' · '))));});

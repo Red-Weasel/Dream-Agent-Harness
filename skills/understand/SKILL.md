@@ -25,25 +25,14 @@ Helpers:
 
 ## 3. Batch
 - `node "$UA_SKILLS/understand/compute-batches.mjs" "$PWD"` (update mode: the `--changed-files` form scan-result printed) writes `.ua/intermediate/batches.json`.
-- glue `batch-inputs` writes `.ua/tmp/extract-in-<i>.json` per batch and prints each batch's files and their imports. Over 150 files it prints the big-repo path instead: one parser run, then glue `draft` writes every batch file and names the key files you summarise from their code; then step 5.
+- glue `batch-inputs` writes `.ua/tmp/extract-in-<i>.json` per batch and prints each batch's files and their imports. Over 150 files it prints the big-repo path instead: one parser run, then glue `draft` writes every batch file and names the key files. Its `next:` lines send each key file to an `explorer` worker for a real summary -- all the `task` calls in ONE reply -- and have you write them to summaries.json; then step 5.
 
-## 4. Analyse every batch
-For each batch index i printed above:
-1. `node "$UA_SKILLS/understand/extract-structure.mjs" "$PWD/.ua/tmp/extract-in-<i>.json" "$PWD/.ua/tmp/extract-out-<i>.json"`, then glue `structure <i>`: what the parser found, with line ranges.
-2. read_file each source file in the batch: summaries come from the code, not the file name.
-3. write_file `.ua/intermediate/batch-<i>.json` = `{"nodes": [...], "edges": [...]}` in ONE call. Over 40 nodes: write `batch-<i>-part-1.json`, `batch-<i>-part-2.json` ... instead, each a complete `{"nodes","edges"}` for a few files. Never patch a half-written file.
-
-**Nodes.** One per file; type by category: code, script, markup -> `file`; config -> `config`; docs -> `document`; infra -> `service` (Dockerfile, compose, k8s), `pipeline` (CI workflow) or `resource` (terraform); data -> `table` (SQL), `schema` (graphql/proto/prisma) or `endpoint` (OpenAPI). Id `<type>:<path>`. Add `function:<path>:<name>` and `class:<path>:<name>` nodes, with `"lineRange": [start, end]` from the parser, for exported symbols, functions of 10+ lines and classes with 2+ methods.
-Every node: `id`, `type`, `name` (file name or symbol), `filePath`, `summary` (1-2 specific sentences: what it does, its role), `tags` (3-5, lowercase-hyphenated), `complexity` (`simple` under 50 lines, `moderate` to 200, `complex` beyond). No other types.
-
-**Edges** `{"source", "target", "type", "direction": "forward", "weight"}`:
-- `contains` 1.0: file -> each of its function/class nodes.
-- `imports` 0.7: `file:<path>` -> `file:<target>` for EVERY import target the batch listing printed, one edge each.
-- `calls` 0.8, `inherits` 0.9, `implements` 0.9, `exports` 0.8 (file -> its exported symbol), `depends_on` 0.6, `tested_by` 0.5 (production file -> test file).
-- Non-code: `configures` 0.6, `documents` 0.5, `deploys` 0.7, `triggers` 0.6, `defines_schema` 0.8, `migrates` 0.7, `related` 0.5.
-Only these types. A target is a node you wrote or `file:<path>` of another scanned file; no self-edges.
-
-The lead analyses every batch itself; no subagents.
+## 4. Analyse every batch: workers do it
+- For each batch i: `node "$UA_SKILLS/understand/extract-structure.mjs" "$PWD/.ua/tmp/extract-in-<i>.json" "$PWD/.ua/tmp/extract-out-<i>.json"` (glue `structure <i>` shows what the parser found).
+- glue `tasks` cuts the batches into worker tasks -- a few files each, sized for a worker's 32K context -- and prints their ids and the one-line prompt.
+- Send EVERY task now, in ONE reply that holds only `task` calls: one per id, subagent_type `coder`, the prompt as printed, nothing before or between them. Not a few at a time: Dream runs as many workers as it has lanes and queues the rest, so none is refused. Each worker reads its files by line, writes its own `.ua/intermediate/batch-<i>.json` (a cut batch: `batch-<i>-part-<k>.json`), checks it and answers three lines, never the analysis. Do not analyse a batch yourself while workers can.
+- When every call has returned, rerun glue `tasks`: it names each task whose file is missing or fails its check, and what to do. Send those once more, the same way. A task still named after that you do yourself: glue `brief <id>` prints its files, the node and edge rules and its check. Never patch a half-written batch file: it is written whole again.
+- No `task` tool in this session: do every task yourself from its `brief <id>`.
 
 ## 5. Merge
 `python3 "$UA_SKILLS/understand/merge-batch-graphs.py" "$PWD"` writes `.ua/intermediate/assembled-graph.json` (exit 0 required). If its report dropped nodes or edges you wrote (unknown type, dangling target), fix that batch file and rerun it; report its "Could not fix" lines.

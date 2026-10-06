@@ -33,16 +33,18 @@ SCHEMA = {
 }
 
 
-def delegate_local_tool(*, model: str | None, cap: int, names: list[str]) -> SdkMcpTool:
-    """The tool, its description naming the served model (when the engine answered at session start), the owner's
-    worker limit and the local sub-agents."""
+def delegate_local_tool(*, model: str | None, limit: int | None, names: list[str]) -> SdkMcpTool:
+    """The tool, its description naming the served model (when the engine answered at session start), what runs at
+    once (the engine's lanes; the owner's max agents when set) and the local sub-agents."""
     served = model or "model (named in each result)"
+    at_once = (f"as many at once as the engine has lanes, at most {limit} (the owner's max agents)" if limit is not None
+               else "as many at once as the engine has lanes")
     description = (
-        f"Run several scoped, self-contained sub-tasks at once on the local engine's {served}: each task is "
+        f"Run several scoped, self-contained sub-tasks on the local engine's {served}: each task is "
         f"{{subagent_type, prompt}} for one of the local sub-agents ({', '.join(names) or 'none'}). They run as workers "
-        f"the owner watches and steers in Nested Dream (stop, pause, message), up to {cap} per call and as many at "
-        "once as the engine has lanes; the call returns every result together. Give each task everything it needs "
-        "in its prompt. Needs a running local engine.")
+        f"the owner watches and steers in Nested Dream (stop, pause, message), {at_once}; the rest wait their turn, "
+        "so send as many tasks as the job needs. The call returns every result together. Give each task everything "
+        "it needs in its prompt. Needs a running local engine.")
 
     async def handler(args: dict[str, Any]) -> dict[str, Any]:
         helpers = getattr(ctx(), "local_helpers", None)
@@ -52,6 +54,5 @@ def delegate_local_tool(*, model: str | None, cap: int, names: list[str]) -> Sdk
         text, failed = await helpers.delegate(args.get("tasks"), meter=bound_runtime_meter())
         return err(text) if failed else ok(text)
 
-    # No maxItems (the lead's decision): the SDK checks a call against the schema first, and its jsonschema error for a
-    # list past the limit echoes every prompt and never names the limit. Past it, delegate() says so in one line.
+    # No maxItems: every task runs; past what runs at once a task waits its turn (LocalHelpers.delegate).
     return SdkMcpTool(name="delegate_local", description=description, input_schema=SCHEMA, handler=handler)

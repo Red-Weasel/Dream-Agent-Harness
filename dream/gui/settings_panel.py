@@ -36,7 +36,7 @@ from ..core.providers import PROVIDERS
 _SECRET = re.compile(r"(?:^|[_-])(?:api[_-]?key|key|token|secret|password|passwd|credentials?|auth|authorization|"
                      r"bearer|cookie)$", re.I)
 _ASCII_NUMBER = re.compile(r"[0-9][0-9_,]*\Z")
-_FILE_ENTRY = re.compile(r"\b(?:roles|output|behaviour|engine|overrides|models|profile|blender|studio|version)"
+_FILE_ENTRY = re.compile(r"\b(?:roles|output|behaviour|nested|overrides|models|profile|blender|studio|version)"
                          r"(?:\.[A-Za-z0-9_-]+)*")
 _HIDDEN = "hidden"
 
@@ -51,13 +51,7 @@ SECTIONS = (
     ("council", "Council",
      "The saved Council: who leads it and which advisors it consults are set in the Council panel; each advisor's "
      "model and reasoning effort can be changed here."),                  # the intro is rewritten per state in view()
-    ("lanes", "Engine lanes",
-     "How many requests the local engine serves at once when Dream starts it (DREAM-151): the main model and "
-     "sub-agents then decode together. A change applies the next time Dream starts the engine; the running engine's "
-     "lanes are in the layout below."),
-    ("workers", "Workers",
-     "How many sub-agents one reply of the main agent may start (DREAM-197). How many of them run at once is set by "
-     "the engine lanes above with the local engine, and by Parallel workers with a cloud provider; the rest queue."),
+    ("agents", "Agents", "How many sub-agents run at the same time. The rest wait their turn."),
     ("engine", "Local engine layout",
      "Which model runs on which card arrives with the multi-model engine layout (phase S3). Nothing here to set "
      "yet; Dream never restarts the engine from this tab."),               # rewritten by engine_layout() in view()
@@ -168,13 +162,11 @@ _CATALOG: dict[str, tuple[str, ...]] = {
                                 "cannot see them. When set, images leave this machine.", "Off"),
     "numeric.gui_port": ("Studio port", "The port Studio listens on (0 picks a free one). Studio always listens "
                          "on this machine only (loopback); that is not configurable.", "Any free port"),
-    "profile": ("Runtime profile", "lean, balanced or frontier sizes context, output and parallel work; auto picks "
-                "one for the provider."),
+    "profile": ("Runtime profile", "lean, balanced or frontier sizes context and output; auto picks one for the "
+                "provider."),
     "overrides.context_limit": ("Context limit", "The most tokens of conversation Dream keeps in view.",
                                 "Model's own window"),
     "overrides.output_tokens": ("Output reserve", "Tokens kept free for the answer inside the context window."),
-    "overrides.max_parallel": ("Parallel workers", "How many sub-agents may run at once with a cloud provider. With "
-                               "the local engine its lanes decide (Engine lanes)."),
     "overrides.idle_timeout_s": ("Idle timeout (seconds)", "How long a request may go without any output before "
                                  "it is abandoned."),
     "overrides.subagent_timeout_s": ("Sub-agent timeout (seconds)", "How long one delegated sub-agent may run."),
@@ -200,40 +192,15 @@ _CATALOG: dict[str, tuple[str, ...]] = {
                                "search service may take."),
     "numeric.llm_read_timeout_s": ("Local answer timeout (seconds)", "How long Dream waits for a local model's "
                                    "answer. Empty means it waits as long as it takes.", "No limit"),
-    "engine.parallel": ("Parallel requests (lanes)", "How many requests the local engine serves at once, so the main "
-                        "model and sub-agents decode together. The setting applies to MiMo-V2.6, DeepSeek-V4.1, "
-                        "Qwen3.8-Flash, the 35B-A3B class and Qwen3.8-27B; 1 to 16. Every extra lane reserves VRAM when "
-                        "the model loads (on MiMo-V2.6 and DeepSeek-V4.1 out of the in-VRAM expert cache, so more lanes "
-                        "can slow every lane on those two): set the number of agents you really run at once, give the "
-                        "extra lanes a realistic Context per extra lane (16,384 rather than the whole context), and the "
-                        "engine refuses, with its numbers, a count that does not fit (a smaller context or Context per "
-                        "extra lane is the way out). A changed count takes effect at the next engine start: restart the "
-                        "engine. Unset, each model keeps its own launch setting (1 unless changed); set, it replaces "
-                        "that setting on every model named above. "
-                        "MiMo-V2.6 takes images at 1 only: at 2 or more the engine refuses them, and Dream sends none; "
-                        "Qwen3.8-Flash the same. DeepSeek-V4.1 keeps its images on lanes. DeepSeek-V4.1, Qwen3.8-Flash, "
-                        "the 35B-A3B class and Qwen3.8-27B serve lanes on two cards only: Dream refuses a launch that "
-                        "chose 1 GPU with 2 or more lanes. Qwen3.8-Flash's lanes refuse IE_P2P; Qwen3.8-27B with "
-                        "speculation on serves its lanes through its slower joint-step path; INT8 KV is refused with "
-                        "lanes on every model."),
-    "engine.slot_ctx": ("Context per extra lane", "Tokens each lane after the first holds; the first keeps the "
-                        "model's whole context, and a longer request waits for it. Unset or 0, the engine's own size: "
-                        "32,768 on MiMo-V2.6, DeepSeek-V4.1, Qwen3.8-Flash and the 35B-A3B class, 65,536 on "
-                        "Qwen3.8-27B. A larger one costs VRAM on both cards, and the engine refuses a load that does "
-                        "not fit."),
-    "nested.max_workers": ("Workers per reply", "How many sub-agents one reply of the main agent may start: 3, 7, 11 or "
-                           "15, which with the main agent makes 4, 8, 12 or 16 agents. Task calls past it in one reply "
-                           "are not run, and the main agent is told so. How many of the workers run at once is set by "
-                           "the engine lanes with the local engine and by Parallel workers with a cloud provider; the "
-                           "rest queue."),
+    "nested.max_agents": ("Max agents", "At most this many run at once, with any provider; on the local engine its "
+                          "lanes too. Empty = no limit.", "No limit"),
 }
 
 _PLACEMENT = {
     "models": ("roles.main",),
     "roles": ("roles.", "behaviour.single_slot_verifier"),
     "council": ("council.",),
-    "lanes": ("engine.parallel", "engine.slot_ctx"),
-    "workers": ("nested.",),
+    "agents": ("nested.",),
     "engine": ("engine.",),
     "permissions": ("permissions.",),
     "media": ("blender.",),
@@ -313,6 +280,8 @@ def _origin(source: str) -> str:
         return "env"
     if source.startswith(settings.NOT_APPLIED):
         return "not-applied"
+    if source.startswith(settings.LOAD_SCREEN):      # the loaded model's launch: a fact of this session
+        return "session"
     head = source.split(" ", 1)[0]
     return head if head in ("session", "project", "global", "default") else "default"
 
@@ -351,7 +320,7 @@ def _label(key: str) -> tuple[str, str, str]:
 
 def _editable(key: str) -> bool:
     return key in ("output.max_tokens", "behaviour.vitals", settings.STYLE_SETTING, *settings.CONTEXT_SETTINGS,
-                   *settings.ENGINE_SETTINGS, settings.NESTED_SETTING) or (
+                   settings.NESTED_SETTING) or (
         key.startswith("roles.") and key != "roles.main" and not key.endswith(" (in file)")
         and (key.startswith("roles.subagents.") or key.removeprefix("roles.") in settings.ROLES))
 
@@ -365,12 +334,9 @@ def _applies(key: str) -> tuple[str, bool]:
         return "New sessions (/new starts one).", True
     if key == "behaviour.vitals" or key in settings.CONTEXT_SETTINGS:
         return "Now, and in new sessions.", False
-    if key == settings.NESTED_SETTING:     # DREAM-209: the cap now; the engine's --max-queue at its next start
-        return ("Now: from the main agent's next reply, and in new sessions. The local engine's queue (--max-queue): "
-                "from the engine's next start; a running engine keeps its queue."), False
-    if key in settings.ENGINE_SETTINGS:
-        return ("The next time Dream starts the local engine (load the model again); a running engine keeps its "
-                "lanes."), True
+    if key == settings.NESTED_SETTING:
+        return ("Now: from the main agent's next reply, and in new sessions. A Claude-led session takes it when it "
+                "starts."), False
     if key == "roles.main":
         return "Now, with /model in the terminal (the provider is chosen when Dream starts).", False
     if key.startswith("roles."):
@@ -386,6 +352,8 @@ def _applies(key: str) -> tuple[str, bool]:
 
 def _source_text(source: str, key: str) -> str:
     origin = _origin(source)
+    if source.startswith(settings.LOAD_SCREEN):
+        return source[0].upper() + source[1:]
     if origin == "env":
         return f"Set by the environment variable {source.removeprefix('env ')}"
     if origin == "global":
@@ -452,8 +420,7 @@ def _row(key: str, value: Any, source: str, saved: dict) -> dict:
     row = {"key": key, "label": label, "help": help_text, "value": value, "display": _display(value, empty),
            "source": source, "source_text": _source_text(source, key), "origin": origin,
            "applies": applies, "restart": restart,
-           "restart_label": ("Restart Dream" if applies.startswith("When Dream starts") else "Engine restart"
-                             if key in settings.ENGINE_SETTINGS else "New session")
+           "restart_label": ("Restart Dream" if applies.startswith("When Dream starts") else "New session")
            if restart else None, "edit": None, "locked": None}
     env, governing = _env_name(key), _governing_env(key)
     if _editable(key) and not governing:
@@ -476,16 +443,10 @@ def _row(key: str, value: Any, source: str, saved: dict) -> dict:
         elif key in settings.CONTEXT_SETTINGS:
             low, high = (10, 95) if key == "behaviour.context_trigger" else (0, 50)
             row["edit"] = {"kind": "number", "min": low, "max": high, "value": value if type(value) is int else None}
-        elif key in settings.ENGINE_SETTINGS:
-            low, high = (1, settings.MAX_LANES) if key == "engine.parallel" else (0, settings.MAX_SLOT_CTX)
-            row["edit"] = {"kind": "number", "min": low, "max": high,
-                           "value": value if type(value) is int else None}
         elif key == settings.NESTED_SETTING:
-            # DREAM-197: the Nested view's 4 / 8 / 12 / 16 control counts the main agent; the value is its workers.
-            row["edit"] = {"kind": "choice", "value": value, "choices": list(settings.MAX_WORKERS),
-                           "labels": {str(n): f"{n + 1} agents" for n in settings.MAX_WORKERS}}
-            if type(value) is int:
-                row["display"] = f"{value + 1} agents ({value} workers)"
+            # Max agents: a number; empty (None) is no limit. The Nested view's top-bar field reads and saves this row.
+            row["edit"] = {"kind": "number", "min": 1, "max": settings.MAX_AGENTS,
+                           "value": value if type(value) is int else None}
         else:
             path = key.removeprefix("roles.").split(".")
             entry = saved.get("roles", {})
@@ -500,6 +461,10 @@ def _row(key: str, value: Any, source: str, saved: dict) -> dict:
                          "(--provider or the picker).")
     elif key == "permissions.mode":
         row["locked"] = "Shift+Tab in the terminal, or the mode control in Studio."
+    elif key == "overrides.output_tokens" and origin == "session":
+        # Only the loaded model's launch gives this row a session source (core/settings.effective, LOAD_SCREEN).
+        row["locked"] = ("Set by this model's launch: change max tokens on its load screen and load it again, or use "
+                         "/maxtokens in this session. Runtime → Next session changes only the saved value.")
     elif key == "profile" or key.startswith("overrides."):
         row["locked"] = "Change it in Runtime → Next session" + (f", or with {env}" if env else "") + "."
     elif key == "output.ceiling":
@@ -755,7 +720,10 @@ def view(*, provider: str, model: str | None, session: dict | None = None, mode:
         saved = settings.read_runtime()
         rows = settings.effective(provider=provider, model=model, session=session, strict=False)
         session = dict(session or {})
-        if running_max_tokens is not None and session.get("output.max_tokens") is None:
+        # Not with a launch max_tokens: a request then asks for that, never for Dream's own ceiling, which this
+        # second pass would show in its place (131,072 beside a 16,384 launch, the owner's run of 2026-10-02).
+        if (running_max_tokens is not None and session.get("output.max_tokens") is None
+                and session.get("output.preset_max_tokens") is None):
             running = settings.effective(provider=provider, model=model, strict=False,
                                          session={**session, "output.max_tokens": running_max_tokens})["output.ceiling"]
             rows["output.ceiling"] = (running if running.source != "session"
@@ -844,20 +812,18 @@ def _max_tokens(value: Any) -> int:
     return number
 
 
-def _engine_number(key: str, value: Any) -> str:
-    """engine.parallel / engine.slot_ctx from the number field (DREAM-151): digits 0-9 (or an integer), checked by
-    the writer's own rules; returned as the text `set_value` parses."""
+_MAX_AGENTS_REFUSAL = "enter a whole number of 1 or more, or leave it empty for no limit."
+
+
+def _max_agents(value: Any) -> str | None:
+    """nested.max_agents from a control: an integer of 1 or more, or its digits (a number field posts text) -> the text
+    `set_value` parses; an empty value -> None (cleared: no limit). Anything else is refused in one sentence."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
     text = str(value) if type(value) is int else value.strip() if isinstance(value, str) else ""
-    number = int(text.replace("_", "").replace(",", "")) if _ASCII_NUMBER.match(text) else None
-    try:
-        if number is None:
-            raise ValueError
-        settings._validate_engine({"engine": {key.split(".")[1]: number}})
-    except ValueError:
-        span = (f"1 to {settings.MAX_LANES}" if key == "engine.parallel"
-                else f"0 (automatic) or 9 to {settings.MAX_SLOT_CTX:,}")
-        raise ValueError(f"{key}: enter a whole number from {span}, in digits 0-9.") from None
-    return str(number)
+    if not (text.isascii() and text.isdigit()) or int(text) < 1:
+        raise ValueError(f"{settings.NESTED_SETTING}: {_MAX_AGENTS_REFUSAL}")
+    return text
 
 
 def save(key: Any, value: Any, scope: Any = "global") -> dict:
@@ -880,12 +846,11 @@ def save(key: Any, value: Any, scope: Any = "global") -> dict:
     if env:
         raise ValueError(f"{key} is set by the environment variable {env}. Change or unset it where Dream is "
                          "started, then restart Dream.")
-    if key in settings.ENGINE_SETTINGS and scope != "global":
-        raise ValueError(f"{key}: the engine is set on this computer only (the global scope); a project file may not "
-                         "set it.")
     if key == settings.NESTED_SETTING and scope != "global":
-        raise ValueError(f"{key}: the worker limit is set on this computer only (the global scope); a project file may "
+        raise ValueError(f"{key}: the agent limit is set on this computer only (the global scope); a project file may "
                          "not set it.")
+    if key == settings.NESTED_SETTING:
+        value = _max_agents(value)          # an empty field clears it: no limit
     try:
         # An unusable file is refused before any write: for the project scope either file, for the global scope
         # the global file alone -- a bad project file does not block saves to this computer (gate round 2).
@@ -901,13 +866,8 @@ def save(key: Any, value: Any, scope: Any = "global") -> dict:
             if type(value) is not bool:
                 raise ValueError("behaviour.vitals: choose on or off.")
             settings.set_value(key, "on" if value else "off", scope=scope)
-        elif key in settings.ENGINE_SETTINGS:
-            settings.set_value(key, _engine_number(key, value), scope=scope)
         elif key == settings.NESTED_SETTING:
-            # DREAM-197: the number, or its text (a <select> posts text); the writer's rule decides.
-            if isinstance(value, bool) or not isinstance(value, (str, int)):
-                raise ValueError(settings._MAX_WORKERS_TEXT)
-            settings.set_value(key, str(value).strip(), scope=scope)
+            settings.set_value(key, value, scope=scope)
         elif key in (settings.STYLE_SETTING, *settings.CONTEXT_SETTINGS):
             if isinstance(value, bool) or not isinstance(value, (str, int)):
                 raise ValueError(f"{key}: choose one of the listed values.")

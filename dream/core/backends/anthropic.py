@@ -10,6 +10,7 @@ import os
 import sys
 import time
 
+from collections import deque
 from typing import Any, AsyncIterator
 
 from claude_agent_sdk import (
@@ -44,6 +45,105 @@ WORKER_REFUSAL = "This worker runs inside the Claude SDK; Dream cannot stop, pau
 WORKERS_REFUSAL = "These workers run inside the Claude SDK; Dream cannot stop, pause or message them."
 BACKGROUND_TEXT = "Running in the background; the lead was told it started and goes on."
 _LOG = logging.getLogger(__name__)
+# Max agents on a Claude-led session (the owner's settings plan of 2026-10-01). Read from the bundled CLI (2.1.259): the
+# Agent tool's own permission check allows a launch without asking the host in the "default" mode Dream runs, so
+# can_use_tool never sees one. With the owner's limit set when the session starts, Dream's settings for the CLI carry
+# an "ask" rule for the launch tool (Agent; Task its older name), so each launch comes to can_use_tool, where the
+# lead's launch waits in line while `limit` of them run (_AgentSlots). Never refused for count.
+AGENT_ASK_RULES = ("Agent", "Task")
+_SETTINGS = '{"disableAllHooks":true}'
+
+
+class _AgentSlots:
+    """How many of the lead's sub-agents run at once on a Claude-led session, and the launches waiting their turn, in
+    order. A launch holds a slot from its admission until its result comes back to the lead (release) -- for one the
+    SDK runs in the background, until its task ends -- and the turn's end lets every slot and every waiting launch go
+    (reset). `limit` None: no limit (a session that started with one and had it cleared)."""
+
+    def __init__(self, limit: int | None):
+        self.limit = limit
+        self.running: set[str] = set()
+        self._line: deque[tuple[str, asyncio.Future]] = deque()
+        self._background: set[str] = set()                 # launches answered with a background receipt, still running
+        self._tasks: dict[str, str] = {}                   # the SDK's task id -> the launch it is
+
+    def _free(self) -> bool:
+        return self.limit is None or len(self.running) < self.limit
+
+    async def acquire(self, call: str, waiting=None) -> bool:
+        """Admit launch `call` (its tool use id): at once when a slot is free and no launch waits before it, else in
+        line, calling `waiting()` first. True when it waited. Cancelled while it waits, it leaves the line."""
+        if call in self.running:
+            return False
+        if self._free() and not self._line:
+            self.running.add(call)
+            return False
+        future = asyncio.get_running_loop().create_future()
+        self._line.append((call, future))
+        if waiting is not None:
+            waiting()
+        try:
+            await future
+        except asyncio.CancelledError:
+            if future.done() and not future.cancelled():
+                self.release(call)                          # admitted as it was cancelled: the slot goes back
+            else:
+                self._line = deque(entry for entry in self._line if entry[1] is not future)
+            raise
+        return True
+
+    def release(self, call: str) -> None:
+        self.running.discard(call)
+        self._admit()
+
+    def set_limit(self, limit: int | None) -> None:
+        self.limit = limit
+        self._admit()
+
+    def background(self, call: str, task_id=None) -> None:
+        """Launch `call` was answered with a background receipt: it runs on, holding its slot until its task ends."""
+        self._background.add(call)
+        self.task_started(task_id, call)
+
+    def task_started(self, task_id, call) -> None:
+        if isinstance(task_id, str) and task_id and isinstance(call, str):
+            self._tasks[task_id] = call
+
+    def task_ended(self, task_id, call=None) -> None:
+        """A background launch's task ended (the SDK's task notification or update): its slot goes."""
+        call = call if call in self._background else self._tasks.get(task_id)
+        if call in self._background:
+            self._background.discard(call)
+            self.release(call)
+
+    def reset(self) -> None:
+        """The lead's turn ended: nothing it launched runs on in the foreground; a launch still in line goes."""
+        self.running.clear()
+        self._background.clear()
+        self._tasks.clear()
+        while self._line:
+            _, future = self._line.popleft()
+            if not future.done():
+                future.set_result(None)
+
+    def _admit(self) -> None:
+        while self._line and self._free():
+            call, future = self._line.popleft()
+            if future.done():
+                continue
+            self.running.add(call)
+            future.set_result(None)
+
+
+def _agent_slots() -> _AgentSlots | None:
+    """The owner's max agents for a Claude session that starts now, or None: no limit (no rule, no hold) -- also when
+    the settings file cannot be read (its problem is reported elsewhere)."""
+    from ..settings import max_agents
+    try:
+        limit = max_agents()
+    except ValueError:
+        return None
+    return _AgentSlots(limit) if limit is not None else None
 
 
 class _SubagentCards:
@@ -82,6 +182,22 @@ class _SubagentCards:
             run = self._run(block.id, agent)
             if run["activity"]["agent"] == "subagent" and isinstance(agent, str) and agent:
                 run["activity"]["agent"] = agent
+
+    def queued(self, call: str, agent, text: str) -> None:
+        """Max agents: launch `call` waits its turn in Dream's line. Its card opens queued when this comes first (the
+        permission request can come before Dream reads the launching reply), else says queued."""
+        if call in self.runs:
+            run = self.runs[call]
+            if not run["ended"]:
+                self._row(run, "status", status="queued", text=text)
+        else:
+            self._run(call, agent, first=("queued", text))
+
+    def admitted(self, call: str) -> None:
+        """Max agents: a launch that waited its turn starts now."""
+        run = self.runs.get(call)
+        if run is not None and not run["ended"]:
+            self._row(run, "status", status="running", text="Subagent started.")
 
     def tool_result(self, block, result=None) -> None:
         """A launch's result: its card ends -- completed, or failed with what the lead got -- unless it is the receipt
@@ -200,7 +316,7 @@ class _SubagentCards:
             else:
                 self._end(run, "failed", "Subagent returned no result: the lead's turn ended before it came back.")
 
-    def _run(self, parent: str, agent=None) -> dict[str, Any]:
+    def _run(self, parent: str, agent=None, first=("running", "Subagent started.")) -> dict[str, Any]:
         run = self.runs.get(parent)
         if run is None:
             activity = {"run_id": f"claude-{parent}", "agent": agent if isinstance(agent, str) and agent else "subagent",
@@ -209,7 +325,7 @@ class _SubagentCards:
                                        "tools": {}, "since": time.monotonic()}
             run["deltas"] = self._coalescer(lambda kind, text: self._row(
                 run, kind, text=text, request_index=run["activity"]["round"]))
-            self._row(run, "status", status="running", text="Subagent started.")
+            self._row(run, "status", status=first[0], text=first[1])
         return run
 
     def _request(self, run, sent_at: float | None = None) -> dict[str, Any]:
@@ -297,9 +413,11 @@ class _SubagentCards:
 
 
 def sdk_options(*, system_prompt, mcp_servers, preapproved_tool_ids, agents, can_use_tool, model, effort, cwd,
-                stderr=None, disallowed_tools=()) -> ClaudeAgentOptions:
+                stderr=None, disallowed_tools=(), agent_limit: int | None = None) -> ClaudeAgentOptions:
     """The main Claude path's SDK options. Council and review consultations build theirs
-    here too (DREAM-137), so their posture cannot drift from the main path's."""
+    here too (DREAM-137), so their posture cannot drift from the main path's. `agent_limit` (the main path only, with
+    the owner's max agents set) adds the ask rule that brings each sub-agent launch to can_use_tool; without it the
+    settings are today's, byte for byte."""
     return ClaudeAgentOptions(
         system_prompt=system_prompt,
         mcp_servers=mcp_servers,
@@ -319,7 +437,8 @@ def sdk_options(*, system_prompt, mcp_servers, preapproved_tool_ids, agents, can
         # Importing a second settings tree would reintroduce independent
         # hooks and automatic permission grants behind those controls.
         setting_sources=[],
-        settings='{"disableAllHooks":true}',
+        settings=_SETTINGS if agent_limit is None else json.dumps(
+            {"disableAllHooks": True, "permissions": {"ask": list(AGENT_ASK_RULES)}}, separators=(",", ":")),
         include_partial_messages=True,
         model=model,
         effort=effort,
@@ -571,6 +690,7 @@ def claude_code_provenance(cwd: str, mode: str | None) -> dict:
 
 class AnthropicBackend(Backend):
     provider_label = "Claude · Anthropic"
+    _agent_slots: "_AgentSlots | None" = None   # no limit, no hold, for an instance built without __init__
 
     def __init__(
         self,
@@ -606,9 +726,23 @@ class AnthropicBackend(Backend):
         self.client: ClaudeSDKClient | None = None
         self._effort = None
         self._budget_failures: list[str] | None = None
+        # The owner's max agents, taken when the session connects (_agent_slots); None: no limit, no hold.
+        self._agent_slots: _AgentSlots | None = None
 
     async def _permission_handler(self, tool_name, tool_input, context):
         from ...telemetry.runtime import RunLimit
+        slots = self._agent_slots
+        if slots is not None and tool_name in SUBAGENT_TOOLS:
+            # Dream's own ask rule brought this launch here (max agents): the CLI allows a launch without asking in this
+            # mode, so Dream allows it too -- after its turn in line when the lead launched it. A sub-agent's own
+            # launch goes at once: holding it while its parent holds a slot could hold both forever.
+            call = getattr(context, "tool_use_id", None)
+            if getattr(context, "agent_id", None) is None and isinstance(call, str) and call:
+                agent = tool_input.get("subagent_type") if isinstance(tool_input, dict) else None
+                text = f"Waiting its turn ({len(slots.running)} of {slots.limit} running at once: your max agents)"
+                if await slots.acquire(call, waiting=lambda: self._card("queued", call, agent, text)):
+                    self._card("admitted", call)
+            return PermissionResultAllow()
         if self.permission_cb is None:
             return PermissionResultDeny(message="No permission handler is attached.")
         budget_failures = getattr(self, "_budget_failures", None)
@@ -623,9 +757,25 @@ class AnthropicBackend(Backend):
             return PermissionResultDeny(message=refusal_text(exc))
         return PermissionResultAllow() if ok else PermissionResultDeny(message="Declined by the user.")
 
+    def _card(self, update: str, *args) -> None:
+        """A sub-agent card's row from outside the turn's stream (the permission callback); display only."""
+        cards = self._cards
+        if cards is None:
+            return
+        try:
+            getattr(cards, update)(*args)
+        except Exception:
+            _LOG.exception("Nested card update %s failed; dropped", update)
+
     def _build_options(self) -> ClaudeAgentOptions:
+        limit = self._agent_slots.limit if self._agent_slots is not None else None
+        prompt = self.system_prompt
+        if limit is not None and isinstance(prompt, str):
+            prompt += (f"\n\n## Sub-agents at once\nAt most {limit} of your sub-agents (the Agent tool) run at the same "
+                       "time in this session: the owner's limit. Launch as many as the job needs; the others wait their "
+                       "turn and start as earlier ones finish.")
         return sdk_options(
-            system_prompt=self.system_prompt,
+            system_prompt=prompt,
             mcp_servers={config.MCP_SERVER_NAME: self.mcp_server},
             preapproved_tool_ids=self.preapproved_tool_ids,
             agents=self.agents,
@@ -634,11 +784,25 @@ class AnthropicBackend(Backend):
             effort=self._effort,
             cwd=str(self.cwd or config.ROOT),
             stderr=self.stderr_cb,
+            agent_limit=limit,
         )
 
     async def connect(self) -> None:
+        self._agent_slots = _agent_slots()      # the owner's max agents for this session's CLI (its ask rule)
         self.client = ClaudeSDKClient(self._build_options())
         await self.client.connect()
+
+    def apply_worker_cap(self) -> None:
+        """The owner saved max agents (Studio, /settings): a session that started with a limit holds its launches by
+        the new one from now (cleared: none is held). One that started without has no rule in its CLI to hold a
+        launch by; the limit applies from its next start."""
+        if self._agent_slots is None:
+            return
+        from ..settings import max_agents
+        try:
+            self._agent_slots.set_limit(max_agents())
+        except ValueError:
+            return
 
     async def ask(self, prompt: str) -> AsyncIterator[Event]:
         import types
@@ -670,6 +834,31 @@ class AnthropicBackend(Backend):
                 getattr(cards, update)(*args)
             except Exception:
                 _LOG.exception("Nested card update %s failed; dropped", update)
+
+        slots = self._agent_slots
+
+        def slot_done(block, result) -> None:
+            """Max agents: a launch's result frees its slot -- unless it is a background receipt, whose task's end
+            does (slot_task). Not display: a launch in line waits for this."""
+            if slots is None or block.tool_use_id not in slots.running:
+                return
+            if not block.is_error and (result.get("status") == "async_launched" if isinstance(result, dict)
+                                       else content_to_text(block.content).startswith("Async agent launched successfully")):
+                slots.background(block.tool_use_id, result.get("agentId") if isinstance(result, dict) else None)
+            else:
+                slots.release(block.tool_use_id)
+
+        def slot_task(msg) -> None:
+            """Max agents: which launch an SDK task is, and a background launch's end."""
+            if slots is None:
+                return
+            if isinstance(msg, TaskStartedMessage):
+                slots.task_started(msg.task_id, msg.tool_use_id)
+            elif isinstance(msg, (TaskNotificationMessage, TaskUpdatedMessage)):
+                status = (msg.status if isinstance(msg, TaskNotificationMessage)
+                          else msg.status or (msg.patch or {}).get("status"))
+                if status in ("completed", "failed", "stopped", "killed"):
+                    slots.task_ended(getattr(msg, "task_id", None), getattr(msg, "tool_use_id", None))
         response = self.client.receive_response()
         result = None
         failure = None
@@ -748,6 +937,7 @@ class AnthropicBackend(Backend):
                                 # A sub-agent's card ends before the lead reads its result -- or, for the receipt of a
                                 # background launch (the message's tool_use_result), stays open (gate round 1).
                                 mapped("tool_result", block, msg.tool_use_result if answers == 1 else None)
+                                slot_done(block, msg.tool_use_result if answers == 1 else None)
                                 name = tool_by_id.get(block.tool_use_id, "tool")
                                 yield Event("tool_result", {
                                     "name": name,
@@ -768,6 +958,7 @@ class AnthropicBackend(Backend):
                     }
                 elif isinstance(msg, SystemMessage):
                     mapped("system", msg)   # the SDK's task messages end background sub-agents' cards (gate round 1)
+                    slot_task(msg)
         except BaseException as exc:
             failure = exc
             failures.append((exc, read_cancels[0] if read_cancels else None))
@@ -785,6 +976,8 @@ class AnthropicBackend(Backend):
             finally:
                 if self._budget_failures is budget_failures:
                     self._budget_failures = None
+                if slots is not None:
+                    slots.reset()                # max agents: nothing of this turn holds a slot into the next
                 # DREAM-212: every sub-agent card ends with the turn -- interrupted when the turn was cancelled or
                 # closed, failed when it ended before that sub-agent's result came back.
                 mapped("close", failure is not None and not isinstance(failure, Exception))

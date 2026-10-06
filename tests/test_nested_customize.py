@@ -282,3 +282,45 @@ async def test_a_stays_out_of_the_panel_and_toggles_the_drawer_from_inside_it(st
         await expect(box).to_have_value('a')                                          # typed, not a shortcut
         await expect(drawer).to_be_visible()
         assert s.errors == []
+
+
+# --- moved here from the P10 control's tests (gate P10 r1 #6) when Max agents replaced its segmented group: the
+#     segments it shared with Customize still keep their fill under the keyboard's focus and meet non-text contrast -------
+
+LOOK = """e => { const c = getComputedStyle(e); return {bg: c.backgroundColor, fg: c.color, offset: c.outlineOffset, style: c.outlineStyle}; }"""
+
+
+def rgb(css):
+    r, g, b = [int(float(x)) for x in css[css.index('(') + 1:css.index(')')].split(',')[:3]]
+    return {'r': r, 'g': g, 'b': b}
+
+
+async def test_a_pressed_segment_keeps_its_fill_under_focus_and_meets_non_text_contrast(studio):
+    """Keyboard focus must not repaint the pressed segment, nothing clips its focus ring, its fill stands at 3:1 or more
+    against the panel and the page, its text at 4.5:1, and the group keeps its rounded ends."""
+    from test_nested_contrast import _ratio
+    async with studio() as s:
+        page = await open_nested(s)
+        panel = await open_panel(page)
+        group = panel.locator('[data-opt="fz"]')
+        on = group.locator('button[aria-pressed=true]')
+        await expect(on).to_have_text('Default')
+        await s.page.mouse.move(0, 0)
+        rest = await on.evaluate(LOOK)
+        await panel.locator('#nd-custom-close').focus()
+        for _ in range(8):
+            if await on.evaluate('e => e === document.activeElement'):
+                break
+            await s.page.keyboard.press('Tab')
+        await expect(on).to_be_focused()
+        focused = await on.evaluate(LOOK)
+        assert focused['bg'] == rest['bg'] and focused['style'] != 'none', (rest, focused)
+        assert await group.evaluate('g => getComputedStyle(g).overflow') == 'visible'           # nothing clips the ring
+        panel_bg = await panel.evaluate('p => getComputedStyle(p).backgroundColor')
+        page_bg = await s.page.evaluate("getComputedStyle(document.getElementById('dream-nested-page')).backgroundColor")
+        assert _ratio(rgb(rest['bg']), rgb(panel_bg)) >= 3 and _ratio(rgb(rest['bg']), rgb(page_bg)) >= 3, (rest, panel_bg, page_bg)
+        assert _ratio(rgb(rest['fg']), rgb(rest['bg'])) >= 4.5, rest
+        corners = await group.evaluate("""g => [...g.querySelectorAll('button')].map(b => { const c = getComputedStyle(b);
+            return [c.borderTopLeftRadius, c.borderTopRightRadius]; })""")
+        assert corners[0][0] != '0px' and corners[-1][1] != '0px' and corners[1] == ['0px', '0px'], corners   # the group's rounded ends
+        assert s.errors == []

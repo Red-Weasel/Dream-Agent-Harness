@@ -12,14 +12,14 @@
   const root=document.documentElement, $=id=>document.getElementById(id);
   const page=$('dream-nested-page'), drawer=$('nd-drawer'), btn=$('nd-drawer-btn');
   if(!page||!drawer||!btn) return;
-  const {WORD,esc,tail,written,thinking,stateOf}=N;
+  const {WORD,ICON,esc,tail,written,thinking,stateOf}=N;
   const FILTERS=[['all','All'],['needs','Needs you'],['working','Working'],['failed','Failed or stopped'],['idle','Idle']];
   // A worker with a request waiting shows as Needs you (DREAM-194), so it matches that filter and no other but All. An
   // unknown outcome ended without a clean finish: it is listed with the failed and the stopped, as itself.
   const matches=(l,f)=>{ const st=stateOf(l); return f==='all'||(f==='working'?['working','verifying','pausing','stopping'].includes(st)
     :f==='failed'?['failed','stopped','unknown'].includes(st):f==='idle'?['done','queued','paused'].includes(st):st===f); };
   const D={open:false,filter:'all',agent:null,opener:null};   // opener: the control that opened the drawer, by id or data-fk
-  drawer.innerHTML=`<div class="nd-dhead" id="nd-dhead"><div class="nd-wrow"><h2 id="nd-drawer-title">All agents</h2><span class="nd-dcount nd-num" id="nd-dcount"></span><button type="button" class="nd-iconbtn nd-close" id="nd-drawer-close" data-fk="drawer-close" aria-label="Close all agents">×</button></div><div class="nd-filters" id="nd-filters" role="group" aria-label="Show"></div></div><div class="nd-dlist" id="nd-dlist"></div><div class="nd-detail" id="nd-detail" hidden></div>`;
+  drawer.innerHTML=`<div class="nd-dhead" id="nd-dhead"><div class="nd-wrow"><h2 id="nd-drawer-title">All agents</h2><span class="nd-dcount nd-num" id="nd-dcount"></span><button type="button" class="nd-iconbtn nd-close" id="nd-drawer-close" data-fk="drawer-close" aria-label="Close all agents">${ICON.close}</button></div><div class="nd-filters" id="nd-filters" role="group" aria-label="Show"></div></div><div class="nd-dlist" id="nd-dlist"></div><div class="nd-detail" id="nd-detail" hidden></div>`;
   const dhead=$('nd-dhead'), dlist=$('nd-dlist'), detail=$('nd-detail'), filters=$('nd-filters'), dcount=$('nd-dcount');
   const pct=l=>Math.round(100*l.context.used/l.context.window);
   // A run id's head names it (a uuid); every Claude run's starts "claude-toolu", so its tail does (DREAM-212).
@@ -46,7 +46,7 @@
     dlist.innerHTML=rows.map(l=>{ const st=stateOf(l); return `<button type="button" class="nd-item nd-${st}" data-run-id="${esc(l.id)}" data-fk="row-${l.n}" aria-label="${l.n} ${esc(l.agent)}, ${WORD[st]}">
         <span class="nd-pip nd-${st}" aria-hidden="true">${l.n}</span>
         <span class="nd-l1" aria-hidden="true"><span class="nd-nm">${esc(l.agent)}</span>${l.model?`<span class="nd-md">${esc(l.model)}</span>`:''}</span>
-        <span class="nd-imeta" aria-hidden="true"><span class="nd-state">${WORD[st]}</span>${N.clockHTML(l)}${l.context?`<span class="nd-num" title="Context used">${pct(l)}%</span>`:''}</span>
+        <span class="nd-imeta" aria-hidden="true"><span class="nd-state">${WORD[st]}</span>${N.ranHTML(l)}${l.context?`<span class="nd-num" title="Context used">${pct(l)}%</span>`:''}</span>
         <span class="nd-l2" aria-hidden="true">${esc(tail(written(l)||thinking(l)||l.text,160))}</span></button>`; }).join('')
       ||`<p class="nd-muted nd-dempty">${empty(all)}</p>`;
     if(collapsed) $('nd-drawer-close').focus({preventScroll:true});
@@ -55,7 +55,7 @@
     :e.kind==='request'||e.kind==='response'?`<p class="nd-entry nd-e-req">${esc(e.text)}</p>`
     :e.kind==='thinking'?`<div class="nd-entry nd-e-think"><span class="nd-think-label">Thinking</span><p class="nd-full">${esc(e.text)}</p></div>`
     :e.kind==='message'?`<p class="nd-entry nd-e-msg"><span class="nd-badge">Your message</span> ${esc(e.text)}</p>`   // P6: taken, or not delivered
-    :e.kind==='tool'?`<div class="nd-entry nd-tool"><span class="nd-tool-name">${esc(e.row.name)}</span><span class="nd-tool-args">${esc(e.row.args)}</span><span class="nd-badge">${esc(e.row.badge)}</span>${e.row.out?`<span class="nd-tool-out">${esc(e.row.out)}</span>`:''}</div>`
+    :e.kind==='tool'?N.toolHTML({...e.row,target:e.row.args},e.row.out).replace('class="nd-tool"','class="nd-entry nd-tool"')   // the whole input and result here
     :`<p class="nd-entry nd-stream">${esc(e.text)}</p>`;
   // One worker's detail keeps its frame and its composer (P6) while it shows that worker: a draft survives the renders.
   function renderDetail(l){
@@ -65,8 +65,8 @@
     const here=N.pins().includes(l.id), s=stateOf(l), part=c=>detail.querySelector(c);
     // A worker that needs the owner shows its waiting requests with their choices (keys 1-9 answer them here too);
     // a failed or stopped one offers the retry through the orchestrator (DREAM-194).
-    part('.nd-dtop').innerHTML=`<button type="button" class="nd-back" id="nd-back" data-fk="back">‹ All agents</button>
-        <div class="nd-wrow nd-${s}"><span class="nd-pip nd-${s}" aria-hidden="true">${l.n}</span><span class="nd-nm">${esc(l.agent)}</span><span class="nd-rt"><span class="nd-state">${WORD[s]}</span>${N.clockHTML(l)}<button type="button" class="nd-iconbtn nd-close" id="nd-detail-close" data-fk="detail-close" aria-label="Close all agents">×</button></span></div>
+    part('.nd-dtop').innerHTML=`<button type="button" class="nd-back" id="nd-back" data-fk="back">${ICON.prev}All agents</button>
+        <div class="nd-wrow nd-${s}"><span class="nd-pip nd-${s}" aria-hidden="true">${l.n}</span><span class="nd-nm">${esc(l.agent)}</span>${l.model?`<span class="nd-md">${esc(l.model)}</span>`:''}<span class="nd-rt"><span class="nd-state">${WORD[s]}</span>${N.ranHTML(l)}<button type="button" class="nd-iconbtn nd-close" id="nd-detail-close" data-fk="detail-close" aria-label="Close all agents">${ICON.close}</button></span></div>
         <p class="nd-headline">${esc(l.text)}</p>${N.noteHTML(l)}
         <div class="nd-dfacts">${l.model?`<span>Model <b>${esc(l.model)}</b></span>`:''}${l.context?`<span>Context <b>${pct(l)}% · ${l.context.used.toLocaleString()}/${l.context.window.toLocaleString()}</b></span>`:''}${l.usage&&l.usage.completion!==null&&l.duration>0?`<span>Reply <b>${(l.usage.completion/(l.duration/1000)).toFixed(1)} tok/s</b></span>`:''}<span title="${esc(l.id)}">Run <b>${esc(runTag(l))}</b></span></div>`;
     part('.nd-dask').innerHTML=s==='needs'?N.asksHTML(l,'d'):''; part('.nd-dask').hidden=s!=='needs';

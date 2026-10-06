@@ -36,7 +36,7 @@ from ...telemetry.runtime import RunLimit
 from .. import handoff, policy, tool_budget_schemas, turn_origin
 from ..providers import Provider
 from ..profiles import RuntimeProfile
-from ..settings import CONTEXT_DEFAULTS as _CONTEXT_DEFAULTS, MAX_WORKERS_DEFAULT as _MAX_WORKERS_DEFAULT
+from ..settings import CONTEXT_DEFAULTS as _CONTEXT_DEFAULTS
 from ..context_budget import IMAGE_TOKENS, ContextOverflow, admit, account, estimate_parts
 from .base import Backend, Event, PermissionCallback, content_to_text
 
@@ -115,6 +115,9 @@ def active_worker() -> dict[str, str] | None:
 
 # DREAM-193: the owner's message to a worker -- its longest, how its history frames it, the preview its receipt quotes.
 _WORKER_MESSAGE_LIMIT = 4000
+# The owner's max agents unset (nested.max_agents): no limit on how many `task` calls of a provider whose calls go out
+# together run at once -- the size of the gate (_task_slots) then.
+_NO_AGENT_LIMIT = 2**31 - 1
 _OWNER_MESSAGE = "[A message from the owner, sent while you work on this task.]\n\n"
 
 
@@ -195,6 +198,22 @@ _SUB_MAX_HANDOFFS = 3
 _SUB_ACTIONS = {"compact": "compact your older history (older tool results become stubs)",
                 "handoff": "ask you for a progress report and continue this task in a fresh context from it",
                 "return": "stop this task and return your report of the work so far to the main agent"}
+# 2026-10-02: a worker's reply cut at the reply limit (finish_reason "length") is asked for again in the worker's own
+# context instead of failing the run (live: two explorers were cut at 16,384 tokens of reasoning, Dream returned
+# "output truncated at the token limit" and the lead redid their work). A reply cut with no answer -- inside its
+# reasoning, or inside a tool call, which never runs -- is asked once for its final report; an ANSWER that was cut
+# is continued, at most this many times in one run. What still cannot be completed comes back marked incomplete.
+_SUB_LENGTH_CONTINUATIONS = 2
+_SUB_CUT_REPORT = "Give your final report now, from what you have, without more reasoning."
+_SUB_CUT_CONTINUE = ("Your reply was cut off at the reply limit. Continue exactly where you stopped: do not repeat "
+                     "what you already wrote, and do not start over.")
+
+
+def _sub_cut_result(subagent_type: str, why: str, text: str) -> str:
+    """What the lead gets when a worker's cut reply could not be completed: the reason first, then the answer so far."""
+    return (f"(incomplete: {why}) subagent '{subagent_type}' output truncated at the token limit — treat as "
+            "incomplete; no tools from a cut reply ran. "
+            + (f"Its reply so far:\n\n{text}" if text else "It wrote no answer."))
 
 # Loop guard. A small local model that hits a dead-end tool result retries the
 # identical call, gets the identical result, and every round adds another
@@ -1224,7 +1243,10 @@ class OpenAICompatBackend(Backend):
         self.model = model
         self.profile = profile
         self.context_report: dict[str, Any] | None = None
-        self._task_slots = asyncio.Semaphore(profile.max_parallel if profile else 4)
+        # The owner's max agents (nested.max_agents, read at connect: apply_worker_cap): how many sub-agents run at the
+        # same time; None = no limit. Past it a worker waits its turn (_lane); no task call is refused for count.
+        self._agent_limit: int | None = None
+        self._task_slots = asyncio.Semaphore(_NO_AGENT_LIMIT)       # the gate without engine lanes (_task_gate)
         self._delegated_usage = {"prompt_tokens": 0, "completion_tokens": 0}
         self.runtime_meter = None
         self.turn_timing = None
@@ -1239,8 +1261,6 @@ class OpenAICompatBackend(Backend):
         self._lanes_busy = self._lanes_queued = 0
         # DREAM-192: the running workers by run id, for the owner's Stop / Pause / Resume (worker_control).
         self._workers: dict[str, _Worker] = {}
-        # DREAM-197: how many workers one reply may start (nested.max_workers, read at connect: apply_worker_cap).
-        self._worker_cap = _MAX_WORKERS_DEFAULT
         self._foreground_prepared = False
         # A scoped ask (the engine's exit consolidation, DREAM-118): only these tool names are offered
         # and run, and a reply that asks for one tool more than `reply_repeat_limit` times fails before
@@ -1785,17 +1805,22 @@ class OpenAICompatBackend(Backend):
     _NOT_DISPATCHED = frozenset({"verifier", "filer"})
 
     def _worker_sentence(self) -> str:
-        """DREAM-197: how many workers one reply may start (the owner's nested.max_workers) and how many of them run
-        at once here (the lanes, _task_lanes: DREAM-151's engine lanes, or Parallel workers on a provider whose calls
-        go out together, said "on this provider"); the rest queue."""
-        cap = self._worker_cap
-        at_once = min(self._task_lanes(), cap)
+        """How many subagents run at once here (_task_lanes: the owner's max agents and the engine's lanes, said "on
+        this provider" where calls go out together without lanes) and that the rest wait their turn: every `task`
+        call runs, so the lead can split a big job freely. Where the engine says what a lane holds (_lane_ctx), also
+        how large a subagent's context is, so the lead cuts its tasks to fit; nothing more where it does not."""
+        at_once = self._task_lanes()
         here = "this provider" if self.concurrent_tasks() and self.subagent_lanes() <= 1 else "this engine"
-        if at_once == cap:
-            return f"Up to {cap} subagents per reply, all running at once on {here}."
-        if at_once == 1:
-            return f"Up to {cap} subagents per reply; one runs at a time on {here}, the rest queue."
-        return f"Up to {cap} subagents per reply; {at_once} run at once on {here}, the rest queue."
+        if at_once is None:
+            return (f"Every task call of a reply runs at the same time on {here}, so split a big job into as many "
+                    "independent subtasks as help.")
+        runs = "One subagent runs at a time" if at_once == 1 else f"Up to {at_once} subagents run at once"
+        # Asked only above one lane: the constructor builds the `task` tool before the props exist (_served_slots).
+        lane = self._lane_ctx() if self.subagent_lanes() > 1 else None
+        return (f"{runs} on {here}; send as many task calls as the job needs: the rest wait their turn and start as "
+                "others finish."
+                + (f" Each has a context of about {lane:,} tokens: give it a task that fits (a few files), and ask "
+                   "for a short report." if lane is not None else ""))
 
     def _task_schema(self) -> dict[str, Any]:
         """The `task` tool the lead uses to delegate to a subagent. Enumerates the
@@ -2065,10 +2090,9 @@ class OpenAICompatBackend(Backend):
         self._configure_tool_images()
 
     def subagent_lanes(self) -> int:
-        """DREAM-151: how many sub-agents of one reply run at the same time on this session's local engine -- its
-        lanes, the server's /props total_slots (engine.parallel when Dream started it) -- or 1: one at a time, as
-        before, on every engine without lanes and on every other provider (a cloud provider's concurrency stays
-        Parallel workers, overrides.max_parallel, and its text is unchanged)."""
+        """DREAM-151: how many requests this session's local engine runs at the same time -- its lanes, the server's
+        /props total_slots (the model's own parallel when Dream started it) -- or 1: on every engine without lanes and
+        on every other provider. What sub-agents run at once is _task_lanes (the owner's max agents too)."""
         return self._served_slots(self.model)
 
     def _refresh_task_schema(self) -> None:
@@ -2080,15 +2104,15 @@ class OpenAICompatBackend(Backend):
 
     def _lanes_notes(self) -> list[str]:
         """DREAM-151: what the owner hears at the first request when the server runs several requests at once
-        (/props total_slots, `ie serve --parallel N`); nothing at one lane. The sub-agents of one step that run at
-        once are bounded by the lanes and by the owner's worker cap (DREAM-197), which the note names."""
+        (/props total_slots, `ie serve --parallel N`); nothing at one lane. The sub-agents that run at once are
+        bounded by the lanes and by the owner's max agents, which the note names when it binds."""
         lanes = self._served_slots(self.model)
         if lanes <= 1:
             return []
-        cap = self._worker_cap
+        at_once = self._task_lanes()
         note = (f"Dream's own note: MachX serves {lanes} lanes for {self.model} (its /props total_slots): up to "
-                f"{lanes} of Dream's requests to it run at once, and up to {min(lanes, cap)} sub-agents of one step "
-                f"run at the same time (one step may start up to {cap}: the worker limit, nested.max_workers).")
+                f"{lanes} of Dream's requests to it run at once, and up to {at_once} sub-agents run at the same time"
+                + (" (your max agents)" if at_once < lanes else "") + "; more wait their turn.")
         facts = self.capability_status()
         # DREAM-154: not for DeepSeek-V4.1, whose engine serves images on its lanes (profiles._own_vision).
         from ...local.models import LANE_IMAGE_ARCHITECTURES
@@ -2097,7 +2121,17 @@ class OpenAICompatBackend(Backend):
         if architecture not in LANE_IMAGE_ARCHITECTURES and (facts["vision"]["value"] is True
                                                              or facts["vision_ready"]["value"] is True):
             note += (" Images are off while it serves more than one lane (the engine takes images at parallel 1 "
-                     "only); start it with engine.parallel 1 for image work.")
+                     "only); load it with parallel 1 on the load screen for image work.")
+        lane = self._lane_ctx()
+        if lane is not None:
+            # What the engine HAS (its /props), not what the load screen asked for: a launch's slot_ctx of 0 means
+            # the engine's own size, and an engine may serve another size than it was asked.
+            held = self._server_props["slot_ctx"]
+            asked = self._local_options.get("slot_ctx") if self.model == self._local_options_model else None
+            note += (f" Each lane after the first holds {held:,} tokens (the engine's /props slot_ctx"
+                     + (f", not the {asked:,} this launch asked for" if asked and asked != held else "") + "): "
+                     + ("that is a sub-agent's context window." if lane == held else
+                        f"a sub-agent's context window is {lane:,}, the main agent's."))
         return [note]
 
     def transport_status(self) -> dict:
@@ -2248,7 +2282,7 @@ class OpenAICompatBackend(Backend):
             self._configure_tool_images()
             return (' Images were not inspected: the engine refused image input on this load. Image input and see '
                     'are disabled for this connection; retained images were omitted. You can send a new text '
-                    'request. MiMo-V2.6 takes images at engine.parallel 1 only. This failed request was not retried.')
+                    'request. MiMo-V2.6 takes images at parallel 1 only. This failed request was not retried.')
         self._image_rejection_model, self._image_rejection_kind = self.model, 'sidecar'
         self._configure_tool_images()
         return (' Images were not inspected. Image input and see are disabled for this connection; '
@@ -2582,6 +2616,34 @@ class OpenAICompatBackend(Backend):
         return max(1 if reported else 1024, min(config.MAX_OUTPUT_TOKENS,
                                                window - fill - _CTX_MARGIN))
 
+    def _lane_ctx(self) -> int | None:
+        """The context a lane after the first holds on this session's local engine, for a worker on the lead's
+        model: the server's /props `slot_ctx` (Mach X v0.2.6+, read at connect; 0 with one lane), never above the
+        lead's own window. None with one lane, on an engine that does not say and on every other provider: the
+        worker is then sized as before."""
+        props = self._server_props if self.model == self._server_props_model else None
+        size = props.get("slot_ctx") if isinstance(props, dict) else None
+        if type(size) is not int or size <= 0 or self._served_slots(self.model) <= 1:
+            return None
+        return min(size, self._window())
+
+    def _thinking_switch(self) -> bool:
+        """Whether one request can turn the model's reasoning off: MachX, on a launch that carries the `thinking`
+        choice (Dream then sends `enable_thinking` with every request, and the engine takes it per request)."""
+        return self.provider.key == "machx" and "enable_thinking" in self._sampling
+
+    def _lane_max_tokens(self, prompt: int, lane: int) -> int:
+        """A lane worker's reply budget: the room its lane has after its prompt (`lane` - prompt - margin), under
+        Dream's own ceiling (DREAM_MAX_TOKENS, output.max_tokens, /maxtokens) and a chosen shorter performance mode.
+        Not the launch preset's max_tokens nor the profile's output_tokens, which size the lead's replies: live
+        2026-10-02, two workers were cut at the 35B preset's 16,384 (reasoning counts) with about 25,000 tokens of
+        their 32,768 lane unused, and the lead redid their work. The custom and thorough modes carry the lead's own
+        ceiling (that preset), so only quick and balanced bound a worker."""
+        room = min(config.MAX_OUTPUT_TOKENS, lane - prompt - _CTX_MARGIN)
+        if self._active_performance and getattr(self, "_active_performance_mode", None) in ("quick", "balanced"):
+            room = min(room, self._active_performance["output_tokens"])
+        return max(1, room)
+
     # Per compaction: at most this many elided bodies become notes. Bounds the
     # time compaction can take (one insert each) and the notes a session grows.
     _NOTE_CAP = 40
@@ -2648,15 +2710,17 @@ class OpenAICompatBackend(Backend):
         self._context_overflow = launch or self._context_policy["context_overflow"]
 
     def apply_worker_cap(self) -> None:
-        """Take the owner's worker cap (DREAM-197, nested.max_workers) and say it in the `task` tool: at connect, and
-        when the owner saves it (Studio, /settings), so the running session's next reply is bound by what its tool
-        says. An unreadable settings file leaves the current cap as it is (the file's problem is reported
-        elsewhere)."""
-        from ..settings import nested_max_workers
+        """Take the owner's max agents (nested.max_agents) and say it in the `task` tool: at connect, and when the owner
+        saves it (Studio, /settings), so the running session's next reply queues by what its tool says. An unreadable
+        settings file leaves the current limit as it is (the file's problem is reported elsewhere)."""
+        from ..settings import max_agents
         try:
-            self._worker_cap = nested_max_workers()
+            limit = max_agents()
         except ValueError:
             return
+        if limit != self._agent_limit:
+            self._agent_limit = limit
+            self._task_slots = asyncio.Semaphore(limit or _NO_AGENT_LIMIT)
         self._refresh_task_schema()
 
     def _phase_reset(self) -> list[Event]:
@@ -4339,28 +4403,15 @@ class OpenAICompatBackend(Backend):
         on it (Gate 13). A loopback base URL stays serial -- unless the local
         engine itself says it runs several requests at once (DREAM-151: MachX
         `ie serve --parallel N`, /props total_slots): then up to that many go out
-        together (_task_gate), whatever Parallel workers says."""
+        together (_task_gate), and no more than the owner's max agents."""
         if self._served_slots(self.model) > 1:
             return True
         return concurrent_provider(self.provider)
 
-    def _over_cap(self, calls: list[dict[str, Any]], cap: int) -> dict[int, str]:
-        """DREAM-197: the `task` calls of one reply past the owner's worker cap, {index: the text it is answered with}.
-        Only calls that could become workers count (arguments that parse, sub-agents here, a scope that offers
-        `task`); the first `cap` of them run or queue as before."""
-        if self._subagents is None or (self.tool_scope is not None and "task" not in self.tool_scope):
-            return {}
-        tasks = [i for i, c in enumerate(calls)
-                 if (c.get("name") or "").lower() == "task" and _parse_tool_args(c.get("args") or "{}")[1] is None]
-        return {index: (f"[Dream] This task call was not run: one reply can start at most {cap} subagents (the owner's "
-                        f"worker limit, nested.max_workers), and this was task call {n} of {len(tasks)}. Send it again "
-                        "in a later reply, once these have finished.")
-                for n, index in enumerate(tasks[cap:], cap + 1)}
-
-    def _task_batches(self, calls: list[dict[str, Any]], skip: Iterable[int] = ()) -> dict[int, dict[int, Any]]:
+    def _task_batches(self, calls: list[dict[str, Any]]) -> dict[int, dict[int, Any]]:
         """The runs of `task` calls that may go out together: {first index: {index:
         args}}, one entry per CONTIGUOUS run of two or more, and only when the
-        provider allows it. A call in `skip` (past the worker cap, DREAM-197) runs in none.
+        provider allows it. Every call of a run starts; the gate holds those past what runs at once (_lane).
 
         Contiguous is the point (Gate 13). Starting every task at the top of the
         round raced them against a tool written BEFORE them — the model asked to
@@ -4377,10 +4428,9 @@ class OpenAICompatBackend(Backend):
             return {}
         runs: dict[int, dict[int, Any]] = {}
         cur: dict[int, Any] = {}
-        skip = set(skip)
         for i, c in enumerate([*calls, {"name": "", "args": "{}"}]):  # a sentinel closes the last run
             args, bad = _parse_tool_args(c.get("args") or "{}")
-            if (c.get("name") or "").lower() == "task" and bad is None and i not in skip:
+            if (c.get("name") or "").lower() == "task" and bad is None:
                 cur[i] = args
                 continue
             if len(cur) > 1:
@@ -4563,6 +4613,12 @@ class OpenAICompatBackend(Backend):
         # lead's; None (the lead's model, or props the endpoint does not give) keeps every number as before.
         routed_window = (self._props_window(await self._routed_props(routed))
                          if routed is not None and routed != self.model else None)
+        # A worker on the lead's model, on an engine with lanes, is sized to its lane (the engine's /props slot_ctx):
+        # its window -- the card's figure, the warning and trigger lines, the admission gate, its report -- and its
+        # reply, which may use the room the lane has. The lead and a check inside its conversation keep n_ctx.
+        lane = None if continuation or routed not in (None, self.model) else self._lane_ctx()
+        if lane is not None:
+            routed_window = lane
         # DREAM-189 (ADR-068): the run's rows say which model answers it and, from each round's request on, its
         # context fill {used, window}; _agent_activity merges the run's context into every row from here on.
         activity = _AGENT_ACTIVITY.get()
@@ -4605,6 +4661,20 @@ class OpenAICompatBackend(Backend):
         last_content = ""
         # DREAM-177: behaviour.subagent_overflow at the trigger; the warning said once per climb to its line.
         sub_handoffs, sub_warned = 0, False
+        # A reply cut at the reply limit (_SUB_LENGTH_CONTINUATIONS): the pieces of the answer being continued and
+        # the message that holds the last one in this context; whether the one final report was asked for; how
+        # often an answer was continued; what the next request answers ("report" / "continue").
+        pieces: list[str] = []
+        answer_msg: dict[str, Any] | None = None
+        report_asked, continued, followup = False, 0, None
+
+        def full_context() -> tuple[str, bool]:
+            """A cut answer the context has no room to continue: back to the lead as it is, marked."""
+            self._agent_activity('status', status='running', text=(
+                "Reply cut at the reply limit and its context is full: returned what it wrote, marked incomplete."))
+            if self.runtime_meter is not None:
+                self.runtime_meter.record("subagent_length", agent=subagent_type, cut="answer", action="full")
+            return _sub_cut_result(subagent_type, "the worker's context is full", "".join(pieces).strip()), True
 
         async def overflow(fill: int, window: int, trigger: float, choice: str, capped: bool,
                            refused: str | None = None) -> tuple[str, bool] | None:
@@ -4734,11 +4804,16 @@ class OpenAICompatBackend(Backend):
                         # The stale server count describes the old, larger history.
                         sub_prompt_tokens = 0
                     fill = self._sub_fill(messages, schemas, sub_prompt_tokens, routed_window, admitted)
+                    if pieces and fill > window * trigger:
+                        return full_context()             # compaction made no room for the rest of the answer
                 elif fill > window * trigger:
+                    if pieces and choice == "return":
+                        return full_context()             # the answer so far is the report
                     outcome = await overflow(fill, window, trigger, choice, capped)
                     if outcome is not None:
                         return outcome
                     sub_prompt_tokens, sub_warned = 0, False
+                    pieces, answer_msg, followup = [], None, None     # the fresh context starts its own answer
                     fill = _est_tokens(messages)
 
             if activity is not None:          # what this round's request carries (after any compaction or Handoff)
@@ -4754,24 +4829,41 @@ class OpenAICompatBackend(Backend):
                 **self._sampling,
                 **self._effort_params(),
             }
+            prompt_size = fill
             if not continuation and (self.profile or self._local_options or routed_window is not None
                                      or self.capability_status()['context_tokens']['known']):
                 try:
-                    payload["max_tokens"] = self._admit_request(messages, schemas, lead=False,
-                                                                window=routed_window, subagent=True).output
+                    report = self._admit_request(messages, schemas, lead=False, window=routed_window, subagent=True)
+                    payload["max_tokens"] = report.output
+                    prompt_size = max(fill, report.input_tokens)          # the gate's count has the tools in it
                 except ContextOverflow as exc:
                     choice = self._context_policy["subagent_overflow"]
+                    capped = choice == "handoff" and sub_handoffs >= _SUB_MAX_HANDOFFS
+                    if pieces and (choice != "handoff" or capped):
+                        return full_context()
                     if choice == "compact" or not any(m.get("role") == "assistant" for m in messages[1:]):
                         return str(exc), True
                     # Refused before the trigger (a big reply ceiling in a small window): the choice acts now, so the
                     # work so far comes back as a report rather than a bare refusal (DREAM-177 gate 3).
-                    capped = choice == "handoff" and sub_handoffs >= _SUB_MAX_HANDOFFS
                     outcome = await overflow(fill, window, self._trigger_at(window), "return" if capped else choice,
                                              capped, refused=str(exc))
                     if outcome is not None:
                         return outcome
                     sub_prompt_tokens, sub_warned = 0, False
+                    pieces, answer_msg, followup = [], None, None
                     continue
+            if pieces and answer_msg.get("content") != pieces[-1]:
+                return full_context()         # compaction stubbed the answer so far: nothing to continue from
+            if lane is not None:
+                payload["max_tokens"] = self._lane_max_tokens(prompt_size, lane)
+            if followup is not None:
+                # The request after a cut reply runs without reasoning where the engine takes the switch per request;
+                # elsewhere the final report gets a short budget, so a model that reasons again is cut soon.
+                if self._thinking_switch():
+                    payload["enable_thinking"] = False
+                elif followup == "report":
+                    payload["max_tokens"] = min(payload["max_tokens"], _SALVAGE_MAX_TOKENS)
+                followup = None
             if continuation:
                 self._mark_sent(messages, schemas)
             if subagent_type == "verifier":
@@ -4832,6 +4924,43 @@ class OpenAICompatBackend(Backend):
             calls = msg.get("tool_calls") or []
             last_content = (msg.get("content") or "").strip()
             reason = choice.get("finish_reason")
+            if reason == "length" and not continuation and subagent_type not in self._NOT_DISPATCHED:
+                # A worker the lead dispatched, cut at the reply limit: no tool from a cut reply runs (as before), and
+                # it is asked again in its own context (_SUB_LENGTH_CONTINUATIONS). The context-overflow choice still
+                # acts at the top of the next round; an answer it leaves no room to continue goes back as it is
+                # (full_context). The verifier and the filer keep the result below.
+                text = content if isinstance(content, str) else ""
+                cut_call = bool(calls) or bool(_OPEN_INVOKE_RE.search(text))
+                answering = bool(text.strip()) and not cut_call
+                if answering:
+                    pieces.append(text)
+                if answering and continued < _SUB_LENGTH_CONTINUATIONS:
+                    continued += 1
+                    answer_msg = {"role": "assistant", "content": text}
+                    messages.append(answer_msg)
+                    ask, followup = _SUB_CUT_CONTINUE, "continue"
+                    said = (f"Reply cut at the reply limit; asked it to continue where it stopped "
+                            f"({continued} of {_SUB_LENGTH_CONTINUATIONS}).")
+                elif not answering and not report_asked:
+                    report_asked, pieces, answer_msg = True, [], None    # the report is an answer of its own
+                    ask, followup = (("Your reply was cut off at the reply limit while writing a tool call, so the "
+                                      "call did not run. " if cut_call else
+                                      "Your reasoning was cut off at the reply limit. ") + _SUB_CUT_REPORT), "report"
+                    said = ("Reply cut at the reply limit " + ("inside a tool call" if cut_call else "while reasoning")
+                            + "; asked for its final report without more reasoning.")
+                else:
+                    why = (f"still cut off after {continued} continuations" if answering else
+                           "cut off again when asked for its final report")
+                    if self.runtime_meter is not None:
+                        self.runtime_meter.record("subagent_length", agent=subagent_type,
+                                                  cut="answer" if answering else "no answer", action="returned")
+                    return _sub_cut_result(subagent_type, why, "".join(pieces).strip() or last_content), True
+                messages.append({"role": "user", "name": "dream_recovery_instruction", "content": ask})
+                self._agent_activity('status', status='running', text=said)
+                if self.runtime_meter is not None:
+                    self.runtime_meter.record("subagent_length", agent=subagent_type, action=followup,
+                                              cut="answer" if answering else "tool call" if cut_call else "reasoning")
+                continue
             # Some compatible nonstream servers omit terminal metadata. Preserve
             # that legacy form, but explicit unsuccessful completion cannot
             # authorize structured or recovered tools, or a trusted summary.
@@ -4867,6 +4996,8 @@ class OpenAICompatBackend(Backend):
                         if not image_submitted:
                             detail.append("no successful image inspection submitted to a completed request")
                         return "Verification unverified: " + "; ".join(detail) + ".", True
+                if pieces:      # an answer that was cut and continued: its pieces in order, then this end
+                    last_content = ("".join(pieces) + (content if isinstance(content, str) else "")).strip()
                 return last_content or "(subagent returned no output)", False
             # Rebuild the assistant tool_calls with stable ids: local models
             # sometimes omit id, and the assistant entry + tool result MUST carry
@@ -4880,6 +5011,7 @@ class OpenAICompatBackend(Backend):
                     "function": {"name": fn.get("name") or "",
                                  "arguments": fn.get("arguments") or "{}"},
                 })
+            pieces, answer_msg = [], None      # it went back to its tools: its later reply is its report
             if continuation:
                 keep_reply(msg, tool_calls=norm)
             else:
@@ -5114,9 +5246,6 @@ class OpenAICompatBackend(Backend):
                 return
             for ev in self._context_notices():
                 yield ev
-            # DREAM-197: the reply is judged by the worker cap its `task` tool says here; a save while it streams
-            # applies from the next reply.
-            reply_cap = self._worker_cap
             payload = {
                 "model": self.model,
                 "messages": self.messages,
@@ -5249,7 +5378,12 @@ class OpenAICompatBackend(Backend):
                             truncated_call = ((choice.get("truncated_tool_call") or {}).get("name")
                                               or truncated_call)
                         delta = choice.get("delta", {}) or {}
+                        # A tool call MachX streams as it is written (tool_call_preview) is generation too: its first
+                        # piece is the first token. Without it a reply that is one long call counted its whole writing
+                        # as prompt reading and its decode as the instant the finished call arrived (the owner's
+                        # footer, 2026-10-04: "prefill 13 tok/s · decode 20721.0 tok/s" for 115 and 11.7).
                         meaningful = bool(delta.get("content") or delta.get("reasoning_content")
+                                          or delta.get("tool_call_preview")
                                           or any(tc.get("id") or tc.get("function", {}).get("name")
                                                  or tc.get("function", {}).get("arguments")
                                                  for tc in delta.get("tool_calls") or []))
@@ -5541,11 +5675,9 @@ class OpenAICompatBackend(Backend):
             # Phase 13: on a provider that is not single-flight, a contiguous run
             # of `task` calls starts together — at its FIRST slot, so every tool
             # the model wrote before it has already finished. Results are taken
-            # in the order the model issued them.
-            # DREAM-197: the task calls past the owner's worker cap are not run; each is answered in its place below,
-            # so the history stays paired, and none joins a batch.
-            over = self._over_cap(calls, reply_cap)
-            runs = self._task_batches(calls, skip=over)
+            # in the order the model issued them. Past what runs at once (the owner's max agents, the engine's lanes) a
+            # call waits its turn in the gate (_lane); none is refused for count.
+            runs = self._task_batches(calls)
             # DREAM-128: a call that is only the abandoned start of a later one is not run (a
             # batched `task` call starts with its batch, so it is left to run).
             starts = {i: j for i, j in _abandoned_starts(calls).items()
@@ -5578,8 +5710,6 @@ class OpenAICompatBackend(Backend):
                         # argument the model actually sent, and invite an identical
                         # retry. The parse failure IS the result.
                         result_text, is_error, stop = bad_args, True, False
-                    elif i in over:
-                        result_text, is_error, stop = over[i], True, False
                     elif i in starts:
                         result_text, is_error, stop = (
                             f"[Dream] This call was not run: it looks like the abandoned start of a later "
@@ -5618,8 +5748,8 @@ class OpenAICompatBackend(Backend):
                     self.messages.append({"role": "tool", "tool_call_id": call_id,
                                           "content": _clamp(result_text, _TOOL_RESULT_CAP)})
                     round_images.extend(getattr(result_text, "images", []))
-                    # A skipped start or a call past the worker cap is not a failed tool (DREAM-125's cap).
-                    if is_error and i not in starts and i not in over:
+                    # A skipped start is not a failed tool (DREAM-125's cap).
+                    if is_error and i not in starts:
                         self._last_round_failed = True
                     elif not is_error and not self._read_only_call({"function": {"name": name, "arguments": c["args"] or "{}"}}):
                         self._turn_changed = True
@@ -5811,8 +5941,7 @@ class OpenAICompatBackend(Backend):
         gate = self._task_gate()
         if gate.locked():
             self._lanes_queued += 1
-            self._agent_activity('status', status='queued', text=(
-                f"Waiting for an engine lane ({self._lanes_busy} of {self._task_lanes()} busy)"))
+            self._agent_activity('status', status='queued', text=self._waiting_text())
             self._lanes_changed()
             try:
                 await gate.acquire()
@@ -5848,18 +5977,29 @@ class OpenAICompatBackend(Backend):
             self._lanes_busy -= 1
             self._lanes_changed()
 
-    def _task_lanes(self) -> int:
-        """How many `task` calls of one reply run at once here (DREAM-191): the engine's lanes, or Parallel workers
-        on a provider whose calls go out together (concurrent_tasks); 1 where they run one after another."""
+    def _task_lanes(self) -> int | None:
+        """How many `task` calls run at once here (DREAM-191): on a local engine with lanes, its lanes or the owner's
+        max agents, the smaller; on a provider whose calls go out together (concurrent_tasks), max agents -- None: no
+        limit; 1 where they run one after another."""
         if not self.concurrent_tasks():
             return 1
-        lanes = self.subagent_lanes()
-        return lanes if lanes > 1 else (self.profile.max_parallel if self.profile else 4)
+        lanes, limit = self.subagent_lanes(), self._agent_limit
+        if lanes > 1:
+            return lanes if limit is None else min(lanes, limit)
+        return limit
 
-    def lanes_status(self) -> dict[str, int]:
-        """DREAM-191, for session info and the `lanes` event: the lanes this session's workers can take at once
-        (`served`), how many its workers hold (`busy`) and how many wait for one (`queued`). Other sessions'
-        requests are not counted: a worker waiting for the cross-process lease says so itself (status `waiting`)."""
+    def _waiting_text(self) -> str:
+        """A queued worker's status (DREAM-191): what it waits for -- an engine lane, or its turn under max agents."""
+        at_once, lanes = self._task_lanes(), self.subagent_lanes()
+        if lanes > 1 and at_once == lanes:
+            return f"Waiting for an engine lane ({self._lanes_busy} of {at_once} busy)"
+        return f"Waiting its turn ({self._lanes_busy} of {at_once} running at once: your max agents)"
+
+    def lanes_status(self) -> dict[str, int | None]:
+        """DREAM-191, for session info and the `lanes` event: how many of this session's workers run at once
+        (`served`; None: no limit, a provider whose calls go out together without max agents), how many run now
+        (`busy`) and how many wait their turn (`queued`). Other sessions' requests are not counted: a worker waiting
+        for the cross-process lease says so itself (status `waiting`)."""
         return {'served': self._task_lanes(), 'busy': self._lanes_busy, 'queued': self._lanes_queued}
 
     def _lanes_changed(self) -> None:
@@ -5942,15 +6082,15 @@ class OpenAICompatBackend(Backend):
             _AGENT_ACTIVITY.reset(token)
 
     def _task_gate(self) -> asyncio.Semaphore:
-        """What bounds one reply's `task` calls running together: on a local engine with lanes (DREAM-151) its lane
-        count, the owner's engine.parallel -- no second setting to raise; everywhere else Parallel workers
-        (profile.max_parallel), as before."""
+        """What bounds the `task` calls running together: on a local engine with lanes (DREAM-151) its lanes or the
+        owner's max agents, the smaller; everywhere else max agents (_task_slots, unbounded without it)."""
         lanes = self.subagent_lanes()
         if lanes <= 1:
             return self._task_slots
+        size = lanes if self._agent_limit is None else min(lanes, self._agent_limit)
         gate = getattr(self, "_lane_gate", None)
-        if gate is None or gate[0] != lanes:
-            gate = self._lane_gate = (lanes, asyncio.Semaphore(lanes))
+        if gate is None or gate[0] != size:
+            gate = self._lane_gate = (size, asyncio.Semaphore(size))
         return gate[1]
 
     def _effort_params(self) -> dict[str, Any]:

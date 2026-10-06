@@ -143,10 +143,11 @@ def test_capability_probe_rejects_old_binary(monkeypatch, tmp_path):
 
 
 def test_feature_combinations():
-    with pytest.raises(ValueError, match="Speculation"):
-        validate_options({"speculative": True, "temperature": .7})
-    with pytest.raises(ValueError, match="Speculation"):
-        validate_options({"speculative": True, "temperature": 0, "presence_penalty": .1})
+    # Engine v0.2.13: speculation runs inside the normal decode loop on the Qwen3.8-27B split (any sampler); on the
+    # other models a sampled request simply decodes without it. Dream no longer refuses the combination.
+    assert validate_options({"speculative": True, "temperature": .7})["speculative"] is True
+    assert validate_options({"speculative": True, "temperature": 0, "presence_penalty": .1})["speculative"] is True
+    assert "--spec" in server_args({"speculative": True, "temperature": .7})
     assert "--spec" in server_args({"speculative": True, "temperature": 0})
     assert "--spec" in server_args({"speculative": True, "temperature": 0,
                                    "presence_penalty": .1, "repeat_last_n": 0})

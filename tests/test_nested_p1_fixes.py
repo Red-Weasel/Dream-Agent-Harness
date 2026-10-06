@@ -16,7 +16,7 @@ from test_nested_view import _activity, open_nested, studio  # noqa: F401
 
 pytestmark = pytest.mark.asyncio
 BG, FG = 'e => getComputedStyle(e).backgroundColor', 'e => getComputedStyle(e).color'
-PEWTER, GREEN, ACCENT = (74, 74, 92), (127, 214, 174), (246, 160, 106)    # --nd-pewter, --nd-ok, --nd-accent (theme --ember)
+PEWTER, GREEN, ACCENT = (74, 70, 80), (88, 201, 138), (255, 138, 76)    # --nd-pewter, --nd-ok, --nd-accent: the v2 mockup's palette
 
 
 def rgb(css):

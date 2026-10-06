@@ -36,6 +36,9 @@ jobs:
       DREAM_SEMANTIC_MEMORY: "0"
       DREAM_RERANK: "0"
       DREAM_CONSOLIDATE: "0"
+      # The suite's absolute time ceilings were measured on the maintainer's machine; this runner measured 2.2 to
+      # 2.9 times slower (run 36980971824). The linear-time claims are ratios and do not use it.
+      DREAM_TEST_TIME_SCALE: "3"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -53,6 +56,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bubblewrap libseccomp2 ffmpeg poppler-utils fonts-dejavu-core
           uv run --locked playwright install --with-deps chromium
+      - name: Allow bubblewrap its user namespaces
+        # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor and the runner has no profile for
+        # bubblewrap, so run_bash's sandbox and the tests that use it could not run ("bwrap: setting up uid map:
+        # Permission denied"). On a host where this is not done those tests skip with bubblewrap's message.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Run model-free regression suite
         run: uv run --locked pytest -q --junitxml=artifacts/harness-validation/regressions.xml
       - name: Measure deterministic harness fixtures

@@ -5,12 +5,13 @@ import re
 from playwright.async_api import expect
 from test_desktop_chat import chat
 from test_workspace_library_ui import library
+from chat_more import more
 
 
 async def test_presentation_preferences_survive_reload_and_classic(library):
     _, page, prompts, _, _ = library
     await page.locator('#input').fill('Keep my draft through presentation changes')
-    await page.locator('#dream-inspect-toggle').click()
+    await more(page, 'dream-inspect-toggle')
     await page.get_by_label('Workspace spacing').select_option('compact')
     await page.locator('#dream-banners-toggle').click()
     await page.get_by_role('button', name='Quiet / atmospheric', exact=True).click()
@@ -23,14 +24,15 @@ async def test_presentation_preferences_survive_reload_and_classic(library):
     await expect(page.locator('html')).to_have_attribute('data-banners', 'collapsed')
     await expect(page.locator('html')).to_have_attribute('data-atmosphere', 'quiet')
     await expect(page.locator('#input')).to_have_value('Keep my draft through presentation changes')
-    await page.locator('#dream-inspect-toggle').click()
+    await more(page, 'dream-inspect-toggle')
     await page.get_by_role('button', name='Use classic presentation', exact=True).click()
     await expect(page.locator('#studio-skills')).to_be_visible()
     await page.locator('#studio-skills').click()
     await expect(page.locator('#dream-skills-page')).to_be_visible()
     await page.locator('#dream-restore-design').click()
     await expect(page.locator('#studio-skills')).to_be_hidden()
-    await page.locator('#dream-inspect-toggle').click()
+    await page.locator('#dream-nav-chat').click()                     # no view shows the page's bars (DREAM-242): Context is under Chat's More
+    await more(page, 'dream-inspect-toggle')
     await expect(page.get_by_label('Workspace spacing')).to_have_value('compact')
     await expect(page.locator('#dream-banners-toggle')).to_have_attribute('aria-expanded', 'false')
     assert prompts == []
@@ -102,23 +104,19 @@ async def test_project_catalog_and_responsive_compact_screens(library):
     await page.keyboard.press('ArrowDown')
     await page.keyboard.press('Enter')
     await expect(page.locator('#dream-projects-page .library-detail > .library-editor > h2')).to_have_text('Alpha')
-    await page.locator('#dream-inspect-toggle').click()
+    await page.locator('#dream-nav-chat').click()                     # no view shows the page's bars (DREAM-242): Context is under Chat's More
+    await more(page, 'dream-inspect-toggle')
     await page.get_by_label('Workspace spacing').select_option('compact')
     await page.locator('#dream-banners-toggle').click()
     await page.get_by_role('button',name='Close context',exact=True).click()
+    await page.locator('#dream-nav-projects').click()
     for width,height in [(390,844),(720,520),(1280,800)]:
         await page.set_viewport_size({'width':width,'height':height})
         await page.locator('#dream-projects-page').evaluate('(e)=>e.scrollTop=0')
         assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth')
         await expect(page.locator('#studio-project')).to_be_hidden()
         await expect(page.locator('#dream-nav-projects')).to_be_visible()
-        if width <= 900:
-            await page.locator('#dream-workspace-tools > summary').click()
-            await expect(page.locator('#studio-new')).to_be_visible()
-            await page.locator('#studio-new').focus()
-            await page.keyboard.press('Escape')
-            await expect(page.locator('#dream-workspace-tools > summary')).to_be_focused()
-            await expect(page.locator('#studio-new')).to_be_hidden()
+        await expect(page.locator('#dream-workbar')).to_be_hidden()    # the work bar and its Tools menu are not shown in any view (DREAM-242)
         await expect(page.get_by_label('Filter projects')).to_be_visible()
         await page.screenshot(path=f'/tmp/dream-usability-projects-{width}.png')
     assert prompts == []
@@ -128,14 +126,21 @@ async def test_project_catalog_and_responsive_compact_screens(library):
 async def test_compact_mobile_approval_is_visible(library):
     srv,page,_,_,_=library
     await page.set_viewport_size({'width':390,'height':844})
-    await page.locator('#dream-inspect-toggle').click()
+    await more(page, 'dream-inspect-toggle')
     await page.get_by_label('Workspace spacing').select_option('compact')
     await page.get_by_role('button',name='Close context',exact=True).click()
     await page.locator('#dream-nav-projects').click()
     pending=asyncio.create_task(srv.request_permission('run_bash', {'command':'pwd'}, 'Fixture approval', {'y':'Allow once','n':'Deny'}))
     await expect(page.locator('.permission-card')).to_be_visible()
-    await expect(page.locator('#dream-approval-return')).to_be_visible()
     await expect(page.locator('#dream-projects-page')).to_be_hidden()
+    # Chat shows no bars (DREAM-240): there the card itself says it; on the Artifacts tab the work bar's "Approval
+    # waiting" is a chip under the composer, and it leads back to the card.
+    await expect(page.locator('#cn-approval')).to_be_hidden()
+    await page.locator('#dream-nav-studio').click()
+    await expect(page.locator('#cn-approval')).to_have_text('Approval waiting')
+    await page.locator('#cn-approval').click()
+    await expect(page.locator('html')).to_have_attribute('data-dream-view', 'chat')
+    await expect(page.locator('.permission-card')).to_be_visible()
     await page.get_by_role('button',name='Deny',exact=True).click()
     assert await pending == 'n'
     assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth')

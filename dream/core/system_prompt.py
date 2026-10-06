@@ -96,6 +96,16 @@ later step re-learns it. Write big files in parts (`write_file` with `append: tr
 hard output ceiling in tokens (the session's max_tokens, less when the context window is \
 nearly full); a reply that reaches it is cut off and any tool call in it is discarded, so plan \
 long code in chunks — one file or one script per call, never the whole thing in one reply.
+- **Building something the user can see.** Asked to build, make or design a website, page, app, \
+game, chart or diagram: one self-contained `index.html` in a new folder named for it \
+(`coffee-shop/index.html`); it opens in a panel beside the chat on its own. CSS in `<style>`, JS in \
+`<script>`; https CDN scripts, fonts and images are fine (the preview has the internet), local files \
+beside it are fine, ES modules included; no localStorage. Write it with `write_file` in parts under \
+~200 lines: the whole page with its styles first, then the script with `str_replace_edit` before \
+`</body>`, so every state is a valid page (a reply over the output limit is cut off and its tool call \
+discarded). To change it, edit the SAME file with `str_replace_edit`, never a new name; the panel reloads \
+and keeps a version. End with `done(path)` (it reports console errors; fix and call again), then two or \
+three sentences on what you built and what they can ask next; never paste the page into the chat.
 - **Recall before you act.** If a task touches something you might already know, \
 `recall` first — and before saving a fact, recall it so you update in place instead of \
 duplicating.
@@ -290,6 +300,13 @@ resolve a blocker. Continue authorized useful work while waiting.
 Each reply has a hard output ceiling in tokens (the session's max_tokens, less when the context
 window is nearly full); a reply that reaches it is cut off and its tool call is discarded, so plan
 long code in chunks: one file or one script per call.
+Building something the user can see: one
+self-contained `index.html` in a new folder named for it (`coffee-shop/index.html`), CSS in `<style>`,
+JS in `<script>`, https CDNs and local files (ES modules too) fine, no localStorage; it opens in a panel
+beside the chat on its own. Write it with `write_file` in parts under ~200 lines (the whole page with its styles
+first, then the script with `str_replace_edit` before `</body>`). Edit the SAME file with
+`str_replace_edit`, never a new name. End with `done(path)`, then two or three sentences; never
+paste the page into the chat.
 """
 
 

@@ -89,7 +89,8 @@ if(COMPANION){
     footer.id = 'studio-composer';
     footer.insertAdjacentHTML('afterbegin', '<div id="chat-progress" role="status" hidden>Waiting for first text…</div>');
     input.placeholder = 'Message Dream…'; input.setAttribute('aria-label', 'Message Dream');
-    $('send').insertAdjacentHTML('beforebegin', '<button id="stop" hidden>Stop</button>');
+    // Stop comes last: while a turn runs it is the round primary button where Send was, after Queue and Steer (chat.css).
+    $('steer').insertAdjacentHTML('afterend', '<button id="stop" hidden title="Stop this turn">Stop</button>');
     $('stop').onclick = async () => {
       $('stop').disabled = true;
       try {
@@ -231,6 +232,7 @@ if(COMPANION){
       for(const a of artifacts.values()) sel.add(new Option(a.title, a.key));
       sel.value = selected || '';
       body.classList.toggle('has-artifacts', artifacts.size > 0);
+      window.dispatchEvent(new Event('dream:artifacts'));   // the Artifacts tab's list follows (artifacts.js)
     }
     function paint(a){
       clearTimeout(frameTimer);
@@ -283,9 +285,14 @@ if(COMPANION){
       },
       status(on){
         $('stat').textContent = on ? 'Working' : socket?.readyState === 1 ? 'Ready' : 'Connecting';
+        // Idle, Send is the round primary button; while a turn runs it reads Queue beside Steer, and Stop is the round one.
+        document.querySelector('.composer').classList.toggle('working', on);
+        $('send').title = on ? 'Queue this message for after the current turn' : 'Send · Enter (Shift+Enter for a new line)';
         if(on && $('chat-progress').hidden) $('chat-progress').textContent = 'Waiting for first text…';
         $('chat-progress').hidden = !on;
       },
+      // The first text of a reply: without a timing sample yet, the line stops saying it waits for it.
+      writing(){ if($('chat-progress').textContent === 'Waiting for first text…') $('chat-progress').textContent = 'Writing reply'; },
       progress(info){
         if(!working || !info) return;
         const seconds = Math.max(0, Math.floor(info.elapsed_s || 0));
@@ -320,6 +327,10 @@ if(COMPANION){
         });
       },
       openArtifact(opts){
+        // Beside the chat (DREAM-233): the panel takes the room right of the conversation; the drawer, the
+        // inspector, the view and the focus stay exactly where they were.
+        if(opts?.chat){ body.classList.add('has-artifact', 'chat-art'); $('studio-empty').hidden = true; artifactsChanged(); return; }
+        body.classList.remove('chat-art');
         // A mirrored show is the model's own view, not a handoff (DREAM-104): it
         // changes the canvas only; the owner's drawer, inspector and focus stay put.
         if(!opts?.mirror) closeInspector();
@@ -328,11 +339,14 @@ if(COMPANION){
         if(!opts?.mirror && !stream.querySelector('.qform')) drawer(false);
       },
       closeArtifact(){
-        clearTimeout(frameTimer); frameReady = false;
-        artbody.replaceChildren(); body.classList.remove('has-artifact');
+        const chat = body.classList.contains('chat-art');
+        clearTimeout(frameTimer); frameReady = false; artChat = false;
+        artbody.replaceChildren(); body.classList.remove('has-artifact', 'chat-art');
         $('studio-empty').hidden = false; $('studio-frame-error').hidden = true; $('studio-loading').hidden = true;
-        panel.setAttribute('aria-busy', 'false'); closeInspector(); artifactsChanged();
+        panel.setAttribute('aria-busy', 'false'); artifactsChanged();
         $('studio-foot-note').textContent = 'Enter to send · Shift+Enter for a new line';
+        if(chat) return;   // the chat is back at full width; nothing moves the focus (DREAM-233)
+        closeInspector();
         $('studio-artifacts').focus();
       },
       paintArtifact: paint,

@@ -1,12 +1,13 @@
-"""DREAM-151: the engine's parallel lanes are a Dream setting.
+"""DREAM-151's global engine lanes, retired by the owner's settings plan of 2026-10-01 ("just remove 2 since its a
+duplicate"): a model's parallel and sub-agent context are its own launch settings, on the load screen, saved per model.
 
-`engine.parallel` (1-16, the engine's --parallel range; DREAM-201 raised it from 4, the range of the first lanes engine)
-and `engine.slot_ctx` (0 = the engine's own size, else at least 9 tokens) live in the global runtime settings file only; a project file may not set them (S5's forbidden list covers
-`engine`). `dream settings`, /settings and the Settings tab show and change them; they apply the next time Dream starts
-the local engine. `dream settings check` compares them with what the running engine serves (its /props total_slots)
-when they are set, and asks nothing when they are not (DREAM-148's rule).
+`engine.parallel` / `engine.slot_ctx` are no longer settings: `dream settings`, /settings and the Settings tab neither
+show nor change them, and a refused key writes nothing. A global file that still holds an engine section -- any shape
+-- loads without an error or a warning, `dream settings check` asks the engine nothing about lanes, and the next save
+through the settings writer drops the section. A project file may still not set `engine` (S5's forbidden list). The
+layout view (`dream engine layout`, the Settings tab's Local engine layout) still reports the lanes each server runs.
 
-No engine, no GPU: machx.BASE_URL points at an unroutable port or at a fake /props server on an ephemeral loopback port.
+No engine, no GPU: machx.BASE_URL points at an unroutable port or at a fake server on an ephemeral loopback port.
 """
 from __future__ import annotations
 
@@ -61,115 +62,60 @@ def _flat(text):
     return " ".join(text.split())
 
 
-# --- the section -------------------------------------------------------------------------------------------------
+# --- the retired section ----------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("engine", [{}, {"parallel": 1}, {"parallel": 4}, {"parallel": 2, "slot_ctx": 16384},
-                                    {"parallel": 5}, {"parallel": 16}, {"parallel": 16, "slot_ctx": 4096},
-                                    {"slot_ctx": 0}, {"slot_ctx": 9}, {"slot_ctx": 2**31 - 1}])
-def test_a_usable_engine_section(engine):
-    _write_global({"version": 1, "engine": engine})
-    assert settings.read()["engine"] == engine
-    assert settings.engine_launch() == engine
-
-
-BAD = [({"parallel": 0}, "engine.parallel"), ({"parallel": 17}, "engine.parallel"), ({"parallel": "2"}, "engine.parallel"),
-       ({"parallel": True}, "engine.parallel"), ({"parallel": 2.0}, "engine.parallel"), ({"parallel": None}, "engine.parallel"),
-       ({"slot_ctx": 8}, "engine.slot_ctx"), ({"slot_ctx": -1}, "engine.slot_ctx"), ({"slot_ctx": 2**31}, "engine.slot_ctx"),
-       ({"slot_ctx": "16k"}, "engine.slot_ctx"), ({"lanes": 2}, "engine"), ("two", "engine"), ([2], "engine")]
-
-
-@pytest.mark.parametrize("engine, named", BAD)
-def test_an_unusable_engine_section_is_refused_naming_it_and_never_rewritten(engine, named):
+@pytest.mark.parametrize("engine", [{}, {"parallel": 1}, {"parallel": 5}, {"parallel": 2, "slot_ctx": 16384},
+                                    {"parallel": 17}, {"parallel": "2"}, {"slot_ctx": 8}, {"lanes": 2}, "two", [2], None])
+def test_an_engine_section_of_any_shape_loads_and_is_read_by_nothing(engine):
     path = _write_global({"version": 1, "engine": engine})
     before = path.read_bytes()
-    for read in (settings.read, settings.read_global, settings.engine_launch):
-        with pytest.raises(ValueError) as info:
-            read()
-        assert named in str(info.value) and str(path) in str(info.value), str(info.value)
-    assert path.read_bytes() == before
-
-
-def test_unset_rows_say_who_decides_and_nothing_is_launched_differently():
+    assert settings.read()["engine"] == engine and settings.read_global()["engine"] == engine
     rows = settings.effective()
-    assert rows["engine.parallel"] == settings.Effective(settings.ENGINE_PARALLEL_DEFAULT, "default")
-    assert rows["engine.slot_ctx"] == settings.Effective(settings.ENGINE_SLOT_CTX_DEFAULT, "default")
-    assert "1 unless changed" in settings.ENGINE_PARALLEL_DEFAULT
-    assert settings.engine_launch() == {}
-    assert "engine.parallel" in settings.SETTABLE and "engine.slot_ctx" in settings.SETTABLE
+    assert not [key for key in rows if key.startswith("engine.")]
+    report = settings.check()
+    assert report["ok"] and report["errors"] == [] and report["warnings"] == [] and "engine" not in report["unknown_sections"]
+    assert "engine_lanes" not in report
+    assert path.read_bytes() == before                                # reading never rewrites it
 
 
-def test_the_default_rows_name_the_engines_lane_sizes():
-    """DREAM-154: the engine's own size is 32,768 tokens per extra lane for MiMo-V2.6 and DeepSeek-V4.1; DREAM-207: so
-    for Qwen3.8-Flash and the 35B-A3B class, and 65,536 for the 27B (q27_lane_ctx, its joint-step banks' default)."""
-    assert settings.ENGINE_SLOT_CTX_DEFAULT == "the engine's own (32,768 tokens per extra lane; Qwen3.8-27B: 65,536)"
+def test_the_engine_names_are_gone_from_the_module():
+    for name in ("ENGINE_SETTINGS", "MAX_LANES", "MAX_SLOT_CTX", "ENGINE_PARALLEL_DEFAULT", "ENGINE_SLOT_CTX_DEFAULT",
+                 "engine_launch", "nested_max_workers", "MAX_WORKERS"):
+        assert not hasattr(settings, name), name
+    assert not any(key.startswith("engine.") for key in settings.SETTABLE)
 
 
-# --- dream settings ---------------------------------------------------------------------------------------------
+# --- dream settings and /settings ------------------------------------------------------------------------------------
 
-def test_set_get_show_unset_through_dream_settings(capsys):
-    _write_global({"version": 1, "profile": "lean", "keep": {"unknown": "section"}})
-    code, out = _cli(capsys, "set", "engine.parallel", "2")
-    assert code == 0, out
-    note = json.loads(out)["note"]
-    assert "next time Dream starts the local engine" in note and "keeps its lanes" in note
-    saved = read_settings()
-    assert saved["engine"] == {"parallel": 2} and saved["profile"] == "lean" and saved["keep"] == {"unknown": "section"}
-    code, out = _cli(capsys, "get", "engine.parallel")
-    assert code == 0 and json.loads(out)["settings"] == {"engine.parallel": {"value": 2, "source": "global"}}
-    assert _cli(capsys, "set", "engine.slot_ctx", "16,384")[0] == 0
-    assert read_settings()["engine"] == {"parallel": 2, "slot_ctx": 16384}
-    shown = json.loads(_cli(capsys, "show")[1])["settings"]
-    assert shown["engine.slot_ctx"] == {"value": 16384, "source": "global"}
-    assert _cli(capsys, "unset", "engine.parallel")[0] == 0
-    assert read_settings()["engine"] == {"slot_ctx": 16384}
-    assert _cli(capsys, "unset", "engine.slot_ctx")[0] == 0
-    assert "engine" not in read_settings()                           # an emptied section goes too
-    code, out = _cli(capsys, "unset", "engine.parallel")
-    assert code == 0 and "was not set" in out
-
-
-@pytest.mark.parametrize("key, text", [("engine.parallel", "0"), ("engine.parallel", "17"), ("engine.parallel", "two"),
-                                       ("engine.parallel", "1.5"), ("engine.parallel", "-2"), ("engine.slot_ctx", "8"),
-                                       ("engine.slot_ctx", "-1"), ("engine.slot_ctx", "2147483648"),
-                                       ("engine.slot_ctx", "lots"), ("engine.lanes", "2")])
-def test_a_refused_value_names_the_key_and_writes_nothing(capsys, key, text):
-    path = _write_global({"version": 1, "engine": {"parallel": 2}})
+@pytest.mark.parametrize("argv", [("set", "engine.parallel", "2"), ("set", "engine.slot_ctx", "16384"),
+                                  ("unset", "engine.parallel"), ("set", "engine.parallel", "2", "--project")])
+def test_dream_settings_no_longer_sets_the_engine_and_writes_nothing(capsys, tmp_path, argv):
+    path = _write_global({"version": 1, "profile": "lean", "engine": {"parallel": 5}})
     before = path.read_bytes()
-    code, out = _cli(capsys, "set", key, text)
-    assert code == 2 and key in out, out
-    assert path.read_bytes() == before
-
-
-def test_sixteen_lanes_are_accepted_and_seventeen_and_zero_refused_naming_the_range(capsys):
-    """DREAM-201: the engine serves up to 16 requests at once (`ie serve --parallel N`, N = 1..16, engine v0.2.0);
-    engine.parallel takes the whole range, a refusal says what the range is, and the default stays unset (each
-    model's own launch setting, 1): Dream never picks 16 on its own."""
-    assert settings.engine_launch() == {} and "1 unless changed" in settings.ENGINE_PARALLEL_DEFAULT
-    path = _write_global({"version": 1, "profile": "lean"})
-    code, out = _cli(capsys, "set", "engine.parallel", "16")
-    assert code == 0, out
-    assert read_settings()["engine"] == {"parallel": 16}
-    code, out = _cli(capsys, "get", "engine.parallel")
-    assert code == 0 and json.loads(out)["settings"] == {"engine.parallel": {"value": 16, "source": "global"}}
-    assert settings.engine_launch() == {"parallel": 16} and settings.MAX_LANES == 16
-    before = path.read_bytes()
-    for text in ("17", "0"):
-        code, out = _cli(capsys, "set", "engine.parallel", text)
-        assert code == 2 and "engine.parallel" in out and "from 1 to 16" in out, out
-        assert path.read_bytes() == before
-
-
-def test_the_project_scope_is_refused_and_writes_nothing(capsys, tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
-    for argv in (("set", "engine.parallel", "2"), ("unset", "engine.parallel"), ("set", "engine.slot_ctx", "9")):
-        code, out = _cli(capsys, *argv, "--project", "--workspace", str(ws))
-        assert code == 2 and argv[1] in out and "global" in out and "project file may not set" in out, out
-    assert not (ws / ".dream").exists()
-    assert not settings_path().exists()
+    extra = ("--workspace", str(ws)) if "--project" in argv else ()
+    code, out = _cli(capsys, *argv, *extra)
+    assert code == 2 and argv[1] in out and "not a setting" in out, out
+    assert path.read_bytes() == before and not (ws / ".dream").exists()
 
 
-def test_a_project_file_that_sets_the_engine_is_ignored_as_a_whole(tmp_path):
+def test_dream_settings_show_lists_no_engine_row(capsys):
+    _write_global({"version": 1, "engine": {"parallel": 5}})
+    code, out = _cli(capsys, "show")
+    assert code == 0 and not [key for key in json.loads(out)["settings"] if key.startswith("engine.")]
+
+
+def test_the_next_save_drops_the_engine_section(capsys):
+    _write_global({"version": 1, "profile": "lean", "engine": {"parallel": 5, "slot_ctx": 4096},
+                   "keep": {"unknown": "section"}})
+    assert _cli(capsys, "set", "output.max_tokens", "4096")[0] == 0
+    saved = read_settings()
+    assert "engine" not in saved and saved["output"] == {"max_tokens": 4096}
+    assert saved["profile"] == "lean" and saved["keep"] == {"unknown": "section"}
+
+
+def test_a_project_file_that_sets_the_engine_is_still_ignored_as_a_whole(tmp_path):
     _write_global({"version": 1, "engine": {"parallel": 2}})
     ws = tmp_path / "ws"
     (ws / ".dream").mkdir(parents=True)
@@ -177,113 +123,19 @@ def test_a_project_file_that_sets_the_engine_is_ignored_as_a_whole(tmp_path):
     settings.set_workspace(ws)
     with pytest.raises(ValueError, match="may not set engine"):
         settings.read()
-    assert settings.engine_launch() == {"parallel": 2}                  # the global file only, always
     rows = settings.effective(strict=False)
-    assert rows["engine.parallel"] == settings.Effective(2, "global")
     assert rows["output.max_tokens"].source != "project"                 # the whole project file is ignored
     assert any("could not be used and is ignored" in note and "engine" in note for note in settings.role_notes("machx"))
 
 
-def test_the_tui_settings_command_sets_and_shows_the_lanes(tmp_path):
+def test_the_tui_settings_command_refuses_the_engine(tmp_path):
     app = App(provider="machx", model="lead-model", workspace=tmp_path)
     app.engine = SimpleNamespace(store=None, backend=SimpleNamespace(n_ctx=None), provider=get_provider("machx"),
                                  model="lead-model")
     app.renderer.console = Console(file=io.StringIO(), width=200, force_terminal=False, color_system=None)
     asyncio.run(app._command("/settings set engine.parallel 3"))
-    asyncio.run(app._command("/settings get engine.parallel"))
-    asyncio.run(app._command("/settings set engine.parallel 3 --project"))
     out = _flat(app.renderer.console.file.getvalue())
-    assert "engine.parallel: applies to the next time Dream starts the local engine" in out
-    assert "engine.parallel 3 global" in out
-    assert read_settings()["engine"] == {"parallel": 3}
-    assert "project file may not set" in out
-
-
-# --- dream settings check against the running engine -------------------------------------------------------------
-
-class _Props(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.server.requests.append(self.path)
-        status, body = self.server.answer.get(self.path, (404, {"error": "no such path"}))
-        data = json.dumps(body).encode()
-        self.send_response(status)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def log_message(self, *args):
-        pass
-
-
-@pytest.fixture
-def engine(monkeypatch):
-    """A fake engine front on an ephemeral loopback port: /props with `total_slots`, /v1/models; every path kept."""
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _Props)
-    server.requests = []
-    server.answer = {}
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base = f"http://127.0.0.1:{server.server_address[1]}/v1"
-    monkeypatch.setattr(machx, "BASE_URL", base)
-
-    def serve(slots):
-        props = {"default_generation_settings": {"n_ctx": 32768}}
-        if slots is not None:
-            props["total_slots"] = slots
-        server.answer = {"/props": (200, props), "/v1/models": (200, {"object": "list", "data": [{"id": "lead-model"}]})}
-    yield SimpleNamespace(serve=serve, requests=server.requests, base=base, root=base.removesuffix("/v1"))
-    server.shutdown()
-    server.server_close()
-    thread.join(5)
-
-
-def _lanes_warnings(report):
-    return [w for w in report["warnings"] if w.startswith("engine.")]
-
-
-@pytest.mark.parametrize("lanes", [2, 16])
-def test_check_reports_the_lanes_the_running_engine_serves(capsys, engine, lanes):
-    engine.serve(lanes)
-    _write_global({"version": 1, "engine": {"parallel": lanes}})
-    code, out = _cli(capsys, "check")
-    report = json.loads(out)
-    assert code == 0 and report["ok"] is True and _lanes_warnings(report) == []
-    assert report["engine_lanes"].startswith(f"the running engine at {engine.root} serves {lanes} lanes")
-    assert engine.requests == ["/props"]
-
-
-@pytest.mark.parametrize("slots, served", [(1, "1 lane"), (4, "4 lanes"), (16, "16 lanes"), (None, None)])
-def test_check_warns_when_the_running_engine_serves_other_lanes(capsys, engine, slots, served):
-    engine.serve(slots)
-    _write_global({"version": 1, "engine": {"parallel": 2}})
-    report = json.loads(_cli(capsys, "check")[1])
-    [warning] = _lanes_warnings(report)
-    assert warning.startswith("engine.parallel: 2 lanes are set, but the running engine")
-    assert "the next time Dream starts the engine" in warning
-    assert warning.endswith("only to a model that serves lanes (MiMo-V2.6, DeepSeek-V4.1, Qwen3.8-Flash, the 35B-A3B "
-                            "class and Qwen3.8-27B)")                                            # DREAM-154, DREAM-207
-    if served:
-        assert f"serves {served}" in warning and f"serves {served}" in report["engine_lanes"]
-    else:
-        assert "does not report" in report["engine_lanes"] and "does not report" in warning
-
-
-def test_check_asks_nothing_when_the_lanes_are_not_set(capsys, engine):
-    engine.serve(2)
-    _write_global({"version": 1})
-    report = json.loads(_cli(capsys, "check")[1])
-    assert engine.requests == [] and "not set" in report["engine_lanes"]
-    report = settings.check(provider="machx")
-    assert "not checked here" in report["engine_lanes"]
-
-
-def test_check_with_no_engine_running_is_a_line_never_an_error(capsys):
-    _write_global({"version": 1, "engine": {"parallel": 2}})
-    code, out = _cli(capsys, "check")
-    report = json.loads(out)
-    assert code == 0 and report["ok"] is True and _lanes_warnings(report) == []
-    assert report["engine_lanes"].startswith("engine not running; lanes not checked")
+    assert "engine.parallel is not a setting" in out and not settings_path().exists()
 
 
 # --- the Settings tab --------------------------------------------------------------------------------------------
@@ -304,87 +156,23 @@ def _rows(view):
     return {row["key"]: row for section in view["sections"] for row in section["rows"]}
 
 
-def test_the_settings_tab_shows_the_lanes_in_their_own_section(studio):
+def test_the_settings_tab_has_no_engine_lanes_and_reads_a_file_that_holds_them(studio):
     _, call = studio
+    _write_global({"version": 1, "engine": {"parallel": 17, "slot_ctx": 8}})      # values the old rules refused
     view = call({"action": "settings_get"})
-    lanes = next(s for s in view["sections"] if s["id"] == "lanes")
-    assert lanes["title"] == "Engine lanes" and "next" in lanes["intro"]
-    rows = {row["key"]: row for row in lanes["rows"]}
-    assert set(rows) == {"engine.parallel", "engine.slot_ctx"}
-    parallel = rows["engine.parallel"]
-    assert parallel["edit"] == {"kind": "number", "min": 1, "max": 16, "value": None}
-    assert parallel["origin"] == "default" and "1 unless changed" in parallel["display"]
-    assert parallel["restart"] is True and parallel["restart_label"] == "Engine restart"
-    assert "next time Dream starts the local engine" in parallel["applies"]
-    assert "images" in parallel["help"].lower() and "1" in parallel["help"]
-    # DREAM-201: the range is the engine's 1 to 16; the help says every extra lane reserves VRAM at load (out of the
-    # expert cache, so more lanes can slow each one), to set the agents really run at once with a realistic context
-    # per extra lane, that the engine refuses a count that does not fit, and that a change needs an engine restart.
-    help_text = parallel["help"]
-    assert "1 to 16" in help_text and "1 to 4" not in help_text
-    for words in ("VRAM", "expert cache", "really run at once", "16,384", "refuses", "smaller context", "restart"):
-        assert words in help_text, words
-    # DREAM-154: both lanes models are named; images need 1 lane on MiMo only, and V4.1 lanes need two cards.
-    assert "MiMo-V2.6" in parallel["help"] and "DeepSeek-V4.1" in parallel["help"]
-    assert "MiMo-V2.6 takes images at 1 only" in parallel["help"] and "two cards" in parallel["help"]
-    assert "32,768" in rows["engine.slot_ctx"]["help"] and "65,536 on Qwen3.8-27B" in rows["engine.slot_ctx"]["help"]
-    assert rows["engine.slot_ctx"]["edit"]["min"] == 0 and rows["engine.slot_ctx"]["edit"]["max"] == 2**31 - 1
-    engine = next(s for s in view["sections"] if s["id"] == "engine")
-    assert not any(row["key"] in rows for row in engine["rows"])        # the layout section stays read-only
+    assert view["ok"] is True and view["warnings"] == []
+    assert not [s for s in view["sections"] if s["id"] == "lanes"]
+    assert not {"engine.parallel", "engine.slot_ctx"} & set(_rows(view))
 
 
-def test_the_settings_tab_saves_and_removes_the_lanes(studio):
-    _, call = studio
-    result = call({"action": "settings_save", "key": "engine.parallel", "value": "2"})
-    assert result["key"] == "engine.parallel" and "next time Dream starts the local engine" in result["applies"]
-    row = _rows(result["settings"])["engine.parallel"]
-    assert row["origin"] == "global" and row["display"] == "2" and row["edit"]["value"] == 2
-    call({"action": "settings_save", "key": "engine.slot_ctx", "value": 16384})
-    assert read_settings()["engine"] == {"parallel": 2, "slot_ctx": 16384}
-    result = call({"action": "settings_save", "key": "engine.parallel", "value": None})
-    assert _rows(result["settings"])["engine.parallel"]["origin"] == "default"
-    call({"action": "settings_save", "key": "engine.slot_ctx", "value": None})
-    assert "engine" not in read_settings()
-
-
-@pytest.mark.parametrize("key, value", [("engine.parallel", "17"), ("engine.parallel", "0"), ("engine.parallel", "x"),
-                                        ("engine.parallel", True), ("engine.parallel", 2.5), ("engine.slot_ctx", "8"),
-                                        ("engine.slot_ctx", {"x": 1})])
-def test_the_settings_tab_refuses_a_bad_value_naming_the_key(studio, key, value):
+@pytest.mark.parametrize("key", ["engine.parallel", "engine.slot_ctx"])
+def test_the_settings_tab_refuses_the_engine_keys_and_writes_nothing(studio, key):
     _, call = studio
     path = _write_global({"version": 1, "engine": {"parallel": 2}})
     before = path.read_bytes()
-    error = call({"action": "settings_save", "key": key, "value": value}, status=400)
-    assert key in str(error)
+    error = call({"action": "settings_save", "key": key, "value": "2"}, status=400)
+    assert str(error) == f"{key} cannot be changed here."
     assert path.read_bytes() == before
-
-
-def test_the_settings_tab_takes_sixteen_lanes_and_names_the_range_when_it_refuses(studio):
-    """DREAM-201: the tab's number field takes the engine's whole range, and 17 or 0 is refused with the range."""
-    _, call = studio
-    result = call({"action": "settings_save", "key": "engine.parallel", "value": "16"})
-    row = _rows(result["settings"])["engine.parallel"]
-    assert row["origin"] == "global" and row["display"] == "16" and row["edit"]["value"] == 16
-    assert read_settings()["engine"] == {"parallel": 16}
-    for value in ("17", 17, "0"):
-        error = str(call({"action": "settings_save", "key": "engine.parallel", "value": value}, status=400))
-        assert "engine.parallel" in error and "1 to 16" in error, error
-    assert read_settings()["engine"] == {"parallel": 16}
-
-
-def test_the_settings_tab_refuses_the_project_scope_plainly(studio, tmp_path):
-    _, call = studio
-    error = str(call({"action": "settings_save", "key": "engine.parallel", "value": "2", "scope": "project"},
-                     status=400))
-    assert "engine.parallel" in error and "this computer" in error and "cannot be used" not in error
-    assert not (tmp_path / ".dream").exists() and not settings_path().exists()
-
-
-def test_an_unusable_engine_entry_is_named_in_the_tab(studio):
-    _, call = studio
-    _write_global({"version": 1, "engine": {"parallel": 17}})
-    view = call({"action": "settings_get"})
-    assert view["ok"] is False and "the engine.parallel entry is not valid" in view["error"]
 
 
 # --- dream engine layout: the lanes each server runs -------------------------------------------------------------
