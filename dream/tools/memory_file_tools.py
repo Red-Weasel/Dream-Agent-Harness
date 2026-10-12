@@ -165,15 +165,17 @@ async def _finish_async(mem: dict[str, Any], verb: str) -> dict[str, Any]:
     that is what the cap is about: the file the user opens. ``mem['project']`` is
     the project it is written in (DREAM-108); ``mem['reassign']`` moves it there."""
     # Measured on what will be persisted: the store stamps both timestamps, and
-    # a render without them is ~50 chars short of the file the user opens.
+    # a render without them is ~50 chars short of the file the user opens; the
+    # file also names the session that wrote it (its source_session line).
+    c = ctx()
     probe = dict(mem)
     stamp = _now()
     probe["created_at"] = probe.get("created_at") or stamp
     probe["updated_at"] = stamp
+    probe["source_session"] = c.session_id
     text = longterm._render(probe)
     if len(text) > config.MEMORY_FILE_MAX:
         return err(f"{mem['slug']}: refused — {longterm.near_cap(text)}. Nothing was written.")
-    c = ctx()
     try:
         row = await in_thread(
             c.store.upsert_memory, kind=mem["kind"], title=mem["title"], body=mem["body"],

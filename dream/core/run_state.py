@@ -13,7 +13,6 @@ import os
 from pathlib import Path
 import re
 import stat
-import io
 import tempfile
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -43,14 +42,114 @@ def atomic_write(path: Path, text: str) -> None:
             os.unlink(temporary)
 
 
+# Bound individual allocations and the complete stream independently. Frequent
+# action/event records use version-2 top-level deltas; old full-state ledgers
+# remain readable. Hitting either ceiling stops writes visibly, never discards
+# history. This is a capacity bound, not a 12-hour endurance claim.
+MAX_RECORD_BYTES = 2 * 1024 * 1024
+MAX_LEDGER_BYTES = 512 * 1024 * 1024
+
+
+def _bounded_lines(source):
+    total = 0
+    while True:
+        line = source.readline(MAX_RECORD_BYTES + 1)
+        if not line:
+            return
+        size = len(line.encode('utf-8')) if isinstance(line, str) else len(line)
+        total += size
+        if size > MAX_RECORD_BYTES or total > MAX_LEDGER_BYTES:
+            raise ValueError('Run ledger exceeds bounded reader capacity')
+        yield line.decode('utf-8') if isinstance(line, bytes) else line
+
+
 RUN_PHASES = frozenset({'contract_needed', 'contract_running', 'ready', 'worker_running', 'review_pending'})
 RUN_STATUSES = frozenset({'running', 'done', 'unverified', 'need_input', 'budget', 'stopped', 'error'})
+
+
+def validate_child_delegations(state: dict) -> None:
+    """Validate host ownership records; absence preserves older run journals."""
+    managed = state.get('managed', {})
+    children = managed.get('children', {})
+    def invalid():
+        raise ValueError('Invalid managed child delegation')
+    if type(children) is not dict or len(children) > 64:
+        invalid()
+    workers = set()
+    fields = {'version', 'delegation_id', 'parent_run_id', 'task_id', 'project', 'revision',
+              'contract_sha256', 'worker_id', 'session_id', 'call_id',
+              'arguments_sha256', 'execution_sha256', 'parent_scope_sha256'}
+    for identity, record in children.items():
+        if (not isinstance(identity, str) or re.fullmatch(r'[0-9a-f]{32}', identity) is None
+                or type(record) is not dict or set(record) != {'binding', 'status', 'completion'}):
+            invalid()
+        binding = record['binding']
+        if (type(binding) is not dict or set(binding) != fields
+                or type(binding['version']) is not int or binding['version'] != 1
+                or binding['delegation_id'] != identity
+                or binding['parent_run_id'] != state.get('run_id')):
+            invalid()
+        for key in ('task_id', 'project', 'revision', 'contract_sha256'):
+            if type(binding[key]) is not type(managed[key]) or binding[key] != managed[key]:
+                invalid()
+        worker = binding['worker_id']
+        if (not isinstance(worker, str) or re.fullmatch(r'[0-9a-f]{32}', worker) is None
+                or worker in workers):
+            invalid()
+        workers.add(worker)
+        for key in ('session_id', 'call_id'):
+            if not isinstance(binding[key], str) or not binding[key].strip() or len(binding[key]) > 256:
+                invalid()
+        for key in ('arguments_sha256', 'execution_sha256', 'parent_scope_sha256'):
+            if not isinstance(binding[key], str) or re.fullmatch(r'[0-9a-f]{64}', binding[key]) is None:
+                invalid()
+        if record['status'] not in ('reserved', 'returned'):
+            invalid()
+        completion = record['completion']
+        if record['status'] == 'reserved':
+            if completion is not None:
+                invalid()
+            continue
+        if (type(completion) is not dict
+                or set(completion) != {'completion_seq', 'outcome', 'snapshot_receipt', 'result_sha256'}
+                or type(completion['completion_seq']) is not int or completion['completion_seq'] < 1
+                or completion['outcome'] not in ('completed', 'incomplete')
+                or not isinstance(completion['result_sha256'], str)
+                or re.fullmatch(r'[0-9a-f]{64}', completion['result_sha256']) is None):
+            invalid()
+        receipt = completion['snapshot_receipt']
+        fields_receipt = {'version', 'handle', 'sha256', 'full_bytes', 'workspace_key',
+                          'session_key', 'run_key', 'call_key'}
+        if (type(receipt) is not dict or set(receipt) != fields_receipt
+                or type(receipt['version']) is not int or receipt['version'] != 1
+                or type(receipt['full_bytes']) is not int or not 0 <= receipt['full_bytes'] <= 8 * 1024 * 1024
+                or not isinstance(receipt['handle'], str)):
+            invalid()
+        match = re.fullmatch(r'dream-artifact:v1:([0-9a-f]{64}):([0-9a-f]{64}):'
+                             r'([0-9a-f]{64}):([0-9a-f]{64}):([0-9a-f]{64}):(0|[1-9][0-9]{0,9})', receipt['handle'])
+        if (match is None or receipt['full_bytes'] != int(match[6])
+                or any(receipt[k] != v for k, v in zip(
+                    ('workspace_key', 'session_key', 'run_key', 'call_key', 'sha256'), match.groups()[:5]))
+                or receipt['session_key'] != digest(binding['session_id'])
+                or receipt['run_key'] != digest(worker)):
+            invalid()
+    for action in (*managed.get('unresolved', {}).values(), *managed.get('recent', [])):
+        if isinstance(action, dict) and 'delegation_id' in action:
+            identity = action['delegation_id']
+            if not isinstance(identity, str) or identity not in children:
+                invalid()
 
 
 def validate_state_fields(state: dict) -> None:
     """Validate known fields when present, preserving generic partial journals."""
     def invalid(field):
         raise ValueError(f"Invalid run state field: {field}")
+
+    if state.get('parent_context') is not None:
+        from .parent_continuation import validate_reference
+        validate_reference(state['parent_context'], run_id=state.get('run_id'))
+    if 'parent_context_superseded' in state and type(state['parent_context_superseded']) is not bool:
+        invalid('parent_context_superseded')
 
     def enum(field, choices, *, nullable=False):
         if field in state:
@@ -75,6 +174,38 @@ def validate_state_fields(state: dict) -> None:
         if field in state and (not isinstance(state[field], str)
                                or re.fullmatch(r'[0-9a-fA-F]{64}', state[field]) is None):
             invalid(field)
+    if 'standing_rules' in state and not isinstance(state['standing_rules'], str):
+        invalid('standing_rules')
+    if 'managed' in state:
+        managed = state['managed']
+        required = {'version', 'task_id', 'project', 'revision', 'contract_sha256',
+                    'unresolved', 'recent', 'action_revision', 'evidence_chain',
+                    'receipt', 'completed_receipt', 'boundary', 'generation'}
+        if not isinstance(managed, dict) or not required <= managed.keys():
+            invalid('managed')
+        if type(managed['version']) is not int or managed['version'] != 1:
+            invalid('managed.version')
+        for key, minimum in (('task_id', 1), ('revision', 1), ('action_revision', 0), ('generation', 0)):
+            if type(managed[key]) is not int or managed[key] < minimum:
+                invalid('managed.' + key)
+        if not isinstance(managed['project'], str):
+            invalid('managed.project')
+        for key in ('contract_sha256', 'evidence_chain'):
+            if not isinstance(managed[key], str) or re.fullmatch(r'[0-9a-f]{64}', managed[key]) is None:
+                invalid('managed.' + key)
+        if (not isinstance(managed['unresolved'], dict) or len(managed['unresolved']) > 128
+                or not isinstance(managed['recent'], list) or len(managed['recent']) > 16):
+            invalid('managed.actions')
+        for action_id, action in managed['unresolved'].items():
+            if (not isinstance(action, dict) or action.get('id') != action_id
+                    or action.get('disposition') not in {'intent', 'error', 'interrupted', 'unknown'}):
+                invalid('managed.unresolved')
+        for key in ('receipt', 'boundary'):
+            if managed[key] is not None and not isinstance(managed[key], dict):
+                invalid('managed.' + key)
+        if managed['completed_receipt'] is not None and not isinstance(managed['completed_receipt'], str):
+            invalid('managed.completed_receipt')
+        validate_child_delegations(state)
     result = state.get('result')
     if result is not None:
         if not isinstance(result, dict) or set(result) - {'status', 'iterations', 'message', 'workspace', 'run_id'}:
@@ -122,9 +253,9 @@ def _note_from_record(record: dict) -> ReconciliationNote | None:
     return ReconciliationNote(record['state']['run_id'], record['seq'], record['at'], text)
 
 
-def _read_ledger(source, run_id: str) -> tuple[dict, int, tuple[ReconciliationNote, ...]]:
+def _read_ledger(source, run_id: str, *, metadata: dict | None = None) -> tuple[dict, int, tuple[ReconciliationNote, ...]]:
     state, seq, notes = {}, 0, ()
-    for line in source:
+    for line in _bounded_lines(source):
         # Decoded escapes, including unknown keys/values, must
         # remain representable by the existing ledger writer.
         try:
@@ -134,7 +265,15 @@ def _read_ledger(source, run_id: str) -> tuple[dict, int, tuple[ReconciliationNo
             raise ValueError('Run ledger exceeds supported nesting depth') from exc
         except UnicodeEncodeError as exc:
             raise ValueError('Run ledger contains text that cannot be encoded as UTF-8') from exc
-        if not isinstance(record, dict) or not isinstance(record.get('state'), dict):
+        if not isinstance(record, dict):
+            raise ValueError('Invalid run ledger record shape')
+        if record.get('version') == 2:
+            if not state or not isinstance(record.get('changes'), dict) or 'state' in record:
+                raise ValueError('Invalid delta run ledger record')
+            record['state'] = {**state, **record['changes']}
+        elif 'version' in record:
+            raise ValueError('Unsupported run ledger version')
+        if not isinstance(record.get('state'), dict):
             raise ValueError('Invalid run ledger record shape')
         if (not line.endswith('\n') or type(record.get('seq')) is not int
                 or record['seq'] != seq + 1):
@@ -150,6 +289,8 @@ def _read_ledger(source, run_id: str) -> tuple[dict, int, tuple[ReconciliationNo
             notes += (note,)
         seq = record['seq']
         state = record['state']
+        if metadata is not None:
+            metadata['updated_at'] = record['at']
     if not state:
         raise ValueError('Empty run ledger')
     return state, seq, notes
@@ -190,14 +331,11 @@ def inspect_run(root: Path, run_id: str) -> dict:
         ledger_fd = os.open('ledger.jsonl', os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=run_fd)
         with os.fdopen(ledger_fd, 'rb') as source:
             info = os.fstat(source.fileno())
-            limit = 2 * 1024 * 1024
-            if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_LEDGER_BYTES:
                 raise ValueError('Run ledger is not a bounded regular file')
-            raw = source.read(limit + 1)
-        if len(raw) > limit:
-            raise ValueError('Run ledger exceeds inspection limit')
-        state, seq, _ = _read_ledger(io.StringIO(raw.decode('utf-8')), run_id)
-        updated_at = json.loads(raw.splitlines()[-1])['at']
+            metadata = {}
+            state, seq, _ = _read_ledger(source, run_id, metadata=metadata)
+            updated_at = metadata['updated_at']
         if lock_fd is not None:
             try:
                 opened = os.fstat(lock_fd)
@@ -213,7 +351,8 @@ def inspect_run(root: Path, run_id: str) -> dict:
                 os.close(fd)
     recorded = state.get('status', 'unknown')
     interrupted_phase = state.get('phase') in {'contract_running', 'worker_running'}
-    reconciliation = bool(state.get('uncertain')) or (ownership != 'held' and interrupted_phase)
+    pending_children = any(c['status'] == 'reserved' for c in state.get('managed', {}).get('children', {}).values())
+    reconciliation = bool(state.get('managed', {}).get('unresolved')) or pending_children or bool(state.get('uncertain')) or (ownership != 'held' and interrupted_phase)
     status = recorded
     if recorded == 'running':
         status = {'held': 'running', 'free': 'stopped', 'unknown': 'unknown'}[ownership]
@@ -265,7 +404,7 @@ class RunState:
         """Read-only ordered projection of canonical resume_requested events."""
         return self._reconciliation_notes
 
-    def record(self, event: str, *, data: dict | None = None, **changes) -> None:
+    def record(self, event: str, *, data: dict | None = None, incremental: bool = False, **changes) -> None:
         if self.write_error is not None:
             raise RuntimeError('Cannot append after a failed run ledger write') from self.write_error
         if self._lock is None:
@@ -275,10 +414,17 @@ class RunState:
                   'event': event, 'data': data or {}, 'state': state}
         note = _note_from_record(record)
         projected_notes = self._reconciliation_notes + (note,) if note is not None else self._reconciliation_notes
+        if incremental and self.seq:
+            record = {k: v for k, v in record.items() if k != 'state'}
+            record.update(version=2, changes={**changes, 'run_id': self.run_id})
         encoded = (json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n').encode('utf-8')
+        if len(encoded) > MAX_RECORD_BYTES:
+            raise ValueError('Run record exceeds bounded reader capacity')
         fd = out = None
         try:
             fd = os.open(self.path / 'ledger.jsonl', os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+            if os.fstat(fd).st_size + len(encoded) > MAX_LEDGER_BYTES:
+                raise OSError('Run ledger capacity reached; reconcile/archive before continuing')
             # No buffered bytes may flush during cleanup after an append failure.
             out = os.fdopen(fd, 'wb', buffering=0)
             fd = None  # The stream now owns the descriptor.

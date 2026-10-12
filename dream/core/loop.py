@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +37,8 @@ from .backends.base import Event
 from .evaluator import ReviewSettings, ScopedReader, collect_review, review_backend
 from .run_state import RunState, atomic_write, digest, validate_state_fields
 from . import turn_origin
+from .task_checkpoints import ManagedTaskCoordinator, bind as bind_checkpoints
+from .recovery_runtime import RecoveryPending
 
 if TYPE_CHECKING:
     from .engine import Engine
@@ -208,6 +211,8 @@ class AutonomousLoop:
         evaluator_timeout: float | None = None,
         evaluator_backend_factory=None,
         state_dir: str | Path | None = None,
+        recovery_policy=None,
+        recovery_check_authority=None,
     ) -> None:
         self.engine = engine
         self.on_event = on_event
@@ -220,9 +225,13 @@ class AutonomousLoop:
         self.evaluator_model = evaluator_model
         self.evaluator_timeout = evaluator_timeout
         self.evaluator_backend_factory = evaluator_backend_factory
+        self.recovery_policy = recovery_policy
+        self._recovery_check_authority = recovery_check_authority or object()
         self.last_review: dict = {}
         self._journal: RunState | None = None
         self._active = False
+        self.checkpoints: ManagedTaskCoordinator | None = None
+        self._verification_authority = object()
         if max_iterations is not None and (type(max_iterations) is not int or max_iterations < 1):
             raise ValueError("max_iterations must be a positive integer or None for no iteration limit")
 
@@ -251,23 +260,27 @@ class AutonomousLoop:
             # The loop wrote this prompt, not the owner (DREAM-113). Set in this task's own context, so the
             # Engine logs it as Dream's and nothing outside the task sees the mark.
             turn_origin.current.set(turn_origin.LOOP)
-            events = self.engine.ask(prompt)
-            try:
-                while not stopping:
-                    advancing = True
-                    try:
-                        ev = await anext(events)
-                    except StopAsyncIteration:
-                        break
-                    finally:
-                        advancing = False
-                    if stopping:
-                        break
-                    acknowledged.clear()
-                    await queue.put(ev)
-                    await acknowledged.wait()
-            finally:
-                await events.aclose()
+            with bind_checkpoints(self.checkpoints, allow_tools=self._journal.state['phase'] != 'contract_running'):
+                events = self.engine.ask(prompt)
+                try:
+                    while not stopping:
+                        advancing = True
+                        try:
+                            ev = await anext(events)
+                        except StopAsyncIteration:
+                            break
+                        finally:
+                            advancing = False
+                        if stopping:
+                            break
+                        acknowledged.clear()
+                        await queue.put(ev)
+                        await acknowledged.wait()
+                except RecoveryPending:
+                    if not self.checkpoints or not self.checkpoints.pending_recovery:
+                        raise
+                finally:
+                    await events.aclose()
 
         worker = asyncio.create_task(produce(), name="dream-loop-turn")
         receive = None
@@ -283,11 +296,16 @@ class AutonomousLoop:
                 self._turn_observed = True
                 if self._journal and ev.kind in ("tool_use", "tool_result"):
                     data = ev.data if isinstance(ev.data, dict) else {}
-                    self._journal.record(ev.kind, data={
+                    self._journal.record(ev.kind, incremental=True, data={
                         "id": data.get("id"), "name": data.get("name"),
                         "is_error": data.get("is_error"), "payload_sha256": digest(str(ev.data)),
                         "boundary": "observed event; not proof of side-effect completion",
                     })
+                if self.checkpoints and self.checkpoints.pending_recovery:
+                    await self._emit(ev)
+                    stopping = True
+                    acknowledged.set()
+                    break
                 if ev.kind == "error" or (ev.kind == "result" and isinstance(ev.data, dict) and ev.data.get("is_error")):
                     raise RuntimeError(f"Worker failed: {ev.data}")
                 if ev.kind == "result" and isinstance(ev.data, dict) and ev.data.get("subtype") not in (None, "success"):
@@ -298,10 +316,17 @@ class AutonomousLoop:
                 await self._emit(ev)
                 acknowledged.set()
             return "\n".join(parts)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             cancelled = True
+            if self.checkpoints:
+                try:
+                    self.checkpoints.stop()
+                except Exception as storage_exc:
+                    exc.add_note(f'Recovery Stop persistence failed: {type(storage_exc).__name__}; inspect the ledger.')
             raise
         finally:
+            if self.checkpoints:
+                self.checkpoints.seal_actions()
             stopping = True
             acknowledged.set()
 
@@ -370,6 +395,48 @@ class AutonomousLoop:
             contract = "- The goal, as stated, is fully and verifiably achieved."
         atomic_write(self.workspace / "contract.md", f"# Contract\n\n{contract}\n")
         return contract
+
+    def _checkpoint_options(self):
+        return {}
+
+    def _can_assist(self):
+        return False
+
+    async def _assisted_recovery(self, goal, contract):
+        return False
+
+    def _attach_checkpoints(self, *, restore_artifacts=True):
+        tasks = getattr(self.engine, 'tasks', None)
+        if tasks is not None and self.checkpoints is None:
+            self.checkpoints = ManagedTaskCoordinator(
+                self._journal, tasks, verification_authority=self._verification_authority,
+                recovery_policy=self.recovery_policy,
+                recovery_check_authority=self._recovery_check_authority,
+                **self._checkpoint_options())
+            self.checkpoints.attach(standing_rules=getattr(self.engine, '_assembled_system_prompt', ''))
+        if restore_artifacts and self.checkpoints is not None:
+            restore = getattr(getattr(self.engine, 'backend', None), 'restore_checked_artifacts', None)
+            if callable(restore):
+                restore(self.checkpoints)
+
+    async def _checked_completion(self, receipt_id: str):
+        """Journal and task projection commit before an adapter may reset."""
+        coordinator = self.checkpoints
+        coordinator.seal_actions()
+        coordinator.complete_task(receipt_id)
+        boundary = getattr(getattr(self.engine, 'backend', None), 'checked_task_boundary', None)
+        if callable(boundary):
+            # Engine.ask binds inside its producer task; that context does not
+            # flow back into this caller. Bind this Engine explicitly, never ctx()'s
+            # process-global fallback, while committing the checked reset.
+            from ..tools.context import bind_context
+            context = getattr(self.engine, '_tool_context', None)
+            with bind_context(context) if context is not None else nullcontext():
+                with bind_checkpoints(coordinator):
+                    await boundary(coordinator)
+        else:
+            self._journal.record('boundary_unsupported', incremental=True, data={
+                'reason': 'backend has no checked reset adapter; completion receipt retained'})
 
     async def _evaluate(self, goal: str) -> tuple[str, str]:
         """Fresh, bounded review; unavailable infrastructure never produces PASS."""
@@ -474,23 +541,38 @@ class AutonomousLoop:
     def _seed(self, goal, contract):
         prompt = _SEED.format(goal=goal, contract=contract, workspace=str(self.workspace),
                               worker_workspace=str(self.worker_workspace))
+        guidance = self.checkpoints.recovery_guidance() if self.checkpoints else None
+        if guidance:
+            prompt += '\n\nHarness changed-approach recovery (JSON):\n' + json.dumps(guidance, ensure_ascii=False)
         if self._resuming:
             prompt += ("\nHarness resume guidance: Inspect progress and existing artifacts first. "
                        "Do not replay completed actions or uncertain side effects.")
         return prompt
 
     async def run(self, goal: str, *, resume_run_id: str | None = None,
-                  resume_note: str | None = None, acceptance_criteria: str | None = None) -> LoopResult:
+                  resume_note: str | None = None, acceptance_criteria: str | None = None,
+                  reconciled_actions: dict[str, str] | None = None) -> LoopResult:
         """Resume only by explicit ID. Uncertain worker turns require a human note.
 
+        ``reconciled_actions`` is an explicit trusted caller report by action ID;
+        ordinary notes never clear uncertain actual-handler effects.
         Completed runs return their recorded result. A pending review is rerun
         without rerunning the worker. Budgets apply to new worker steps in this
         invocation; result.iterations counts all steps across the durable run.
         """
         if self._active:
             raise RuntimeError("This loop is already running")
+        backend = getattr(self.engine, 'backend', None)
+        if (getattr(self.engine, 'tasks', None) is not None and backend is not None
+                and not getattr(backend, 'managed_action_receipts', False)):
+            return LoopResult('unverified', 0,
+                'Managed runs are unsupported on this backend: registered tool action receipts '
+                'are not available at its actual handler boundary. Use the compatible HTTP '
+                'backend for checked autonomous work; no contract or worker was dispatched.')
         self._active = True
         self._journal = None
+        self.checkpoints = None
+        self._verification_authority = object()
         self.workspace = None
         self._current_reconciliation_seq = None
         self._resuming = resume_run_id is not None
@@ -506,6 +588,12 @@ class AutonomousLoop:
         try:
             if resume_note is not None and not isinstance(resume_note, str):
                 raise ValueError('resume_note must be a string or None')
+            if reconciled_actions is not None and (not isinstance(reconciled_actions, dict)
+                    or any(not isinstance(k, str) or not isinstance(v, str) or not v.strip()
+                           for k, v in reconciled_actions.items())):
+                raise ValueError('reconciled_actions requires action IDs and explicit caller reports')
+            if reconciled_actions and resume_run_id is None:
+                raise ValueError('reconciled_actions requires a resume_run_id')
             meaningful_note = bool(resume_note and resume_note.strip())
             if meaningful_note and resume_run_id is None:
                 raise ValueError('resume_note requires a resume_run_id')
@@ -532,8 +620,39 @@ class AutonomousLoop:
                 claimed = True
             else:
                 claimed = True
+                if state.get('managed'):
+                    # A saved archive may belong to a stopped pre-ack boundary.
+                    # Settle explicit owner admission/reconciliation first;
+                    # terminal help/blocked runs must not grant capabilities.
+                    self._attach_checkpoints(restore_artifacts=False)
+                    for action_id, note in (reconciled_actions or {}).items():
+                        self.checkpoints.reconcile_action(action_id, note=note)
+                    pending = self.checkpoints.pending_recovery
+                    if (pending and pending['kind'] != 'recover'
+                            and not (pending['kind'] == 'stopped' and meaningful_note)
+                            and not (pending['kind'] == 'needs_help' and meaningful_note and self._can_assist())):
+                        return self._finish('stopped' if pending['kind'] == 'stopped' else 'need_input',
+                                            'Durable recovery stopped dispatch: ' + pending['reason']
+                                            + '. Help reservation is retained; no action was replayed.')
+                    if self.checkpoints.unresolved_actions:
+                        return self._finish('need_input', 'Unresolved managed actions require explicit reconciliation by action ID; nothing was replayed: '
+                                            + ', '.join(self.checkpoints.unresolved_actions))
+                    if self.checkpoints.pending_children:
+                        return self._finish('need_input', 'Durable child ownership requires host reconciliation before lead dispatch; '
+                                            'a resume note cannot replay or erase the child: '
+                                            + ', '.join(self.checkpoints.pending_children))
+                    parent_context = self._journal.state.get('parent_context')
+                    if parent_context and (parent_context['status'] != 'settled'
+                                           or self._journal.state.get('parent_context_superseded')):
+                        return self._finish('need_input', 'Parent task context is unfinished or superseded by a later request. '
+                                            'Host child/result or conversation reconciliation is required; '
+                                            'a resume note cannot replay the call.')
                 uncertain = state['uncertain'] or state['phase'] in ('contract_running', 'worker_running')
-                if state['status'] == 'done' and not uncertain:
+                if (state['status'] == 'done' and not uncertain
+                        and not (self.checkpoints and self.checkpoints.pending_recovery)):
+                    if self.checkpoints:
+                        self._attach_checkpoints()
+                        self.checkpoints._checked_receipt(self.checkpoints._state['completed_receipt'])
                     return LoopResult(**state['result'])
                 if uncertain and not meaningful_note:
                     return self._finish('need_input', 'Interrupted worker turn has uncertain side effects. Inspect the ledger and artifacts, then resume with an explicit reconciliation in resume_note. Nothing was replayed.')
@@ -546,6 +665,24 @@ class AutonomousLoop:
                     self._journal.record('uncertainty_reconciled', uncertain=False,
                                          phase=('review_pending' if state['phase'] == 'review_pending'
                                                 else 'ready' if state['contract'] else 'contract_needed'))
+                if (self.checkpoints and self.checkpoints.pending_recovery
+                        and self.checkpoints.pending_recovery['kind'] == 'stopped'):
+                    self.checkpoints.resume_stopped(note=resume_note)
+
+                if self.checkpoints and self._journal.state.get('parent_context'):
+                    restore = getattr(backend, 'restore_parent_context', None)
+                    if not callable(restore):
+                        return self._finish('need_input', 'This backend cannot install the saved parent conversation; '
+                                            'no lead request was dispatched.')
+                    try:
+                        # This hook never calls ask or consumes a new dispatch. The normal
+                        # PhaseRunner/_drive gates still control subsequent execution.
+                        await restore(self.checkpoints)
+                    except Exception as exc:
+                        # ArtifactError is deliberately not a ValueError. Any restore
+                        # failure closes dispatch; cancellation still propagates.
+                        return self._finish('need_input', 'Saved parent conversation could not be admitted '
+                                            f'({type(exc).__name__}); no lead request was dispatched.')
 
             state = self._journal.state
             if state['phase'] == 'contract_needed':
@@ -562,6 +699,16 @@ class AutonomousLoop:
             expected = self._journal.state.get('contract_sha256')
             if expected and digest((self.workspace / 'contract.md').read_text()) != expected:
                 return self._finish('need_input', 'The acceptance contract changed on disk. Restore the recorded contract before resuming.')
+            self._attach_checkpoints()
+            if self.checkpoints and self.checkpoints._state['completed_receipt']:
+                await self._checked_completion(self.checkpoints._state['completed_receipt'])
+                return self._finish('done', 'Goal complete (independent model review; checked receipt recovered).')
+            if self.checkpoints:
+                assistance=self.checkpoints.assistance_state()
+                if assistance and assistance['status']=='ready_for_verification':
+                    if self._can_assist() and await self._assisted_recovery(goal,contract):
+                        return self._finish('done', 'Goal complete (actual checked assistance; bookkeeping recovered without dispatch).')
+                    return self._finish('need_input','Checked assistance requires its original host schedule and unchanged evidence; nothing replayed.')
             prompt = self._seed(goal, contract)
             if self._journal.state.get('gaps'):
                 prompt += '\n' + _REJECTED.format(gaps=self._journal.state['gaps'])
@@ -570,11 +717,34 @@ class AutonomousLoop:
             worker_turn = None  # A resumed review has no known current-Engine origin.
             while True:
                 state = self._journal.state
+                pending = self.checkpoints.pending_recovery if self.checkpoints else None
+                if pending:
+                    if pending['kind'] == 'needs_help' and self._can_assist():
+                        if await self._assisted_recovery(goal, contract):
+                            return self._finish('done', 'Goal complete after bounded assistance, independent review and an executed host check.')
+                        pending = self.checkpoints.pending_recovery or pending
+                    if pending['kind'] != 'recover':
+                        return self._finish('stopped' if pending['kind'] == 'stopped' else 'need_input',
+                            'Durable recovery stopped dispatch: ' + pending['reason']
+                            + '. Help reservation is retained; no automatic replay is authorized.')
+                    if self.checkpoints.unresolved_actions:
+                        return self._finish('need_input',
+                            'Recovery requires explicit reconciliation of uncertain handler effects; '
+                            'the reserved intervention is retained and nothing was replayed.')
+                    self.checkpoints.prepare_recovery_intervention()
+                    prompt = self._seed(goal, contract)
+                    self._journal.record('recovery_ready', phase='ready')
+                    state = self._journal.state
+                    nudged = False
                 if state['phase'] == 'review_pending':
                     if not self.evaluate:
                         return self._finish('unverified', 'Worker reported DONE; independent evaluation was explicitly disabled.')
                     meter = getattr(self.engine, 'runtime_meter', None)
                     turn = worker_turn
+                    if self.checkpoints:
+                        self.checkpoints.seal_actions()
+                        if self.checkpoints.unresolved_actions:
+                            return self._finish('need_input', 'Managed actions remain unresolved; inspect their durable receipts before review.')
                     verdict, gaps = await self._evaluate(goal)
                     self._journal.record('evaluation', data=self.last_review, verdict=verdict)
                     if meter is not None:
@@ -585,7 +755,12 @@ class AutonomousLoop:
                                      status=verdict, task_success=None)
                     self._log(f'evaluator: {verdict}')
                     if verdict == 'PASS':
-                        return self._finish('done', 'Goal complete (independently reviewed).')
+                        if self.checkpoints:
+                            receipt = self.checkpoints.record_verification(
+                                authority=self._verification_authority, verdict=verdict,
+                                inspected=self.last_review.get('inspected', {}), assessment=self.last_review)
+                            await self._checked_completion(receipt['id'])
+                        return self._finish('done', 'Goal complete (independent model review, not an executed test result).')
                     if verdict == 'UNVERIFIED':
                         return self._finish('unverified', f'Worker reported DONE but nothing verified it: {gaps}')
                     self._journal.record('review_rejected', phase='ready', gaps=gaps)
@@ -600,9 +775,16 @@ class AutonomousLoop:
                 dispatched_prompt = self._with_reconciliation(self._with_next_action(prompt))
                 self._journal.record('worker_started', phase='worker_running', iterations=iteration,
                                      prompt_sha256=digest(dispatched_prompt))
-                text = await self._drive(dispatched_prompt)
+                if self.checkpoints:
+                    self.checkpoints.open_actions()
+                try:
+                    text = await self._drive(dispatched_prompt)
+                finally:
+                    if self.checkpoints:
+                        self.checkpoints.seal_actions()
                 worker_turn = getattr(self.engine, '_turn_index', None)
-                status, nxt = _parse_status(text)
+                pending = self.checkpoints.pending_recovery if self.checkpoints else None
+                status, nxt = ('CONTINUE', 'harness recovery pending') if pending else _parse_status(text)
                 steps += 1
                 self._journal.record('worker_finished', phase='review_pending' if status == 'DONE' else 'ready',
                                      worker_status=status, next=nxt, response=text, uncertain=False)
@@ -637,9 +819,15 @@ class AutonomousLoop:
                 return self._finish('budget', str(exc))
             return LoopResult('budget', 0, str(exc), str(self.workspace) if self.workspace else None)
         except (asyncio.CancelledError, KeyboardInterrupt) as exc:
+            stop_error = None
+            if self.checkpoints:
+                try:
+                    self.checkpoints.stop()
+                except Exception as storage_exc:
+                    stop_error = storage_exc
             try:
-                if self._journal and self._journal.write_error is not None:
-                    result = self._storage_failure(exc)
+                if stop_error is not None or (self._journal and self._journal.write_error is not None):
+                    result = self._storage_failure(stop_error or exc)
                 elif claimed and self._journal:
                     uncertain = self._journal.state.get('phase') in ('contract_running', 'worker_running')
                     self._journal.record('interrupted', uncertain=uncertain)

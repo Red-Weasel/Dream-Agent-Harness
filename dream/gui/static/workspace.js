@@ -18,23 +18,47 @@
   const brand=el('div',null,{class:'dream-nav-brand'});
   const brandText=el('div','DREAM');brandText.append(el('small','Build · Explore · Align'));
   brand.append(el('img',null,{src:'/assets/dream-mark.svg',alt:'',width:'44',height:'44'}),brandText);nav.append(brand);
-  const views=[['home','◉','Home'],['chat','◌','Chat'],['nested','▦','Nested Dream'],['studio','◇','Artifacts'],['projects','▱','Projects'],['optimizer','✎','Prompt Optimizer'],['skills','✧','Skills'],['memory','▧','Lucid Control'],['files','▤','Files'],['sleepwalk','☾','Sleepwalk'],['settings','⚙','Settings']];
+  const views=[['home','◉','Home'],['chat','◌','Chat'],['nested','▦','Nested Dream'],['deepsleep','✦','DeepSleep'],['council','◎','Council'],['studio','◇','Artifacts'],['projects','▱','Projects'],['optimizer','✎','Prompt Optimizer'],['skills','✧','Skills'],['memory','▧','Lucid Control'],['files','▤','Files'],['sleepwalk','☾','Sleepwalk'],['settings','⚙','Settings']];
   const toggles=[['understand','⌬','Understand']];   // panels beside the chat: switches, not pages
   for(const [view,icon,label] of views){const b=button('',()=>navigate(view),'dream-nav-'+view);b.title=label;b.setAttribute('aria-label','Go to '+label);b.append(el('i',icon,{'aria-hidden':'true'}),el('span',label));nav.append(b);}
   // Below a divider, panels that open beside the chat: switches, not places (owner, 2026-09-28).
   nav.append(el('div',null,{class:'dream-nav-divider',role:'separator'}));
   for(const [view,icon,label] of toggles){const b=button('',()=>navigate(view),'dream-nav-'+view);b.className='dream-nav-toggle';b.title=label+': show or hide it beside the chat';b.setAttribute('aria-label',label+' panel');b.setAttribute('aria-pressed','false');b.append(el('i',icon,{'aria-hidden':'true'}),el('span',label));nav.append(b);}
+  const frontiers=el('div',null,{id:'dream-frontiers','aria-label':'Frontier models'});
+  for(const [key,label] of [['anthropic','Claude'],['grok','Grok'],['antigravity','Gemini'],['codex','Codex']]){
+    const row=el('div',null,{class:'dream-frontier-row'});
+    const login=button('',()=>window.DreamFrontiers?.login(key),'dream-frontier-'+key);
+    login.className='dream-frontier-pill';login.title='Sign in to '+label;login.setAttribute('aria-label','Sign in to '+label);login.dataset.accountStatus='unknown';
+    const logo={anthropic:'claude',antigravity:'gemini',grok:'grok',codex:'codex'}[key];
+    login.append(el('img',null,{src:'/assets/provider-logos/'+logo+'.svg',alt:'',width:'20',height:'20',class:'dream-provider-logo'}),el('span',label,{class:'dream-account-label'}),el('span',null,{class:'dream-account-light','aria-hidden':'true'}));
+    const identity=el('small','',{id:'dream-account-'+key,class:'dream-account-identity',hidden:''});
+    row.append(login,identity);frontiers.append(row);
+  }
+  frontiers.append(el('p','',{id:'dream-frontier-feedback',role:'status',hidden:''}));nav.append(frontiers);
+  window.addEventListener('dream:frontier-state',event=>{
+    for(const [key,state] of Object.entries(event.detail?.controls||{})){
+      const pill=$('dream-frontier-'+key);if(!pill)continue;
+      pill.disabled=state.enabled===false;pill.title=state.title;
+      pill.dataset.accountStatus=state.signed_in===true?'signed_in':(state.status||'unknown');
+      const label=pill.querySelector('.dream-account-label').textContent;
+      const statusLabel=state.signed_in===true?'signed in':state.status==='signed_out'?'signed out':state.status==='unavailable'?'CLI unavailable':'account unverified';
+      pill.setAttribute('aria-label','Sign in to '+label+' · '+statusLabel);
+      const identity=$('dream-account-'+key);identity.textContent='';identity.hidden=true;
+      if(state.signed_in===true&&state.username)pill.title+=' · '+String(state.username).slice(0,200);
+    }
+    const note=$('dream-frontier-feedback');note.textContent=event.detail?.message||'';note.hidden=!note.textContent;
+  });
   nav.append(button('⌘',()=>palette.showModal(),'dream-command-open'));$('dream-command-open')?.setAttribute('aria-label','Command palette');
   document.body.prepend(nav);$('dream-command-open').setAttribute('aria-label','Command palette');
+  window.DreamFrontiers?.refresh();
   const welcome=$('studio-interactions-empty');
   welcome.innerHTML='<div class="dream-welcome-copy"><span class="dream-eyebrow">Welcome to Dream</span><h2>Your ideas.<br>A higher state.</h2><p>A place to think, build, and create.<br>Your models. Your workspace.</p><div class="dream-welcome-actions"></div></div>';
   for(const [label,draft] of [['Research','Help me research '],['Build','Help me build '],['Create','Help me create ']]){
     welcome.querySelector('.dream-welcome-actions').append(button(label,()=>{const input=$('input');if(!input.value)input.value=draft;input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();}));
   }
-  $('input').placeholder='What shall we explore today?';
+  $('input').placeholder='Type / for skills and commands — or ask Dream…';
   const workbar=el('div',null,{id:'dream-workbar','aria-label':'Current workspace and model'});
   const workspace=button('Workspace unreported',()=>{workspace.classList.toggle('full-path');workspace.textContent=workspace.classList.contains('full-path')?workspace.title:shortWorkspace();},'dream-workspace');
-  const model=button('Model unreported',()=>$('dream-council-open')?.click(),'dream-model');
   let performanceSupported=false;
   const effort=button('Effort · unreported',()=>{$(performanceSupported?'dream-controls-open':'dream-council-open').click();},'dream-effort');
   effort.title='Adjust supported reasoning settings; provider handoffs apply between turns';
@@ -52,7 +76,7 @@
   function toolLayout(){utilityMenu.open=!narrowTools.matches;}
   narrowTools.addEventListener('change',toolLayout);toolLayout();
   utilityMenu.addEventListener('keydown',e=>{if(e.key==='Escape'&&narrowTools.matches){e.preventDefault();utilityMenu.open=false;utilityMenu.querySelector('summary').focus();}});
-  workbar.append(model,workspace,effort,vision,context,utilityMenu);utilityNav.after(workbar);   // the model leads the bar (DREAM-228)
+  workbar.append(workspace,effort,vision,context,utilityMenu);utilityNav.after(workbar);
   const home=el('section',null,{id:'dream-home','aria-label':'Dream Home'});home.hidden=true;
   home.innerHTML='<div class="dream-hero"><div class="dream-hero-copy"><span class="dream-eyebrow">Welcome to Dream</span><h1>Your ideas<br>have a <em>higher state.</em></h1><p>Your models. Your workspace.<br>A place to think, build, and create.</p><div class="dream-actions"></div></div></div><div class="dream-home-grid"><section class="dream-home-card"><h2>YOUR WORKSPACE</h2><p id="dream-home-path">Workspace unreported</p><p id="dream-home-session"></p><div id="dream-home-project"></div></section><section class="dream-home-card"><h2>RECENT WORK</h2><div id="dream-recovery">Open Home to read saved run records.</div></section></div>';
   home.querySelector('.dream-actions').append(button('Resume work →',()=>navigate('chat'),'dream-resume'),button('Open project',()=>navigate('projects')));
@@ -77,6 +101,10 @@
   const destinations={chat:'studio-interactions',studio:'studio-preview',projects:'studio-project',skills:'studio-skills',settings:'dream-controls-open'};
   function navigate(view){
     if(!views.some(v=>v[0]===view)&&!toggles.some(v=>v[0]===view))return;
+    if(view==='settings'||view==='council'){
+      window.dispatchEvent(new CustomEvent('dream:'+view+'-open',{detail:{source:'dream-nav-'+view}}));
+      return;
+    }
     if(view==='understand'){if(root.dataset.dreamView==='nested'){window.DreamUnderstand?.toggle();return;}   // in the Nested view it is the right-hand pane's Map (DREAM-243)
       window.DreamLibrary?.hide();window.PromptOptimizer?.hide(false);root.classList.remove('dream-expanded');home.hidden=true;inspector.hidden=true;root.dataset.dreamView='chat';$('studio-interactions')?.click();window.DreamUnderstand?.toggle();return;}   // a dock beside the chat, not a page (DREAM-087)
     window.DreamLibrary?.hide();
@@ -94,7 +122,7 @@
   }
   let pendingNative=null;
   window.addEventListener('dream:navigate',e=>{if(!window.DREAM_SESSION){pendingNative=e.detail;return;}if(e.detail?.session_id&&e.detail.session_id===window.DREAM_SESSION?.session_id)navigate(e.detail.view);});
-  window.addEventListener('dream:session',()=>{const key=[window.DREAM_SESSION?.session_id,window.DREAM_SESSION?.workspace].join('|');if(key!==sessionKey){sessionKey=key;sessionGeneration++;}environmentLoaded=false;if(pendingNative?.session_id && pendingNative.session_id===window.DREAM_SESSION?.session_id)navigate(pendingNative.view);pendingNative=null;workspace.title=window.DREAM_SESSION.workspace||'Workspace unreported';workspace.textContent=shortWorkspace();model.textContent=window.DREAM_SESSION.model||window.DREAM_SESSION.provider||'Model unreported';effort.textContent='Effort · '+(Object.hasOwn(window.DREAM_SESSION,'reasoning_effort')?(window.DREAM_SESSION.reasoning_effort||'provider default'):'unreported');showVision();model.title=[window.DREAM_SESSION.provider,window.DREAM_SESSION.model].filter(Boolean).join(' · ');$('dream-home-path').textContent=workspace.title;$('dream-home-session').textContent=window.DREAM_SESSION.session_id||'Session identity unreported';});
+  window.addEventListener('dream:session',()=>{const key=[window.DREAM_SESSION?.session_id,window.DREAM_SESSION?.workspace].join('|');if(key!==sessionKey){sessionKey=key;sessionGeneration++;}environmentLoaded=false;if(pendingNative?.session_id && pendingNative.session_id===window.DREAM_SESSION?.session_id)navigate(pendingNative.view);pendingNative=null;workspace.title=window.DREAM_SESSION.workspace||'Workspace unreported';workspace.textContent=shortWorkspace();effort.textContent='Effort · '+(Object.hasOwn(window.DREAM_SESSION,'reasoning_effort')?(window.DREAM_SESSION.reasoning_effort||'provider default'):'unreported');showVision();$('dream-home-path').textContent=workspace.title;$('dream-home-session').textContent=window.DREAM_SESSION.session_id||'Session identity unreported';});
   function shortWorkspace(){return (window.DREAM_SESSION?.workspace||'Workspace unreported').replace(/[\\/]+$/,'').split(/[\\/]/).pop();}
   async function read(path){const generation=sessionGeneration;const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),8000);try{const response=await fetch(path,{headers:{'X-Dream-Token':TOKEN},cache:'no-store',signal:controller.signal});const data=await response.json();if(generation!==sessionGeneration){const stale=new Error('Workspace changed while loading.');stale.stale=true;throw stale;}if(!response.ok)throw new Error(data.error||'Unavailable ('+response.status+')');return data;}finally{clearTimeout(timer);}}
   let homeLoading=false;

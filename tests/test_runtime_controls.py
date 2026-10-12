@@ -88,7 +88,7 @@ async def test_explicit_host_choice_runs_only_the_approved_command(tmp_path, mon
     prompts = []
     async def choose_host(prompt):
         prompts.append(prompt)
-        return "h"
+        return "y"   # no shell sandbox (2026-10-11): yes runs this command once on the host; the old "h" choice is gone
     monkeypatch.setattr(app, "_read_answer", choose_host)
     assert await engine._authorize_tool("run_bash", {"command": command})
     assert len(prompts) == 1 and engine._command_approvals[command].allow_uncontained

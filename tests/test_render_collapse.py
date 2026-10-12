@@ -29,9 +29,9 @@ def test_repeated_calls_collapse_to_one_line():
         events.append(("result", "write_file", "Wrote 221 chars", False))
     out = _render(events)
     # One folded line, not 23.
-    assert out.count("write_file(path=/x/__init__.py)") == 1
+    assert out.count("Write(/x/__init__.py)") == 1
     assert "×23" in out
-    assert "23×" in out  # the success tally line
+    assert "23 ok" in out  # the success tally line
     assert out.count("Wrote 221 chars") <= 1
 
 
@@ -42,7 +42,7 @@ def test_distinct_calls_each_shown():
         ("use", "read_file", {"path": "b.py"}),
         ("result", "read_file", "contents B", False),
     ])
-    assert "read_file(path=a.py)" in out and "read_file(path=b.py)" in out
+    assert "Read(a.py)" in out and "Read(b.py)" in out
     assert "×" not in out  # no counter when nothing repeats
 
 
@@ -58,4 +58,4 @@ def test_text_flushes_the_run():
         ("result", "search", "hits", False),
         ("text", "Here is what I found."),
     ])
-    assert "search(query=q)" in out and "Here is what I found." in out
+    assert "search(q)" in out and "Here is what I found." in out

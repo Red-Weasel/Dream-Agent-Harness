@@ -10,9 +10,11 @@ stick vs. a mounted disk). ``machx.list_models`` delegates here.
 from __future__ import annotations
 
 import getpass
+import glob
 import json
 import os
 import re
+import struct
 import threading
 import time
 from dataclasses import dataclass
@@ -250,6 +252,138 @@ def directory_model_files(path: Path) -> list[Path]:
 # "…-00002-of-00005" — the llama.cpp split-GGUF suffix. A split model is loaded
 # by pointing at part 1; the loader reads its index and pulls in the siblings.
 _SHARD_RE = re.compile(r"-(\d{5})-of-(\d{5})$")
+
+# Presentation only. These values never replace the path passed to the engine.
+_QUANT_RE = re.compile(r"(?i)(?<![a-z0-9])((?:UD-)?(?:IQ\d[_A-Z0-9]*|Q\d[_A-Z0-9]*|BF16|F16|F32|FP16|FP32|MXFP4))(?![a-z0-9])")
+_GENERIC_NAMES = {'model', 'models', 'weights', 'gguf', 'ggufs', 'checkpoint', 'checkpoints',
+                  'ours', 'source model', 'base model', 'model merged', 'merged'}
+
+
+def _readable(value: str) -> str:
+    return re.sub(r'\s+', ' ', re.sub(r'[_-]+', ' ', value)).strip()
+
+
+def _identity_name(value: str) -> str:
+    """Remove packaging tokens while keeping publisher/model/version words."""
+    value = re.sub(r'(?i)(?:[-_. ](?:gguf|safetensors))$', '', value)
+    return _readable(_QUANT_RE.sub('', _SHARD_RE.sub('', value))).strip(' .')
+
+
+def model_details(path: Path | str, *, shard_count: int = 1, metadata=None) -> dict:
+    """Bounded header/config identity for presentation; no engine or tensor reads.
+
+    Header names can be generic ('Ours') or just a quantization. In that case a
+    descriptive filename, then nearest descriptive parent supplies the identity.
+    Duplicated names retain distinct paths; callers must never key on this name.
+    """
+    from .model_defaults import read_metadata
+    path = Path(path)
+    is_directory = path.is_dir()
+    if metadata is None:
+        try:
+            metadata = read_metadata(path, include_template=False)
+        except (OSError, ValueError, struct.error):
+            metadata = {}
+    raw = _SHARD_RE.sub('', path.name if is_directory else path.stem)
+    header_name = metadata.get('general.name')
+    # Preserve explicit derivative names: exporters often retain a base model's
+    # general.name. Header identity fills in anonymous packaging filenames.
+    candidates = [(raw, 'Filename and folder'),
+                  (header_name, 'Checkpoint config' if is_directory else 'GGUF header')]
+    for parent in list(path.parents)[:3]:
+        if parent.name.casefold() in {'models', 'llm models', 'gguf', 'ggufs', 'checkpoints', 'home', 'mnt', 'media'}:
+            break
+        candidates.append((parent.name, 'Filename and folder'))
+    name, source = 'Unidentified model', 'Filename and folder'
+    for candidate, origin in candidates:
+        if not isinstance(candidate, str):
+            continue
+        clean = _identity_name(candidate)
+        if clean and clean.casefold() not in _GENERIC_NAMES and not clean.isdigit():
+            name, source = clean, origin
+            break
+    quants = _QUANT_RE.findall(raw)
+    if not quants and isinstance(header_name, str):
+        quants = _QUANT_RE.findall(header_name)
+    quantization = ' / '.join(dict.fromkeys(q.upper() for q in quants)) or None
+    match = re.search(r'(?i)(?<![a-z0-9])(\d+(?:\.\d+)?B(?:[-_ ]A\d+(?:\.\d+)?B)?)(?![a-z0-9])', f'{raw} {name}')
+    parameter = match.group(1).upper().replace('_', '-').replace(' ', '-') if match else metadata.get('general.size_label')
+    if not isinstance(parameter, str) or not parameter.strip():
+        parameter = None
+    variants = list(dict.fromkeys(re.findall(r'(?i)\b(?:abliterated|uncensored|distill|instruct|thinking|preview)\b', raw.replace('_', '-'))))
+    variant = metadata.get('general.finetune')
+    if not isinstance(variant, str) or not variant.strip():
+        variant = ' · '.join(word.title() for word in variants) or None
+    # Preserve a filename's explicitly named derivative even with a base header.
+    for word in variants:
+        if word.casefold() not in name.casefold():
+            name += ' ' + word.title()
+        else:
+            name = re.sub(r'\b' + re.escape(word) + r'\b', word.title(), name, flags=re.IGNORECASE)
+    architecture = metadata.get('general.architecture')
+    limit = metadata.get(f'{architecture}.context_length')
+    limit = limit if type(limit) is int and limit >= 9 else None
+    low = raw.lower()
+    auxiliary = ('projector' if re.search(r'(?:^|[-_ .])mmproj(?:$|[-_ .])', low)
+                 or architecture == 'clip' else
+                 'draft' if re.search(r'^mtp(?:$|[-_ .])|(?:^|[-_ .])mtp[-_ .]head(?:$|[-_ .])', low) else None)
+    return dict(display_name=name, family=name.split()[0] if name != 'Unidentified model' else None,
+                version=metadata.get('general.version'), parameter_size=parameter,
+                variant=variant, format='Safetensors' if is_directory else 'GGUF',
+                quantization=quantization, architecture=architecture,
+                location=volume_for(path), directory=str(path if is_directory else path.parent),
+                filename=path.name, shard_count=shard_count, auxiliary_kind=auxiliary,
+                metadata_source=source, header_name=header_name, context_limit=limit,
+                context_source=('Checkpoint config' if is_directory else 'GGUF header') if limit else None,
+                # Architecture support alone cannot prove this file serves images.
+                vision=None)
+
+
+def inspect_model(path: Path | str) -> tuple[LocalModel, dict]:
+    """Validate an explicitly picked local file/folder and its complete shard set."""
+    selected = Path(path).expanduser().absolute()
+    path = selected.resolve(strict=True)
+    if path.is_dir():
+        files = directory_model_files(path)
+        weights = [p for p in files if p.suffix == '.safetensors']
+        count, size = len(weights), sum(p.stat().st_size for p in weights) / 1e9
+    else:
+        if not path.is_file() or selected.suffix.lower() != '.gguf':
+            raise ValueError('Choose a GGUF model file or a supported Safetensors model folder.')
+        match = _SHARD_RE.search(selected.stem)
+        count = int(match.group(2)) if match else 1
+        if count < 1 or count > 4096:
+            raise ValueError('Model shard count exceeds the supported limit.')
+        if match and not 1 <= int(match.group(1)) <= count:
+            raise ValueError('Model shard index is outside the declared shard count.')
+        if match:
+            if selected.suffix != '.gguf':
+                raise ValueError('Split GGUF filenames must use the .gguf extension.')
+            base = _SHARD_RE.sub('', selected.stem)
+            weights = [selected.with_name(f'{base}-{index:05d}-of-{count:05d}{selected.suffix}')
+                       for index in range(1, count + 1)]
+            selected = weights[0]
+            path = selected.resolve()
+            sibling_counts = {_SHARD_RE.search(p.stem).group(2) for p in selected.parent.glob(f'{glob.escape(base)}-*-of-*{glob.escape(selected.suffix)}')
+                              if _SHARD_RE.search(p.stem) and _SHARD_RE.sub('', p.stem) == base}
+            if sibling_counts != {f'{count:05d}'}:
+                raise ValueError('Model shards disagree about the complete shard count.')
+        else:
+            weights = [path]
+        if any(not p.is_file() or p.stat().st_size == 0 for p in weights):
+            raise ValueError('Model shards are missing or empty. Select a complete model.')
+        if match and (path.name != selected.name or
+                      any(p.resolve() != (path.parent / p.name).resolve() for p in weights)):
+            raise ValueError('Split GGUF links do not preserve named sibling shards. Choose a regular named shard set.')
+        size = sum(p.stat().st_size for p in weights) / 1e9
+    from .model_defaults import read_metadata
+    metadata = read_metadata(path, include_template=False)
+    details = model_details(selected, shard_count=count, metadata=metadata)
+    details['selected_path'] = str(selected)
+    if details['auxiliary_kind']:
+        raise ValueError('This is an auxiliary projector or draft file. Choose the main model instead.')
+    item = LocalModel(name=details['display_name'], path=path, size_gb=size, volume=volume_for(path))
+    return item, details
 
 
 def _group_shards(sized: list[tuple[Path, float]]) -> list[tuple[Path, float, int]]:

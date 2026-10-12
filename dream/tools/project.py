@@ -146,7 +146,8 @@ def _plan_markdown(title: str, phases: list[dict[str, Any]], lessons: list[str] 
     "Keep the project's phased plan in PLAN.md (workspace) and the plan panel. Call it first for any "
     "multi-step build, then whenever a step changes; each call sends the COMPLETE plan. Status: "
     "pending | in_progress | done. A phase marked done needs a `summary` (what exists, what the next "
-    "phase needs): Dream compacts the conversation at each phase boundary, so PLAN.md carries over. "
+    "phase needs). In managed autonomous work, only an independently checked task boundary authorizes "
+    "a reset; marking a plan phase done does not. Ordinary chat may compact at a phase boundary. "
     "`steps` is optional: a phase described by its summary may omit it or send []. `lessons`: facts learned the "
     "hard way that the next step must not re-learn (environment limits, tool quirks, conventions), one line "
     f"each, at most {LESSONS_MAX} (the newest win); PLAN.md keeps them and every compaction hands them back. Omit "
@@ -188,7 +189,7 @@ async def update_plan(args: dict[str, Any]) -> dict[str, Any]:
     missing = [n for n in newly_done if not next(p for p in phases if p["name"] == n)["summary"]]
     if missing:
         return err(f"Give phase {missing[0]!r} a summary (what exists now, what the next phase needs) before "
-                   "marking it done: the conversation is compacted at the phase boundary, so the summary "
+                   "marking it done: a checked reset or ordinary-chat compaction needs the summary "
                    "is what carries over. Call update_plan again with it.")
     title = str(args.get("title") or "").strip()
     path = ctx().workspace / "PLAN.md"

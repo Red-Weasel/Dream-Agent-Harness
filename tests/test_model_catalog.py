@@ -26,7 +26,9 @@ def test_codex_cached_models_and_efforts(tmp_path, monkeypatch):
     ]}))
     from dream.core.model_catalog import model_choices
     choices = model_choices('codex')
-    assert choices == [{'id': 'test-new', 'label': 'New model', 'efforts': ['high', 'ultra']}]
+    assert len(choices) == 8
+    assert choices[-1] == {'id': 'test-new', 'label': 'New model', 'efforts': ['high', 'ultra']}
+    assert choices[0]['id'] == 'gpt-6.1-sol'
     assert effort_choices('codex', model='test-new') == ['high', 'ultra']
     assert validate_effort('codex', 'ultra', model='test-new') == 'ultra'
     with pytest.raises(ValueError):
@@ -39,7 +41,7 @@ def test_unusable_cache_has_documented_fallback(tmp_path, monkeypatch, contents)
     (tmp_path / 'models_cache.json').write_text(contents)
     from dream.core.model_catalog import model_choices
     models = {m['id']: m for m in model_choices('codex')}
-    assert models['gpt-6-astra']['efforts'][-2:] == ['max', 'ultra']
+    assert models['gpt-6-astra']['efforts'] == ['low', 'medium', 'high', 'xhigh', 'max']
     assert 'ultra' not in models['gpt-5.6-luna']['efforts']
 
 
@@ -50,4 +52,4 @@ def test_catalog_results_do_not_share_mutable_state(tmp_path, monkeypatch):
     choices[0]['efforts'].clear()
     assert model_choices('codex')[0]['efforts']
     assert model_choices('machx') == []
-    assert model_choices('gemini')[0]['efforts'] == []
+    assert model_choices('gemini')[0]['efforts'] == ['off', 'on']

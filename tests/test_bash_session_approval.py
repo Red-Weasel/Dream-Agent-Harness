@@ -22,24 +22,18 @@ async def setup(app, monkeypatch, available=True, answer='a'):
     return shown
 
 
-async def test_sandbox_always_choice_avoids_repeat_prompt(app, monkeypatch):
-    shown = await setup(app, monkeypatch)
-    assert await app._decide_permission('run_bash', {'command': 'python render.py'})
-    assert shown[0][1]['a'] == 'Always allow in sandbox (session)'
-    assert await app._decide_permission('run_bash', {'command': 'python render.py'})
-    assert len(shown) == 1 and not app.approvals
-    assert 'exact command' in shown[0][0]
-
-
+# No shell sandbox (the owner, 2026-10-11): the one always choice is a host grant for this exact command, whatever the
+# sandbox probe says (the in-sandbox grant and its separation from the host grant went with the sandbox).
 @pytest.mark.parametrize('available', [True, False])
 async def test_host_always_reissues_exact_host_grant(app, monkeypatch, available):
-    shown = await setup(app, monkeypatch, available, 'ha')
+    shown = await setup(app, monkeypatch, available, 'a')
     command = 'python render.py'
     assert await app._decide_permission('run_bash', {'command': command})
-    assert shown[0][1]['ha'] == 'Always allow outside sandbox (session)'
+    assert shown[0][1]['a'] == 'Always allow this command (session)' and 'ha' not in shown[0][1]
     assert await app._decide_permission('run_bash', {'command': command})
     assert len(shown) == 1
     assert app.approvals == [(command, {'uncontained': True})] * 2
+    assert 'exact command' in shown[0][0] and 'no shell sandbox' in shown[0][0]
 
 
 @pytest.mark.parametrize('change', ['command', 'workspace', 'engine', 'scope', 'plan', 'executor'])
@@ -67,14 +61,6 @@ async def test_host_grant_does_not_spread(app, monkeypatch, change):
     assert len(app.approvals) == 1
 
 
-async def test_sandbox_grant_never_becomes_host_grant(app, monkeypatch):
-    shown = await setup(app, monkeypatch)
-    assert await app._decide_permission('run_bash', {'command': 'python render.py'})
-    await setup(app, monkeypatch, False, 'n')
-    assert not await app._decide_permission('run_bash', {'command': 'python render.py'})
-    assert not app.approvals
-
-
 @pytest.mark.parametrize('command', ['rm important.txt', 'git push origin main', 'sudo apt upgrade'])
 async def test_consequential_commands_keep_once_only_choices(app, monkeypatch, command):
     shown = await setup(app, monkeypatch, True, 'ha')
@@ -94,8 +80,8 @@ async def test_mode_change_during_prompt_invalidates_approval(app, monkeypatch):
 
 
 @pytest.mark.parametrize('available,choice,label', [
-    (True, 'a', 'Always allow in sandbox (session)'),
-    (False, 'ha', 'Always allow outside sandbox (session)'),
+    (True, 'a', 'Always allow this command (session)'),
+    (False, 'a', 'Always allow this command (session)'),
 ])
 async def test_actual_desktop_always_choice_is_consumed_once(app, chat, monkeypatch, available, choice, label):
     import asyncio

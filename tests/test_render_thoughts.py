@@ -1,5 +1,5 @@
 """Ephemeral thoughts: reasoning shows only in the live region and vanishes when the
-answer lands — it must never pile into the transcript (unless /thoughts on)."""
+answer lands — it must never pile into the transcript when /thoughts is off."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ def _transcript(r: Renderer) -> str:
 
 def test_ephemeral_thoughts_never_reach_the_transcript():
     r = _renderer()
+    r.set_thoughts_persistent(False)  # /thoughts off
     r._live = object()  # pretend a live region is pinned
     r._status_cb = lambda: None
 
@@ -32,6 +33,7 @@ def test_ephemeral_thoughts_never_reach_the_transcript():
 
 def test_answer_landing_clears_thoughts():
     r = _renderer()
+    r.set_thoughts_persistent(False)  # /thoughts off
     r._live = object()
     r._status_cb = lambda: None
     r.thinking_delta("thinking hard")
@@ -41,6 +43,7 @@ def test_answer_landing_clears_thoughts():
 
 def test_tool_use_clears_thoughts():
     r = _renderer()
+    r.set_thoughts_persistent(False)  # /thoughts off
     r._live = object()
     r._status_cb = lambda: None
     r.thinking_delta("I should look this up")
@@ -50,6 +53,7 @@ def test_tool_use_clears_thoughts():
 
 def test_thought_buffer_stays_bounded():
     r = _renderer()
+    r.set_thoughts_persistent(False)  # /thoughts off
     r._live = object()
     r._status_cb = lambda: None
     for i in range(40):
@@ -63,3 +67,16 @@ def test_persistent_mode_streams_reasoning_to_transcript():
     r._live = None  # off-terminal → prints straight through
     r.thinking_delta("thinking out loud")
     assert "thinking out loud" in _transcript(r)
+
+
+def test_thoughts_start_persistent(monkeypatch):
+    monkeypatch.delenv("DREAM_THOUGHTS_PERSIST", raising=False)
+    r = _renderer()  # no /thoughts command: reasoning streams to the transcript
+    r._live = None
+    r.thinking_delta("thinking by default")
+    assert "thinking by default" in _transcript(r)
+
+
+def test_env_can_start_thoughts_ephemeral(monkeypatch):
+    monkeypatch.setenv("DREAM_THOUGHTS_PERSIST", "0")
+    assert not _renderer()._thoughts_persistent

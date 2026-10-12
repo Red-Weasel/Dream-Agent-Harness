@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from playwright.async_api import async_playwright, expect
 
+from chat_more import more
 from dream.gui.bus import EventBus
 from dream.gui.server import StudioServer
 from dream.tui.app import App
@@ -40,12 +41,12 @@ async def test_new_chat_asks_before_saving(tmp_path, monkeypatch):
             page = await browser.new_page(viewport={'width': 1100, 'height': 800})
             page.set_default_timeout(4000)
             await page.goto(url.replace('/#', '/?companion=1#'))
-            await page.locator('#studio-new').click()
+            await more(page, 'studio-new')            # Chat shows no bars (DREAM-240/242): New chat is under More
             await expect(page.locator('#new-chat-ask')).to_be_visible()
             await page.locator('#new-chat-ask button[data-new="cancel"]').click()
             await expect(page.locator('#new-chat-ask')).to_have_count(0)
             assert prompts == []
-            await page.locator('#studio-new').click()
+            await more(page, 'studio-new')
             await page.locator('#new-chat-ask button[data-new="nosave"]').click()
             await page.wait_for_timeout(300)
             assert prompts == ['/new nosave']

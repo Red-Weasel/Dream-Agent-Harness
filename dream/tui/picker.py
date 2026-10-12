@@ -1,15 +1,16 @@
 """The boot picker: choose an engine before Dream wakes.
 
-Replaces the old forced-MachX flow. Bare ``dream`` lands here: pick Claude (live
-now), a local GGUF (MachX), or — once Phases 2/3 land — ChatGPT/Grok/Gemini via
-their signed-in CLIs, or Dream MoE. Frontier-CLI + MoE rows are shown with a
-'Phase N' tag and are not yet selectable.
+Replaces the old forced-MachX flow. Bare ``dream`` lands here: pick Claude,
+ChatGPT, Grok or Gemini through its installed CLI, a local GGUF (MachX), or Dream
+MoE. A provider row can be chosen when its CLI is installed (DREAM-246: found by
+``core.cli_discovery``, the lookup the spawning code uses). Whether that CLI is
+signed in is not checked here and is never claimed.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
+import shutil  # noqa: F401  (kept as a module attribute: tests replace shutil.which through it)
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -33,13 +34,23 @@ from .render import Renderer
 class ProviderRow:
     key: str        # anthropic | codex | grok | gemini | moe
     label: str      # display name
-    status: str     # "signed in" | "installed" | "not installed" | "signed in (model)"
-    ready: bool     # selectable in this phase (only Claude, for now)
-    note: str       # "" or "Phase 2" / "Phase 3"
+    status: str     # "installed" | "installed · model <name>" | "not installed" (moe: a count)
+    ready: bool     # selectable: the CLI is installed. Never a claim of being signed in.
+    note: str       # "sign-in not checked" | "install first" | ""
 
 
 def _cli_installed(name: str) -> bool:
-    return shutil.which(name) is not None
+    """Installed, by the lookup the spawning code uses (DREAM-246). Says nothing about sign-in."""
+    # Imported here, as this module does for core.moe, so loading the picker loads no more than before.
+    from ..core.cli_discovery import find_cli
+    return find_cli(name) is not None
+
+
+def _cli_row(key: str, label: str, cmd: str, detail: str | None = None) -> ProviderRow:
+    if _cli_installed(cmd):
+        return ProviderRow(key, label, f"installed · {detail}" if detail else "installed", True,
+                           "sign-in not checked")
+    return ProviderRow(key, label, "not installed", False, "install first")
 
 
 def _codex_model() -> str | None:
@@ -56,56 +67,30 @@ def _codex_model() -> str | None:
 
 
 def detect_providers() -> list[ProviderRow]:
-    """The frontier-provider rows with live install/sign-in status. Only Claude is
-    selectable today; the rest are tagged with the phase that unlocks them."""
-    rows: list[ProviderRow] = []
+    """The frontier-provider rows with their install status.
 
-    claude_in = _cli_installed("claude")
-    rows.append(ProviderRow(
-        "anthropic", "Claude",
-        "signed in" if claude_in else "CLI not found",
-        claude_in, "",
-    ))
+    ``ready`` means the CLI is installed and so can be chosen; it does not mean signed
+    in. Sign-in is never checked here: no credential file is looked at (a keyring
+    sign-in leaves none), so every installed row says so instead of guessing."""
+    rows: list[ProviderRow] = [_cli_row("anthropic", "Claude", "claude")]
 
-    codex_in = _cli_installed("codex")
-    codex_authed = (Path.home() / ".codex" / "auth.json").exists()
-    codex_ready = codex_in and codex_authed
-    if codex_ready:
-        model = _codex_model()
-        codex_status = f"signed in ({model})" if model else "signed in"
-    elif codex_in:
-        codex_status = "installed"
-    else:
-        codex_status = "not installed"
-    # codex is a live engine once signed in; grok/gemini await their adapters.
-    rows.append(ProviderRow("codex", "ChatGPT", codex_status, codex_ready, "" if codex_ready else "Phase 2"))
-
-    grok_in = _cli_installed("grok")
-    # The .grok dir exists after first run even when logged out; auth.json is the
-    # real signal (it's written only once device-login completes).
-    grok_authed = (Path.home() / ".grok" / "auth.json").exists()
-    grok_ready = grok_in and grok_authed
-    grok_status = ("signed in" if grok_ready
-                   else "installed" if grok_in else "not installed")
-    rows.append(ProviderRow("grok", "Grok", grok_status, grok_ready, "" if grok_ready else "sign in first"))
-
-    gem_in = _cli_installed("gemini")
-    # gemini adapter is built; live-verify pending an install + sign-in.
-    rows.append(ProviderRow(
-        "gemini", "Gemini",
-        "installed" if gem_in else "not installed", gem_in,
-        "" if gem_in else "install first",
-    ))
+    # The configured model is a best-effort display detail only; it decides nothing.
+    model = _codex_model() if _cli_installed("codex") else None
+    rows.append(_cli_row("codex", "ChatGPT", "codex", f"model {model}" if model else None))
+    rows.append(_cli_row("grok", "Grok", "grok"))
+    rows.append(_cli_row("antigravity", "Gemini · Antigravity", "agy"))
 
     # An independent advisor may use the main provider, optionally with another model.
-    ready_engines = sum(1 for row in rows if row.ready)
-    if ready_engines >= 1:
+    # The count is installed CLIs (the local prerequisite), not accounts that work.
+    installed = sum(1 for row in rows if row.ready)
+    if installed >= 1:
         rows.append(ProviderRow(
-            "moe", "Dream MoE", f"{ready_engines} available provider(s) for council", True, ""
+            "moe", "Dream MoE", f"{installed} installed provider(s) for council", True,
+            "sign-in not checked",
         ))
     else:
         rows.append(ProviderRow(
-            "moe", "Dream MoE", "needs an available provider", False, "set up a provider"
+            "moe", "Dream MoE", "needs an installed provider", False, "install a provider CLI first"
         ))
     return rows
 
@@ -219,8 +204,8 @@ async def run_picker(*, consolidate_on_exit: bool = True, keep_hot: bool = False
             p = providers[n - 1]
             if not p.ready:
                 r.system(
-                    f"{p.label} arrives in {p.note or 'a later phase'} — "
-                    "for now pick Claude, ChatGPT, or a local model."
+                    f"{p.label} can't be chosen yet: {p.status}"
+                    f"{' — ' + p.note if p.note else ''}. Pick an installed provider or a local model."
                 )
                 continue
             if p.key == "moe":
@@ -232,7 +217,7 @@ async def run_picker(*, consolidate_on_exit: bool = True, keep_hot: bool = False
                     consolidate_on_exit=consolidate_on_exit, keep_hot=keep_hot, moe=cfg,
                 )
                 return
-            # A ready frontier engine: Claude (SDK) or a signed-in CLI (codex/grok).
+            # An installed frontier engine. Sign-in was not checked; the engine reports it.
             await _run_harness(
                 r, provider=p.key, model=None,
                 consolidate_on_exit=consolidate_on_exit, keep_hot=keep_hot,

@@ -60,6 +60,18 @@ class TaskStore:
             # 'unassigned'); '' is a legacy row the startup migration has not placed.
             if "project" not in {r[1] for r in self._conn.execute("PRAGMA table_info(tasks)")}:
                 add_column(self._conn, "tasks", "project", "TEXT NOT NULL DEFAULT ''")
+            columns = {r[1] for r in self._conn.execute("PRAGMA table_info(tasks)")}
+            for name, definition in {
+                "managed_run": "TEXT NOT NULL DEFAULT ''",
+                "managed_contract": "TEXT NOT NULL DEFAULT ''",
+                "managed_revision": "INTEGER NOT NULL DEFAULT 0",
+                "managed_state": "TEXT NOT NULL DEFAULT ''",
+                "managed_receipt": "TEXT NOT NULL DEFAULT ''",
+            }.items():
+                if name not in columns:
+                    add_column(self._conn, "tasks", name, definition)
+            self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_managed_run "
+                               "ON tasks(managed_run) WHERE managed_run != ''")
             self._conn.commit()
 
     def _scope(self, scope: Any) -> tuple[str, ...] | None:
@@ -100,34 +112,82 @@ class TaskStore:
                notes: str | None = None, append_note: str | None = None,
                project: str | None = None) -> dict[str, Any] | None:
         """``project`` moves the task to that project (DREAM-108)."""
-        cur = self.get(task_id)
-        if cur is None:
-            return None
-        if project is not None and project != cur.get("project"):
-            with self._lock:
-                self._conn.execute("UPDATE tasks SET project=? WHERE id=?", (project, task_id))
-                self._conn.commit()
-            cur = self.get(task_id)
-        # An update that changes nothing must not reorder the list by touching
-        # updated_at (Gate 11): an empty append is not a touch.
-        if (title is None and status is None and notes is None
-                and not str(append_note or "").strip()):
-            return cur
-        if status is not None and status not in STATUSES:
-            raise ValueError(f"status must be one of {', '.join(STATUSES)}")
-        new_title = " ".join(str(title).split())[:200] if title is not None else cur["title"]
-        if not new_title:
-            raise ValueError("a task needs a title")
-        new_notes = cur["notes"] if notes is None else str(notes).strip()[:4000]
-        if append_note and str(append_note).strip():
-            new_notes = (new_notes.rstrip() + "\n" + str(append_note).strip()).strip()[:4000]
+        # Read/validate/write under the same lock: a managed link cannot race a
+        # legacy update into marking the protected row complete or moving it.
         with self._lock:
+            cur = self.get(task_id)
+            if cur is None:
+                return None
+            managed = bool(cur["managed_run"])
+            if managed and ((project is not None and project != cur["project"])
+                            or (title is not None and title != cur["title"])):
+                raise ValueError("managed task scope and contract are immutable; request a new reviewed run")
+            if status is not None and status not in STATUSES:
+                raise ValueError(f"status must be one of {', '.join(STATUSES)}")
+            new_title = " ".join(str(title).split())[:200] if title is not None else cur["title"]
+            if not new_title:
+                raise ValueError("a task needs a title")
+            new_notes = cur["notes"] if notes is None else str(notes).strip()[:4000]
+            if append_note and str(append_note).strip():
+                new_notes = (new_notes.rstrip() + "\n" + str(append_note).strip()).strip()[:4000]
+            if (title is None and status is None and notes is None
+                    and not str(append_note or "").strip() and project is None):
+                return cur
+            state = cur["managed_state"]
+            if managed:
+                # Model and ordinary task APIs can ask for review, never supply
+                # a verifier receipt. A checked row is an immutable completion
+                # projection; notes remain supplemental.
+                if status == "done" and cur["status"] != "done":
+                    state = "review_requested"
+                status = cur["status"] if cur["status"] == "done" or status == "done" else status
             self._conn.execute(
-                "UPDATE tasks SET title=?, status=?, notes=?, updated_at=? WHERE id=?",
-                (new_title, status or cur["status"], new_notes, _now(), task_id),
+                "UPDATE tasks SET title=?, status=?, notes=?, project=?, managed_state=?, updated_at=? WHERE id=?",
+                (new_title, status or cur["status"], new_notes,
+                 project if project is not None else cur["project"], state, _now(), task_id),
             )
             self._conn.commit()
-        return self.get(task_id)
+            return self.get(task_id)
+
+    def _attach_managed(self, run_id: str, goal: str, contract: str) -> dict[str, Any]:
+        """Harness-only projection. No tool route exposes managed fields.
+
+        The run ledger remains authoritative. Unique run identity makes repair
+        after a crash between SQLite commit and journal append idempotent.
+        Same-user host code/SQL is outside this API trust boundary.
+        """
+        owner = getattr(self._store, "project", None) or ""
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM tasks WHERE managed_run=?", (run_id,)).fetchone()
+            if row:
+                if row["managed_contract"] != contract or row["project"] != owner:
+                    raise ValueError("managed task contract or scope mismatch")
+                return dict(row)
+            now = _now()
+            self._conn.execute(
+                "INSERT INTO tasks(title,status,notes,created_at,updated_at,project,managed_run,"
+                "managed_contract,managed_revision,managed_state) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (" ".join(goal.split())[:200], "active", "", now, now, owner,
+                 run_id, contract, 1, "working"))
+            self._conn.commit()
+            return dict(self._conn.execute("SELECT * FROM tasks WHERE managed_run=?", (run_id,)).fetchone())
+
+    def _complete_managed(self, task_id: int, *, run_id: str, contract: str,
+                          revision: int, project: str, receipt_id: str) -> dict[str, Any]:
+        """Project an already committed checked-completion ledger receipt."""
+        with self._lock:
+            row = self.get(task_id)
+            if row is None or any(row[k] != v for k, v in {
+                "managed_run": run_id, "managed_contract": contract,
+                "managed_revision": revision, "project": project,
+            }.items()):
+                raise ValueError("managed task receipt identity mismatch")
+            if row["managed_receipt"] and row["managed_receipt"] != receipt_id:
+                raise ValueError("managed task already has a different checked receipt")
+            self._conn.execute("UPDATE tasks SET status='done', managed_state='checked_complete', "
+                               "managed_receipt=?, updated_at=? WHERE id=?", (receipt_id, _now(), task_id))
+            self._conn.commit()
+            return self.get(task_id)
 
     # --- reads -------------------------------------------------------------------------
 

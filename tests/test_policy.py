@@ -3,8 +3,6 @@ always ask, plan mode blocks changes, reads are free everywhere."""
 
 from pathlib import Path
 
-import pytest
-
 from dream.core import policy
 
 
@@ -71,10 +69,11 @@ def test_activity_classification():
     assert policy.classify_file_activity("Read", {"file_path": "x"}, WS) is None
 
 
-def test_interpreter_inline_code_escalates_in_auto_mode():
-    # Auto mode auto-allows plain shell, but an interpreter running INLINE CODE is
-    # unconfined (it can write anywhere) → must still ask. These forms previously
-    # slipped through: glued -c, version-suffixed binary, and stdin-piped code.
+def test_interpreter_inline_code_escalates_to_a_boundary():
+    # An interpreter running INLINE CODE is unconfined (it can write anywhere) → in
+    # Ask and Accept edits it asks as a boundary ("outside workspace"). These forms
+    # previously slipped through: glued -c, version-suffixed binary, and stdin-piped
+    # code. Auto runs every shell command since 2026-10-11 (the owner: no sandbox).
     escalate = [
         "python3 -c 'import os'",                 # canonical
         "python3 -c'import os; open(\"/x\",\"w\")'",  # GLUED flag (shlex → -cimport…)
@@ -85,16 +84,16 @@ def test_interpreter_inline_code_escalates_in_auto_mode():
         "echo 'import os' | python3",             # code via stdin, no flag
     ]
     for cmd in escalate:
-        assert policy.decide("Bash", {"command": cmd}, "auto", WS)[0] == "ask", cmd
+        assert policy.decide("Bash", {"command": cmd}, "auto", WS) == ("allow", "auto mode"), cmd
+        for mode in ("ask", "accept-edits"):
+            d, reason = policy.decide("Bash", {"command": cmd}, mode, WS)
+            assert d == "ask" and reason.startswith("outside workspace"), (cmd, mode, reason)
 
 
-async def test_running_a_script_file_in_workspace_is_not_escalated(tmp_path):
-    from dream.core.execution import ExecutionScope, probe_sandbox
+def test_running_a_script_file_in_workspace_is_not_escalated(tmp_path):
+    # Auto runs it, like every shell command since 2026-10-11 (no sandbox); where it asks, it is not a boundary.
     args = {"command": "python3 run.py --flag"}
-    assert policy.decide("run_bash", args, "auto", tmp_path)[0] == "ask"
-    scope = ExecutionScope(tmp_path)
-    capability = await probe_sandbox(scope)
-    if not capability.available:
-        pytest.skip(capability.reason)
-    assert policy.decide("run_bash", args, "auto", tmp_path,
-                         execution_scope=scope, execution_capability=capability)[0] == "allow"
+    assert policy.decide("run_bash", args, "auto", tmp_path) == ("allow", "auto mode")
+    for mode in ("ask", "accept-edits"):
+        d, reason = policy.decide("run_bash", args, mode, tmp_path)
+        assert d == "ask" and not reason.startswith("outside workspace"), (mode, reason)

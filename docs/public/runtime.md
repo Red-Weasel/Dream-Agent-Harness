@@ -59,10 +59,13 @@ Shift+Tab in the Chat composer cycles Ask, Accept edits, Auto, and Plan. The bad
 shows the last confirmed mode. A failed acknowledgment remains unconfirmed; a mode
 change does not answer an already-open permission request.
 
-Eligible native Bash commands can receive separate session-scoped exact-command
-sandbox or host grants. Changing the command, workspace, or execution scope can
-require a new decision. These are not universal shell permissions. Provider-owned
-executors may enforce additional approval rules.
+Dream has no shell sandbox: native Bash commands run directly on your computer, in
+the project folder, with your user account's normal access. Ask and Accept edits ask
+before each command. An ordinary command's approval can be kept for that exact command
+for the rest of the session; consequential commands (deletes, pushes, publishing) ask every
+time, and changing the command, workspace, or execution scope asks again. Auto runs
+every command without asking. Provider-owned executors may enforce additional approval
+rules.
 
 Active and wall-clock limits default to unlimited and can be explicitly configured.
 Approval waiting is separate from active work. Local HTTP generation also has no

@@ -187,5 +187,8 @@ async def test_a_subagent_loop_compacts_without_saving_notes(working, monkeypatc
     b._client = _SubClient(post_scripts=[_sub_final("done")])  # a subagent posts, non-streaming
     spec = SimpleNamespace(name="x", description="d", prompt="p", tool_names=())
     text, failed = await b._subagent_loop(spec, "x", "q " * 20000)  # ~10k tokens: over the line
-    assert not failed and calls and all(c["on_elide"] is None for c in calls)
+    assert calls and all(c["on_elide"] is None for c in calls)
+    # Compaction cannot shrink the task itself, and a dispatched worker is admitted at its window (DREAM-252): the
+    # request that cannot fit is refused before it is sent, not sent over the window.
+    assert failed and "no request was sent" in text and b._client.posted == []
     assert not [n for n in working.notes(False) if n["note"].startswith("[elided ")]

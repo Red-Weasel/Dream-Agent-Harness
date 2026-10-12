@@ -5,8 +5,8 @@ headless invocation, ``translate`` is a pure function of one decoded stream obje
 and ``capture_session`` pulls the resumable id out of the stream. Both are exercised
 over recorded fixtures with no subprocess (see ``tests/test_gemini_adapter.py``).
 
-Schema provenance (verified=from-docs / source, not yet run live here — gemini-cli is
-not installed):
+Schema provenance (from official source and fixtures, not live inference).
+MCP command syntax also checked against the installed Gemini CLI 0.52.0 bundle:
 
 * Event shapes come straight from the gemini-cli source, not just prose docs:
   ``packages/core/src/output/types.ts`` (the ``JsonStreamEvent`` union) and the emit
@@ -41,13 +41,15 @@ Known gaps to verify live (see ``open_questions`` in the returned schema):
     ``--resume`` (its ``coerce`` accepts an arbitrary string), which is the natural
     analogue of codex's ``resume <thread_id>`` but is UNVERIFIED — ``--resume latest``
     or full re-priming may be needed instead.
-  * MCP for gemini is wired through ``~/.gemini/settings.json`` by the orchestrator, not
-    per-invocation argv, so ``mcp_config`` is accepted and intentionally ignored here
-    and MCP tools surface as ordinary ``tool_use``/``tool_result`` events.
+  * MCP is registered by the orchestrator under a unique user-scoped server name,
+    then removed in the same scope on cleanup. Each invocation allows only that
+    name; it cannot discover other sessions' configured bridges. This does not
+    prove authentication or live tool use.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .base import Event
@@ -59,6 +61,35 @@ class GeminiAdapter(CliAdapter):
     cmd = "gemini"
     label = "Gemini · CLI"
 
+    @staticmethod
+    def _mcp_name(name: str) -> str:
+        if not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name) is None:
+            raise ValueError("Invalid Gemini MCP server name")
+        return name
+
+    def mcp_register_argv(self, name: str, env: dict[str, str], server_cmd: list[str]) -> list[str]:
+        self._mcp_name(name)
+        if (not isinstance(server_cmd, list) or not 1 <= len(server_cmd) <= 64
+                or any(not isinstance(part, str) or not part or '\x00' in part or len(part) > 8192 for part in server_cmd)
+                or server_cmd[0].startswith('-')):
+            raise ValueError("Invalid Gemini MCP server command")
+        if not isinstance(env, dict) or len(env) > 64:
+            raise ValueError("Invalid Gemini MCP server environment")
+        argv = [self.cmd, "mcp", "add", "--scope", "user", "--transport", "stdio"]
+        for key, value in env.items():
+            # Gemini 0.52.0's CLI splits KEY=value at '=' and drops empty values.
+            # Refuse lossy serialization rather than registering a broken bridge.
+            if (not isinstance(key, str) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", key) is None
+                    or not isinstance(value, str) or not value or '\x00' in value or '=' in value or len(value) > 8192):
+                raise ValueError("Invalid or unsupported Gemini MCP environment value")
+            argv += ["--env", f"{key}={value}"]
+        # Gemini requires both positional fields before '--'; server flags must
+        # follow it so they cannot override Gemini's registration options.
+        return [*argv, name, server_cmd[0], "--", *server_cmd[1:]]
+
+    def mcp_deregister_argv(self, name: str) -> list[str]:
+        return [self.cmd, "mcp", "remove", "--scope", "user", self._mcp_name(name)]
+
     # --- invocation -----------------------------------------------------------
 
     def argv(
@@ -66,13 +97,15 @@ class GeminiAdapter(CliAdapter):
         mcp_config: dict | None = None,
     ) -> list[str]:
         # -p/--prompt forces headless (non-interactive) mode; stream-json gives the
-        # JSONL event stream the backend reads. mcp_config is accepted for interface
-        # parity but not injected — gemini takes MCP servers from ~/.gemini/settings.json.
+        # JSONL event stream the backend reads. Gemini reads shared user settings;
+        # constrain discovery to this session's bridge instead of every entry.
         argv = [self.cmd, "--output-format", "stream-json"]
         argv += ["--approval-mode", self._approval_mode(sandbox)]
+        if mcp_config is not None:
+            argv += ["--allowed-mcp-server-names", self._mcp_name(mcp_config.get("name"))]
         if cwd:
-            # gemini's primary workspace is its process cwd; the backend doesn't set a
-            # subprocess cwd, so scope the workspace explicitly.
+            # The backend sets process cwd to this workspace. Retain the explicit
+            # inclusion as well; it does not replace Gemini's primary cwd.
             argv += ["--include-directories", cwd]
         if resume_id:
             argv += ["--resume", resume_id]

@@ -135,6 +135,10 @@ async def probe_none(self):
 oc.OpenAICompatBackend.ask = scripted_ask
 oc.OpenAICompatBackend._probe_n_ctx = probe_none
 
+from dream.local import machx
+
+machx.served_model_id = lambda: "scripted"  # the session's model: before a turn the TUI asks which is served
+
 from dream.tui.app import App
 
 

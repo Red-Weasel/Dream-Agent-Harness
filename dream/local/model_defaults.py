@@ -126,7 +126,7 @@ def recommended_modes(capabilities, architecture, thinking, meta):
     return modes
 
 
-def read_metadata(path):
+def read_metadata(path, *, include_template=True):
     """Read scalar model facts; skip tokenizer arrays without reading weight tensors."""
     if Path(path).is_dir():
         from .models import read_checkpoint_json
@@ -138,6 +138,10 @@ def read_metadata(path):
         if not isinstance(text, dict):
             raise ValueError('Invalid checkpoint text config')
         result = {'general.name': Path(path).name, 'general.architecture': architecture}
+        for source, target in [('_name_or_path', 'general.source_name'),
+                               ('torch_dtype', 'general.dtype')]:
+            if isinstance(config.get(source), str):
+                result[target] = config[source]
         for source, target in [('max_position_embeddings', 'context_length'),
                                ('num_hidden_layers', 'block_count'),
                                ('hidden_size', 'embedding_length')]:
@@ -180,7 +184,9 @@ def read_metadata(path):
         result={}
         for _ in range(count):
             key=string();kind=number('I')
-            keep=key in {'general.name','general.architecture','tokenizer.chat_template','general.base_model.0.repo_url'} or key.endswith(('.context_length','.block_count','.embedding_length','.attention.head_count','.attention.head_count_kv','.attention.key_length','.attention.value_length','.expert_count'))
+            keep=key in {'general.name','general.architecture','general.basename','general.finetune',
+                         'general.size_label','general.version','general.file_type','general.type',
+                         'general.base_model.0.repo_url','clip.has_vision_encoder'} or (include_template and key=='tokenizer.chat_template') or key.endswith(('.context_length','.block_count','.embedding_length','.attention.head_count','.attention.head_count_kv','.attention.key_length','.attention.value_length','.expert_count'))
             v=value(kind,keep)
             if keep and v is not None:result[key]=v
         if f.tell()>Path(path).stat().st_size:raise ValueError('Truncated GGUF metadata')
@@ -200,6 +206,31 @@ def inspect_hardware():
         result['ram_available_gb']=mem['MemAvailable']/2**30
     except (OSError,ValueError,KeyError):pass
     return result
+
+
+def model_facts(recommendation, capabilities, selection, *, path=None):
+    """Separate file limits, selected launch values and explicit engine reports."""
+    features = capabilities.get('features') or {}
+    supported = features.get('speculative')
+    supported = supported if type(supported) is bool else None
+    options = selection.get('options') or {}
+    enabled = options.get('speculative')
+    enabled = enabled if type(enabled) is bool else None
+    count = options.get('spec_k')
+    count = count if type(count) is int and count > 0 else None
+    # Presence of an architecture or an MTP sibling does not prove that the
+    # installed engine uses it. Only an explicit capability can name the draft.
+    spec = capabilities.get('speculative')
+    spec = spec if isinstance(spec, dict) else {}
+    draft = spec.get('draft_model') or spec.get('draft')
+    draft = draft if isinstance(draft, str) and draft.strip() else None
+    vision = features.get('vision')
+    limit = recommendation.get('context_limit')
+    return {'context_limit': limit, 'configured_context': selection.get('ctx'),
+            'context_source': ('Checkpoint config' if path and Path(path).is_dir() else 'GGUF header') if limit else None,
+            'vision': vision if type(vision) is bool else None,
+            'speculative': {'supported': supported, 'enabled': enabled, 'draft': draft, 'count': count,
+                            'source': 'Installed engine' if supported is not None else 'Not reported'}}
 
 
 def recommend(path,capabilities,*,hardware=None):

@@ -158,8 +158,8 @@ def test_argv_injects_session_scoped_mcp_overrides():
     joined = " ".join(argv)
     assert '-c mcp_servers.dream.command="/venv/py"' in joined
     assert 'mcp_servers.dream.args=["-m", "dream.mcp"]' in joined
-    assert 'mcp_servers.dream.env={DREAM_SESSION_ID="s1"}' in joined
-    assert argv[-1] == "hi"  # the prompt stays the final positional arg
+    assert 'mcp_servers.dream.env={"DREAM_SESSION_ID"="s1"}' in joined
+    assert argv[-1] == "-"  # the prompt travels on stdin
     # No config → no overrides (unchanged argv).
     assert "-c" not in adapter.argv("hi", cwd="/w", resume_id=None, sandbox="read-only")
 
@@ -172,7 +172,7 @@ def test_argv_first_turn_and_resume():
     first = adapter.argv("hello", cwd="/work", resume_id=None, sandbox="read-only")
     assert first == [
         "codex", "exec", "--json", "--skip-git-repo-check",
-        "--sandbox", "read-only", "-C", "/work", "hello",
+        "--sandbox", "read-only", "-C", "/work", "-",
     ]
 
     # Options belong to `exec` and must come BEFORE the subcommand. This test
@@ -183,7 +183,7 @@ def test_argv_first_turn_and_resume():
     resumed = adapter.argv("again", cwd="/work", resume_id="tid-9", sandbox="workspace-write")
     assert resumed == [
         "codex", "exec", "--json", "--skip-git-repo-check",
-        "--sandbox", "workspace-write", "-C", "/work", "resume", "tid-9", "again",
+        "--sandbox", "workspace-write", "-C", "/work", "resume", "tid-9", "-",
     ]
     # The flags must precede the subcommand, whatever else changes.
     assert resumed.index("--sandbox") < resumed.index("resume")
@@ -199,8 +199,9 @@ def _write_fake_codex(tmp_path, fixture: Path, argsdir: Path) -> Path:
     fake.write_text(
         "#!/usr/bin/env bash\n"
         f'DIR="{argsdir}"\n'
-        'n=$(ls "$DIR" | wc -l)\n'
+        'n=$(ls "$DIR"/call_* 2>/dev/null | wc -l)\n'
         'printf "%s" "$*" > "$DIR/call_$n"\n'
+        'cat > "$DIR/payload_$n"\n'
         f'cat "{fixture}"\n'
     )
     fake.chmod(0o755)
@@ -231,11 +232,13 @@ async def test_ask_subprocess_streams_events_and_captures_thread_id(tmp_path, mo
     call1 = (argsdir / "call_1").read_text()
     # First turn prepends the system prompt and does not resume.
     assert "resume" not in call0
-    assert "SYSTEM-PROMPT" in call0
+    assert "SYSTEM-PROMPT" not in call0
+    assert (argsdir / "payload_0").read_text() == "SYSTEM-PROMPT\n\nping"
     # Second turn resumes with the captured thread id and drops the system prompt.
     assert "resume" in call1
     assert "00000000-0000-4000-8000-000000000002" in call1
     assert "SYSTEM-PROMPT" not in call1
+    assert (argsdir / "payload_1").read_text() == "again"
 
     await backend.disconnect()
 

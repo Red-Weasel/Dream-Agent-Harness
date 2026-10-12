@@ -12,13 +12,11 @@ binary's ``src/headless.rs`` emitter, the ``streaming-json`` stream is:
     {"type":"end","stopReason":"EndTurn","sessionId":"abc123","requestId":"xyz789"}
     {"type":"error","message":"…"}            # emitted instead on failure
 
-The list is non-exhaustive: grok may also emit ``max_turns_reached`` and
-``auto_compact_*`` housekeeping events, so we switch on ``type`` and ignore the
-unknown. Crucially, **tool calls are NOT surfaced in the headless stream** — the
-per-tool ``tool_call`` events live only on grok's internal ACP pager bus
-(``acp_handler.rs``), which the headless emitter does not forward. So unlike the
-codex adapter, this one renders assistant text + reasoning + a terminal result,
-but no ``tool_use``/``tool_result`` events (see the module's open questions).
+The current bundled headless guide also documents ACP-derived ``tool_call`` /
+``tool_call_update`` events and per-response ``usage`` boundaries. Older emitters
+omit these. The terminal ``end.usage`` sums the turn's model calls; only a response
+usage boundary can supply current input context. Unknown housekeeping events are
+ignored.
 
 Because the stream is delta-based (many ``text`` chunks rather than codex's one
 whole ``agent_message``), ``translate`` accumulates the chunks in ``state`` and
@@ -32,6 +30,8 @@ init/system event in this stream), captured by :meth:`capture_session`.
 """
 
 from __future__ import annotations
+
+import json
 
 from .base import Event
 from .cli_agent import CliAdapter
@@ -86,6 +86,19 @@ class GrokAdapter(CliAdapter):
 
     def translate(self, obj: dict, state: dict) -> list[Event]:
         t = obj.get("type")
+        if t in ("tool_call", "tool_call_update"):
+            return self._tool(obj, state)
+        if t == "usage":
+            state["context_tokens"] = None
+            usage = obj.get("usage")
+            if isinstance(usage, dict):
+                names = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+                if (type(usage.get("input_tokens")) is int
+                        and all(type(usage.get(key, 0)) is int and usage.get(key, 0) >= 0 for key in names)):
+                    state["context_tokens"] = sum(usage.get(key, 0) for key in names)
+            # The end event already accounts for these requests; emitting usage
+            # again would count each response twice.
+            return []
         if t == "text":
             data = obj.get("data") or ""
             if not data:
@@ -110,6 +123,40 @@ class GrokAdapter(CliAdapter):
         # Unknown / non-rendered types (the schema is explicitly non-exhaustive).
         return []
 
+    @staticmethod
+    def _tool(obj: dict, state: dict) -> list[Event]:
+        identifier = obj.get("toolCallId")
+        if not isinstance(identifier, str) or not identifier:
+            return []
+        record = state.setdefault("tools", {}).setdefault(identifier, {})
+        if record.get("done"):
+            return []
+        name = obj.get("toolName") or record.get("name")
+        if not isinstance(name, str) or not name:
+            return []
+        record["name"] = name
+        events = []
+        if not record.get("called"):
+            parameters = obj.get("rawInput")
+            events.append(Event("tool_use", {"name": name, "id": identifier,
+                "input": parameters if isinstance(parameters, dict) else {}}))
+            record["called"] = True
+        if obj.get("status") in ("completed", "failed", "cancelled"):
+            output = obj.get("rawOutput")
+            if output is None:
+                content = obj.get("content")
+                parts = []
+                for item in content if isinstance(content, list) else []:
+                    block = item.get("content", item) if isinstance(item, dict) else {}
+                    if isinstance(block, dict) and isinstance(block.get("text"), str):
+                        parts.append(block["text"])
+                output = "\n".join(parts)
+            events.append(Event("tool_result", {"name": name, "id": identifier,
+                "content": output if isinstance(output, str) else json.dumps(output, ensure_ascii=False),
+                "is_error": obj["status"] != "completed"}))
+            record["done"] = True
+        return events
+
     def _end(self, obj: dict, state: dict) -> list[Event]:
         events: list[Event] = []
         text = state.pop("text", "")
@@ -122,10 +169,10 @@ class GrokAdapter(CliAdapter):
         events.append(Event("result", {
             "is_error": False,
             "subtype": "success" if is_success else str(stop),
-            # streaming-json's end event carries no usage/cost; keep the shape
-            # {} so the engine's stats reader (usage or {}) stays happy and any
-            # future usage field flows through untouched.
+            # Older emitters omit usage. Current emitters sum all model calls
+            # in this turn; those counts cannot describe current context fill.
             "usage": obj.get("usage") or {},
+            "usage_scope": "turn", "context_tokens": state.get("context_tokens"),
             "total_cost_usd": obj.get("total_cost_usd"),
         }))
         return events

@@ -132,6 +132,9 @@ async def str_replace_edit(args: dict[str, Any]) -> dict[str, Any]:
     raw = args.get("path")
     if not raw:
         return err("str_replace_edit needs a 'path' argument.")
+    from ..core.worker_checkpoints import protected_write
+    if protected_write(ctx().workspace, raw):
+        return err("Dream checkpoint authority and saved originals cannot be edited by file tools.")
     single = "old_string" in args or "new_string" in args
     batch = args.get("edits")
     if single and batch is not None:
@@ -328,17 +331,23 @@ async def copy_files(args: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(files, list) or not files:
         return err("copy_files needs a non-empty 'files' list of {src, dest, move?}.")
     plan: list[tuple[Path, Path, bool]] = []
+    from ..core.worker_checkpoints import protected_write, protected_copy
     for i, f in enumerate(files):
         if not isinstance(f, dict) or not f.get("src") or not f.get("dest"):
             return err(f"files[{i}] needs src and dest. Nothing was copied.")
+        if (protected_write(ctx().workspace, str(f['src']), recursive=True)
+                or protected_write(ctx().workspace, str(f['dest']))):
+            return err("Dream checkpoint authority and saved originals cannot be copied or moved by file tools. Nothing was copied.")
         src, dest = _resolve(str(f["src"])), _resolve(str(f["dest"]))
+        if protected_copy(ctx().workspace, src, dest, move=bool(f.get('move'))):
+            return err("Dream checkpoint authority or bounded copy validation refused the operation. Nothing was copied.")
         if not src.exists():
             return err(f"files[{i}]: no such source: {src}. Nothing was copied.")
         if src.is_dir() and (dest == src or dest.is_relative_to(src)):
             return err(f"files[{i}]: cannot copy a folder into itself ({src}). "
                        f"Nothing was copied.")
         plan.append((src, dest, bool(f.get("move"))))
-    result = await in_thread(_copy, plan)
+    result = await in_thread(_copy, plan, ctx().workspace)
     if not result.get("is_error"):
         for _, dest, _ in plan:   # a copied image shows in the owner's pane (DREAM-104)
             if dest.is_file():
@@ -346,10 +355,18 @@ async def copy_files(args: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _copy(plan: list[tuple[Path, Path, bool]]) -> dict[str, Any]:
+def _copy(plan: list[tuple[Path, Path, bool]], workspace=None) -> dict[str, Any]:
+    from ..core.worker_checkpoints import protected_write, protected_copy
     done: list[str] = []
     for src, dest, move in plan:
         try:
+            # Retain whole-batch preflight, then recheck effective paths after
+            # earlier operations. This is a file-tool guard, not an OS sandbox
+            # against unrelated same-user processes racing the filesystem.
+            if workspace is not None and (protected_write(workspace, src, recursive=True)
+                    or protected_copy(workspace, src, dest, move=move)):
+                before = ('\nCompleted before refusal:\n' + '\n'.join(done)) if done else ''
+                return err('Checkpoint authority or bounded copy validation refused the operation.' + before)
             dest.parent.mkdir(parents=True, exist_ok=True)
             if move:
                 shutil.move(str(src), str(dest))
@@ -402,6 +419,9 @@ async def delete_file(args: dict[str, Any]) -> dict[str, Any]:
             # enough — this tool never deletes outside the workspace at all.
             return err(f"Refusing to delete outside the workspace: {where}. Nothing was "
                        f"deleted. If you really mean it, use run_bash, which will ask.")
+    from ..core.worker_checkpoints import protected_write
+    if any(protected_write(ctx().workspace, p, recursive=True) for p in paths):
+        return err("Dream checkpoint authority or bounded path validation refused deletion. Nothing was deleted.")
     result = await in_thread(_delete, targets)
     for t in targets:   # the pane drops a file the owner was looking at (DREAM-104)
         if not t.exists() and not t.is_symlink():

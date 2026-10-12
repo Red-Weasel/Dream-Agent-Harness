@@ -60,19 +60,26 @@ async def test_engine_auto_runs_routine_shell_in_its_workspace_without_prompt(en
 
 
 async def test_engine_dangerous_commands_ask_and_each_approval_covers_one_attempt(engine, tmp_path):
-    instance, asked, human, _ = engine
-    path = tmp_path / "keep.txt"
+    instance, asked, human, mode = engine
+    # In Ask: auto runs every shell command without asking since 2026-10-11 (no sandbox; the end of this test).
+    mode["value"] = "ask"
+    path = tmp_path / "keep.py"
     path.write_text("keep")
-    assert await dispatch(instance, "rm keep.txt") is None
+    assert await dispatch(instance, "rm keep.py") is None
     assert await dispatch(instance, "git push origin main") is None
-    assert asked == ["rm keep.txt", "git push origin main"] and path.exists()
+    assert asked == ["rm keep.py", "git push origin main"] and path.exists()
     human["allow"] = True
-    result = await dispatch(instance, "rm keep.txt")
+    result = await dispatch(instance, "rm keep.py")
     assert not result.get("is_error"), result
     assert not path.exists() and not instance._command_approvals
     path.write_text("new data requires a new approval")
-    result = await instance._session_tools["run_bash"].handler({"command": "rm keep.txt"})
+    result = await instance._session_tools["run_bash"].handler({"command": "rm keep.py"})
     assert result["is_error"] and path.exists()
+    mode["value"] = "auto"
+    asked_before = list(asked)
+    result = await dispatch(instance, "rm keep.py")
+    assert not result.get("is_error"), result
+    assert not path.exists() and asked == asked_before and not instance._command_approvals
 
 
 async def test_engine_plan_and_context_mismatch_cannot_execute_native_shell(engine, tmp_path):

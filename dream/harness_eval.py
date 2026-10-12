@@ -1,4 +1,4 @@
-"""Offline task fixtures and exported-record grading, with no inference adapter.
+"""Offline task fixtures, grading, and an explicit isolated local HTTP fixture.
 
 Self-test drives fixed native CPU file tools, not an agent. Grade never executes
 recorded code or tool calls. See docs/harness-evaluation.md for the evidence limits.
@@ -413,11 +413,35 @@ def main(argv: list[str] | None = None) -> int:
     action = parser.add_mutually_exclusive_group()
     action.add_argument('--grade', type=Path, help='Grade exported JSON records without replaying tools or code.')
     action.add_argument('--list', action='store_true', help='Print tasks and fixture inputs; do not run tools.')
+    action.add_argument('--local', action='store_true', help='Explicitly evaluate one fixture on an already-serving local endpoint.')
+    parser.add_argument('--endpoint', help='Numeric-loopback HTTP endpoint ending in /v1; --local only.')
+    parser.add_argument('--model', help='Explicit already-served model; --local only.')
+    parser.add_argument('--run-dir', type=Path, help='New private directory for local fixture evidence; --local only.')
+    parser.add_argument('--discovery-mode', choices=('default', 'descriptions'), default=None)
+    parser.add_argument('--catalog-mode', choices=('fixture', 'builtin_tools', 'builtin_tools_skills'), default=None,
+                        help='Fixture tools, shipped tool metadata, or packaged workflow discovery; --local only.')
+    parser.add_argument('--max-requests', type=int, default=None)
+    parser.add_argument('--max-wall-seconds', type=int, default=None)
     parser.add_argument('--export', type=Path, help='Save self-test records to a new JSON file; never overwrites.')
     args = parser.parse_args(argv)
+    local_options = (args.endpoint, args.model, args.run_dir, args.discovery_mode, args.max_requests,
+                     args.max_wall_seconds, args.catalog_mode)
+    if args.local:
+        if not all((args.endpoint, args.model, args.run_dir)) or args.export:
+            parser.error('--local requires --endpoint, --model and a new --run-dir; it saves its own evidence.')
+    elif any(value is not None for value in local_options):
+        parser.error('Local endpoint/model/budget options require --local.')
     if args.export and (args.grade or args.list):
         parser.error('--export is only available for the default offline self-test.')
     try:
+        if args.local:
+            from .local_harness_eval import LocalEvalConfig, launch
+            report = launch(LocalEvalConfig(args.endpoint, args.model, args.discovery_mode or 'default',
+                24 if args.max_requests is None else args.max_requests,
+                300 if args.max_wall_seconds is None else args.max_wall_seconds,
+                args.catalog_mode or 'fixture'), args.run_dir)
+            print(json.dumps(report, indent=2))
+            return 0 if report.get('passed') is True else 1
         if args.list:
             print(json.dumps(load_cases(), indent=2))
             return 0

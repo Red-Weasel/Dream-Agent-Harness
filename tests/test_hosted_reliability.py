@@ -101,7 +101,8 @@ async def test_actual_cli_drop_keeps_partial_and_never_replays(tmp_path):
 async def test_owned_stop_settles_real_cli_and_explicit_next_turn_is_separate(tmp_path):
     backend = fake_backend(tmp_path,
         'import json, sys, time\n'
-        'if "STOP-PROBE" in sys.argv[-1]:\n'
+        'prompt = sys.stdin.read() if sys.argv[-1] == "-" else ""\n'  # as `codex exec -`: the prompt comes on stdin
+        'if "STOP-PROBE" in prompt:\n'
         ' print(json.dumps({"type":"item.completed","item":{"type":"agent_message","text":"partial"}}), flush=True)\n'
         ' time.sleep(30)\n'
         'else:\n'

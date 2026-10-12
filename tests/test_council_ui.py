@@ -1,4 +1,10 @@
-"""Real shipped Council UI, isolated HTTP fixtures, GPU-disabled Chromium."""
+"""Real shipped Council UI, isolated HTTP fixtures, GPU-disabled Chromium.
+
+Results are conditional on these fixtures: /api/control is answered by CouncilAPI below, not by a session. The dialog
+also asks for sign-in status (DREAM-246) on its own, independently of Council; that is answered from a fixed receipt
+and kept in `login_calls`, so `calls` stays exactly the Council operations the tests count. Sign-in behaviour itself
+is covered in test_council_login_ui.py.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -30,10 +36,16 @@ for choice in STATUS["choices"]:
     choice["models"] = [{"id": value, "label": "Astra" if value == "gpt-6-astra" else value} for value in MODEL_IDS]
 
 
+# What a session outside the desktop window answers to provider_login_status: synthetic, no provider or account data.
+LOGIN_STATUS = {"desktop": False, "targets": [], "request": None, "open": None, "sign_in_checked": False}
+LOGIN_ACTIONS = ("provider_login", "provider_login_status", "provider_login_ack")
+
+
 class CouncilAPI:
     def __init__(self):
         self.status = copy.deepcopy(STATUS)
         self.calls = []
+        self.login_calls = []     # the dialog's independent sign-in requests; never counted as Council operations
         self.headers = []
         self.fail = {}
         self.pause = {}
@@ -48,6 +60,13 @@ class CouncilAPI:
         action = payload["action"]
         if action == "permission_mode_status":
             await route.fulfill(json={"ok": True, "result": {"mode": "auto", "modes": ["ask", "accept", "auto", "plan"], "labels": {"auto": "Auto"}}})
+            return
+        if action in LOGIN_ACTIONS:
+            self.login_calls.append(payload)
+            if action == "provider_login_status":
+                await route.fulfill(json={"ok": True, "result": copy.deepcopy(LOGIN_STATUS)})
+            else:                 # these tests never ask for a sign-in window; one that did would be refused, not faked
+                await route.fulfill(status=400, json={"error": "Sign-in is not part of this fixture."})
             return
         self.calls.append(payload)
         self.headers.append(route.request.headers)
@@ -106,7 +125,7 @@ async def test_configuration_is_explicit_and_reload_reads_applied_choices(counci
     await page.get_by_label("Enable Claude").uncheck()
     await page.get_by_label("Enable Local HTTP").check()
     await page.get_by_label("Local HTTP member model", exact=True).select_option("review-local")
-    assert [c["action"] for c in api.calls] == ["council_status"]
+    assert api.calls and {c["action"] for c in api.calls} == {"council_status"}  # Sidebar also reads status; drafts must never apply.
     await expect(page.get_by_role("button", name="Review with council", exact=True)).to_be_disabled()
     await page.get_by_role("button", name="Apply Council").click()
     await expect(page.locator("#council-feedback")).to_contain_text("applied")
@@ -210,7 +229,7 @@ async def test_effort_choices_propagate_without_inventing_unknown_levels(council
     await page.get_by_label("Main provider").select_option("codex")
     await page.get_by_label("Main effort", exact=True).select_option("high")
     await page.get_by_label("Claude member effort").select_option("max")
-    assert [c["action"] for c in api.calls] == ["council_status"]
+    assert api.calls and {c["action"] for c in api.calls} == {"council_status"}  # Sidebar also reads status; drafts must never apply.
     await page.get_by_role("button", name="Apply Council").click()
     await expect(page.locator("#council-feedback")).to_contain_text("applied")
     assert api.calls[-1]["config"]["orchestrator_effort"] == "high"
@@ -268,7 +287,7 @@ async def test_same_provider_advisor_preserves_independent_model_and_effort(coun
     await expect(page.get_by_label("Codex member model", exact=True)).to_have_value("reviewer-model")
     await expect(page.get_by_label("Codex member effort")).to_have_value("xhigh")
     await page.get_by_label("Main model", exact=True).select_option("separate-main-model")
-    assert [c["action"] for c in api.calls] == ["council_status"]
+    assert api.calls and {c["action"] for c in api.calls} == {"council_status"}  # Sidebar also reads status; drafts must never apply.
     await page.get_by_role("button", name="Apply Council").click()
     await expect(page.locator("#council-feedback")).to_contain_text("applied")
     assert api.calls[-1]["config"]["advisors"] == ["codex"]
@@ -334,6 +353,31 @@ async def test_friendly_model_dropdown_and_active_assignment(council):
     await page.get_by_role("button", name="Assign to selected member", exact=True).click()
     await expect(page.locator("#council-feedback")).to_contain_text("returned")
     assert api.calls[-1] == {"action": "council_work", "question": "Improve the saved animation", "advisor": "claude"}
+    assert not errors
+
+
+async def test_antigravity_native_model_effort_and_configuration(council):
+    from dream.core.model_catalog import model_choices
+    page, api, _, errors = council
+    choice = api.status['choices'][3]
+    choice.update(key='antigravity', label='Gemini · Antigravity', available=True,
+                  note='CLI installed; sign-in not checked.', models=model_choices('antigravity'),
+                  efforts=['low','medium','high','xhigh','max'],
+                  effort_note='Native permissions; plan is guidance, not read-only containment.')
+    await open_council(page)
+    await page.get_by_label('Main provider').select_option('antigravity')
+    await page.get_by_label('Main model', exact=True).select_option(label='Gemini-3.8-Flash · High')
+    control=page.get_by_label('Main effort', exact=True)
+    await expect(control).to_be_enabled()
+    assert await control.locator('option').all_text_contents()==['Provider default','low','medium','high','xhigh','max']
+    await control.select_option('high')
+    await expect(page.locator('#council-effort-note')).to_contain_text('not read-only')
+    await page.screenshot(path='/tmp/dream-antigravity-council-20261006.png')
+    await page.get_by_role('button',name='Apply Council').click()
+    await expect(page.locator('#council-feedback')).to_contain_text('applied')
+    assert api.calls[-1]['model']=='gemini-3.8-flash-high'
+    assert api.calls[-1]['config']['orchestrator']=='antigravity'
+    assert api.calls[-1]['config']['orchestrator_effort']=='high'
     assert not errors
 
 

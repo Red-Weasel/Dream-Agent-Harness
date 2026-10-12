@@ -19,6 +19,9 @@ def _fmt(t: dict[str, Any], current: str | None = None, cross: bool = False) -> 
     line = f"#{t['id']} {t['title']} [{t['status']}]"
     if current is not None:
         line += projects.tag(t.get("project") or "", current, cross=cross)
+    if t.get("managed_run"):
+        review = "independently reviewed" if t.get("managed_state") == "checked_complete" else "independent review required"
+        line += " (managed: " + (t.get("managed_state") or "working") + "; " + review + ")"
     if t.get("notes"):
         line += "\n    " + t["notes"].strip().replace("\n", "\n    ")
     return line
@@ -119,6 +122,8 @@ async def task_update(args: dict[str, Any]) -> dict[str, Any]:
         return err(f"task_update: no task #{task_id}. task_list shows them.")
     note = await in_thread(_after_write, c)
     moved = f"Moved task #{task_id} from {moved_from} to {fields['project']}. " if moved_from else ""
+    if t.get("managed_run") and fields.get("status") == "done" and t["status"] != "done":
+        note += "\nReview requested; only a checked independent loop receipt can complete this managed task."
     return ok(moved + "Updated " + _fmt(t, current) + note)
 
 

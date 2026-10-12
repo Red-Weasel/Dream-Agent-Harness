@@ -25,7 +25,7 @@ DEFAULT = "Default"
 BUILTIN_PATH = Path(__file__).with_name("presets.json")
 KEYS = ("skills", "tools", "mcp", "plugins")
 # No preset removes these: the hands, notes and memory, skill lookup, the plan, tasks and the question tool.
-CORE_TOOLS = frozenset({"read_file", "write_file", "list_dir", "run_bash", "str_replace_edit", "grep", "note",
+CORE_TOOLS = frozenset({"artifact_read", "read_file", "write_file", "list_dir", "run_bash", "str_replace_edit", "grep", "note",
                         "read_notes", "recall", "remember", "memory_read", "skill_find", "skill_open", "skill_file",
                         "update_plan", "task_add", "task_update", "task_list", "ask_user_input"})
 _SESSION: dict[str, frozenset[str]] | None = None   # this process's session preset; None = Default (no filter)

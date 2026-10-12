@@ -54,8 +54,8 @@ async def test_no_view_has_bars_above_the_work_area_and_the_controls_sit_under_t
     await expect(floating).to_be_hidden()
     await page.evaluate("document.getElementById('dream-nav-chat').click()")
     await expect(page.locator("#cn-recording-float")).to_be_hidden()                  # in Chat the row under the composer says it
-    # The model's name, the work bar's first chip, is a chip here; it opens Council, where the main model changes.
-    await expect(page.locator("#cn-model")).to_have_text("fixture")
+    # The work bar no longer has the session's model (DREAM-251..285), so there is no model chip here.
+    await expect(page.locator("#cn-model")).to_have_count(0)
 
     # The More menu: one row per control of the hidden bars; a row clicks the page's own control.
     menu = page.locator("#chat-menu")

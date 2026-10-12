@@ -385,5 +385,5 @@ def test_the_runs_meter_carries_the_cap_and_the_time_limit():
 def test_claude_opus_5_5_is_in_the_bundled_catalog():
     from dream.core.model_catalog import model_choices
     choices = {m['id']: m for m in model_choices('anthropic')}
-    assert choices['claude-opus-5-5']['label'] == 'Claude Opus 5.5'
+    assert choices['claude-opus-5-5']['label'] == 'Opus 5.5'   # the Claude rows' labels no longer say Claude (acbb173)
     assert choices['claude-opus-5-5']['efforts'] == ['low', 'medium', 'high', 'xhigh', 'max']

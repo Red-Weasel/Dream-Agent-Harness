@@ -1,0 +1,298 @@
+#dream-deepsleep{--bg0:#0e0d0b;--bg:#191612;--panel:#211e19;--line:#494034;--fg:#f2ede3;--dim:#b9ae9c;color-scheme:dark;position:fixed;inset:0 0 0 190px;z-index:40;display:flex;flex-direction:column;background:var(--bg0,#0e0d0b);color:var(--fg,#f2ede3);font:13px/1.4 system-ui,sans-serif;min-width:0}
+#dream-deepsleep[hidden],#dream-deepsleep [hidden]{display:none!important}
+.dream-native #dream-deepsleep{left:0}
+#dream-deepsleep button,#dream-deepsleep select,#dream-deepsleep textarea{font:inherit;color:inherit;background:var(--panel,#211e19);border:1px solid var(--line,#494034);border-radius:8px;padding:7px 10px;min-width:0}
+#dream-deepsleep button{cursor:pointer;white-space:nowrap}#dream-deepsleep button:disabled{opacity:.5;cursor:default}#dream-deepsleep button:focus-visible,#dream-deepsleep select:focus-visible,#dream-deepsleep textarea:focus-visible{outline:2px solid #f6a06a;outline-offset:2px}
+#dream-deepsleep .ds-primary{background:#d97e47;color:#17120d;border-color:#f4a372;font-weight:650}
+#dream-deepsleep .ds-toolbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:18px 24px;border-bottom:1px solid var(--line,#332d24);background:var(--bg,#191612);flex-wrap:wrap;flex-shrink:0}
+#dream-deepsleep .ds-eyebrow{font-size:10px;letter-spacing:.2em;color:#f6a06a}#dream-deepsleep h1{font-size:19px;font-weight:550;margin:3px 0 0;letter-spacing:-.02em}
+#dream-deepsleep .ds-controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}#dream-deepsleep .ds-controls select{max-width:210px}
+#dream-deepsleep .ds-feedback{margin:0;padding:9px 24px;color:var(--dim,#b9ae9c);background:var(--bg,#191612);min-height:18px;flex-shrink:0}#dream-deepsleep .ds-feedback[data-error=true]{color:#ff9d9d}
+#dream-deepsleep .ds-viewport{flex:1;min-height:120px;min-width:0;overflow:auto;position:relative;overscroll-behavior:contain;background-image:radial-gradient(#7c663d33 .8px,transparent .8px);background-size:24px 24px}
+#dream-deepsleep .ds-board{position:relative;min-width:100%;min-height:100%}
+#dream-deepsleep .ds-empty{position:absolute;top:15%;left:50%;transform:translateX(-50%);max-width:480px;width:calc(100% - 48px);text-align:center;color:var(--dim,#b9ae9c)}#dream-deepsleep .ds-empty h2{font-size:26px;color:var(--fg,#f2ede3);font-weight:500}#dream-deepsleep .ds-empty-mark{font-size:44px;color:#f6a06a}
+#dream-deepsleep .ds-wires{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}#dream-deepsleep .ds-wire{fill:none;stroke:#d5ab67;stroke-width:2;opacity:.85}#ds-arrow path{fill:#d5ab67}
+#dream-deepsleep .ds-node{position:absolute;display:flex;flex-direction:column;box-sizing:border-box;min-width:340px;min-height:320px;border:1px solid #65543c;border-radius:12px;background:#171510;box-shadow:0 14px 30px #0005;overflow:hidden}
+#dream-deepsleep .ds-node[data-linking=true]{border-color:#f6a06a;box-shadow:0 0 0 2px #f6a06a55}
+#dream-deepsleep .ds-node-head{display:flex;align-items:center;gap:8px;padding:9px 10px;background:linear-gradient(100deg,#30271c,#241f17);flex-shrink:0}
+#dream-deepsleep .ds-node-head h2{font-size:13px;margin:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#dream-deepsleep .ds-node-head button{padding:4px 7px;font-size:11px}
+#dream-deepsleep .ds-move{touch-action:none;cursor:grab!important;font-size:19px!important;background:transparent!important;border:0!important}#dream-deepsleep .ds-state{font-size:10px;color:#c9b99e;max-width:90px;overflow:hidden;text-overflow:ellipsis}
+#dream-deepsleep .ds-ports{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:5px 10px;background:#1d1913;flex-shrink:0}#dream-deepsleep .ds-ports button{padding:2px 6px;font-size:11px;color:#dec18f;background:transparent;border-color:transparent}#dream-deepsleep .ds-model{font-size:10px;color:var(--dim,#b9ae9c);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#dream-deepsleep .ds-terminal{flex:1;min-height:70px;min-width:0;padding:8px;background:#11100e;overflow:hidden}#dream-deepsleep .ds-terminal .xterm{height:100%}
+#dream-deepsleep .ds-terminal-status{display:flex;justify-content:space-between;align-items:center;padding:3px 12px;font-size:10px;color:#b6a88f;background:#11100e;flex-shrink:0}#dream-deepsleep .ds-terminal-status button{font-size:10px;padding:2px 5px;background:transparent}
+#dream-deepsleep .ds-agents{display:flex;flex-wrap:wrap;gap:5px;list-style:none;padding:3px 12px;margin:0;max-height:55px;overflow:auto;font-size:10px;color:#d6c8ae}#dream-deepsleep .ds-agents li{padding:3px 7px;background:#332819;border-radius:12px}
+#dream-deepsleep .ds-node-note{font-size:11px;color:#e7b18e;padding:2px 24px 7px 12px;margin:0;max-height:50px;overflow:auto;flex-shrink:0}
+#dream-deepsleep .ds-resize{position:absolute;right:1px;bottom:1px;padding:1px 4px!important;border:0!important;background:transparent!important;color:#c7a570!important;cursor:nwse-resize!important;touch-action:none}
+#dream-deepsleep .ds-activity{position:absolute;right:16px;top:130px;width:min(360px,calc(100% - 32px));max-height:calc(100% - 155px);overflow:auto;z-index:1000;padding:18px;box-sizing:border-box;border:1px solid #6d5737;border-radius:12px;background:#1c1812;box-shadow:0 16px 60px #0008}#dream-deepsleep .ds-activity h2{font-size:14px;margin:0 0 9px}#dream-deepsleep .ds-activity p{font-size:12px;color:#c4b79f;overflow-wrap:anywhere}#dream-deepsleep .ds-link-row{display:flex;align-items:center;gap:9px;justify-content:space-between;padding:9px 0;border-bottom:1px solid #493b28;font-size:12px}#dream-deepsleep .ds-link-row button{font-size:11px;padding:4px 7px}#dream-deepsleep .ds-receipts{max-height:180px;overflow:auto}#dream-deepsleep .ds-forward-label{display:flex;gap:8px;font-size:11px;color:#d1c2a5;margin:12px 0}
+#dream-deepsleep .ds-group{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;padding:14px 24px;background:#251e15;border-bottom:1px solid #594830;flex-shrink:0}#dream-deepsleep .ds-group label{display:flex;flex-direction:column;gap:5px;font-size:11px;color:#cbbb9d}#dream-deepsleep .ds-group select{max-width:220px}#dream-deepsleep .ds-group textarea{flex:1;min-width:200px;min-height:60px;max-height:130px}
+@media(max-width:1199px){#dream-deepsleep{left:62px}.dream-native #dream-deepsleep{left:0}}
+@media(max-width:700px){#dream-deepsleep{left:0;top:42px}.dream-native #dream-deepsleep{top:0}#dream-deepsleep .ds-toolbar{padding:12px;gap:10px}#dream-deepsleep h1{font-size:17px}#dream-deepsleep .ds-controls{gap:6px}#dream-deepsleep .ds-controls select{max-width:160px}#dream-deepsleep .ds-feedback{padding:8px 12px;font-size:12px}#dream-deepsleep .ds-group{padding:12px}#dream-deepsleep .ds-activity{top:200px;max-height:calc(100% - 220px)}}
+#dream-deepsleep .ds-receipts pre { white-space:pre-wrap;overflow-wrap:anywhere;max-height:200px;overflow:auto;font-size:11px; }
+
+/* Per-terminal tools stay distinct from the provider's live terminal status. */
+#dream-deepsleep .ds-footer-tools{position:relative;flex-shrink:0;padding:7px 12px 0;background:#191610;border-top:1px solid #382e20;min-width:0}
+#dream-deepsleep .ds-repo{font-size:11px;color:#e0d2b9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:5px}
+#dream-deepsleep .ds-launch-info{display:block;font-size:10px;color:#b6a68a;margin:0 0 6px;overflow-wrap:anywhere}
+#dream-deepsleep .ds-footer-actions{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
+#dream-deepsleep .ds-footer-actions button{font-size:10px;padding:4px 7px;min-height:27px;background:#292015;border-color:#4d3b26;border-radius:6px}
+#dream-deepsleep .ds-footer-actions button[aria-pressed=true]{color:#ffd7bd;border-color:#ef9e6e;background:#493023}
+#dream-deepsleep .ds-file-explorer{position:absolute;bottom:100%;left:12px;right:12px;max-height:240px;display:flex;flex-direction:column;background:#251e15;border:1px solid #75603f;border-radius:10px;box-shadow:0 8px 30px #0008;z-index:3;padding:8px;overflow:hidden}
+#dream-deepsleep .ds-file-head{display:flex;gap:8px;align-items:center;margin-bottom:5px}
+#dream-deepsleep .ds-file-path{flex:1;min-width:0;font-size:11px;overflow-wrap:anywhere;color:#e0d2b9}
+#dream-deepsleep .ds-file-head button{font-size:12px;padding:2px 7px}
+#dream-deepsleep .ds-file-list{display:flex;flex-direction:column;gap:4px;overflow:auto;min-height:0}
+#dream-deepsleep .ds-file-list button{text-align:left;font-size:11px;white-space:normal;overflow-wrap:anywhere;padding:6px 8px}
+#dream-deepsleep .ds-file-list p{font-size:11px;margin:6px}
+
+/* Compact terminal workspace: keep native agent content dominant. */
+#dream-deepsleep .ds-toolbar{padding:7px 10px;gap:8px}
+#dream-deepsleep .ds-brand .ds-eyebrow{display:none}
+#dream-deepsleep .ds-brand h1{font-size:13px;margin:0;font-weight:600}
+#dream-deepsleep .ds-controls{gap:5px}
+#dream-deepsleep .ds-controls button,#dream-deepsleep .ds-controls select{padding:4px 7px;font-size:11px;border-radius:5px;max-width:165px}
+#dream-deepsleep .ds-feedback{padding:3px 10px;font-size:10px;min-height:14px}
+#dream-deepsleep .ds-node{border-color:#493c29;border-radius:5px;box-shadow:none;min-height:300px}
+#dream-deepsleep .ds-node-head{padding:3px 6px;gap:5px;background:#292218;min-height:24px}
+#dream-deepsleep .ds-node-head h2{font-size:11px}
+#dream-deepsleep .ds-node-head button{font-size:10px;padding:2px 5px;border-radius:4px}
+#dream-deepsleep .ds-node-head .ds-move{font-size:14px!important;padding:1px 3px!important}
+#dream-deepsleep .ds-terminal{padding:3px}
+#dream-deepsleep .ds-node-note:empty{display:none}
+#dream-deepsleep .ds-repo-bar{display:flex;align-items:center;gap:7px;min-height:23px}
+#dream-deepsleep .ds-repo-bar .ds-repo{flex:1;margin:0;font-size:10px;min-width:30px}
+#dream-deepsleep .ds-repo-bar>button,#dream-deepsleep .ds-repo-bar .ds-bar-side>button{padding:2px 5px;font-size:10px;border-radius:4px;flex-shrink:0}
+#dream-deepsleep .ds-repo-bar .ds-terminal-status{padding:0;background:transparent;gap:5px;font-size:9px;max-width:55%;min-width:0}
+#dream-deepsleep .ds-repo-bar .ds-terminal-status>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#dream-deepsleep .ds-native-pane .ds-footer-tools{padding:0 6px 3px}
+#dream-deepsleep .ds-native-pane .ds-tools-drawer{padding-top:5px}
+#dream-deepsleep .ds-native-pane.ds-compact .ds-agents{display:none}
+#dream-deepsleep .ds-compact .ds-node-note{max-height:28px;padding:2px 15px 3px 6px;font-size:10px}
+#dream-deepsleep.ds-has-maximized .ds-node:not(.ds-maximized){visibility:hidden}
+#dream-deepsleep.ds-has-maximized .ds-wires{visibility:hidden}
+#dream-deepsleep .ds-maximized .ds-move,#dream-deepsleep .ds-maximized .ds-resize{visibility:hidden}
+
+#dream-deepsleep .ds-wire-manual{stroke-dasharray:6 5}
+
+/* Workflow panes lead with the conversation and keep optional tools closed. */
+#dream-deepsleep .ds-terminal{position:relative}
+#dream-deepsleep .ds-terminal .ds-latest{position:absolute;right:22px;bottom:10px;z-index:5;padding:5px 10px;font-size:12px;border-radius:16px;background:#352919;box-shadow:0 2px 8px #0005}
+#dream-deepsleep .ds-node:not(.ds-native-pane) .ds-footer-tools{padding:0 10px 6px;border-top:0}
+#dream-deepsleep .ds-node:not(.ds-native-pane) .ds-repo-bar{gap:10px;min-height:28px}
+#dream-deepsleep .ds-node:not(.ds-native-pane) .ds-repo{font-size:12px;min-width:65px}
+#dream-deepsleep .ds-node:not(.ds-native-pane) .ds-effort{font-size:12px;padding:3px 0;background:transparent;border-color:transparent;color:#f2c96d;margin-left:auto}
+#dream-deepsleep .ds-node:not(.ds-native-pane) .ds-footer-actions{gap:4px}
+#dream-deepsleep .ds-node:not(.ds-native-pane) .ds-footer-actions button{font-size:12px;padding:3px 6px;min-height:27px;background:transparent;border-color:transparent}
+#dream-deepsleep .ds-node:not(.ds-native-pane) .ds-footer-actions button:hover{background:#332819;border-color:#685031}
+#dream-deepsleep .ds-node:not(.ds-native-pane) .ds-tools-drawer{padding-top:6px;max-height:180px;overflow:auto}
+#dream-deepsleep .ds-node:not(.ds-native-pane) .ds-launch-info{font-size:12px}
+#dream-deepsleep .ds-node:not(.ds-native-pane) .ds-node-note{font-size:12px;padding:2px 22px 5px 10px;max-height:50px}
+#dream-deepsleep .ds-node:not(.ds-native-pane){container-type:inline-size}
+#dream-deepsleep .ds-node:not(.ds-native-pane) .ds-permissions-info{font-size:12px;color:#f1ab67}
+@container(max-width:540px){
+  #dream-deepsleep .ds-node:not(.ds-native-pane) .ds-repo-bar{flex-wrap:wrap;gap:2px 8px}
+  #dream-deepsleep .ds-node:not(.ds-native-pane) .ds-permissions-info{padding-bottom:0}
+}
+
+#dream-deepsleep .ds-terminal .xterm-viewport{background-color:#11100e}
+
+/* Warm accents identify controls without tinting the conversation itself. */
+#dream-deepsleep .ds-node-head h2{color:#ffd29b}
+#dream-deepsleep .ds-ports button{color:#f2c96d}
+#dream-deepsleep .ds-node:not(.ds-native-pane) .ds-footer-actions button{color:#f5e8d3}
+#dream-deepsleep .ds-node:not(.ds-native-pane) .ds-footer-actions button[data-command=model],#dream-deepsleep .ds-node:not(.ds-native-pane) .ds-footer-actions button[data-command=changes]{color:#f2c96d}
+#dream-deepsleep .ds-node:not(.ds-native-pane) .ds-footer-actions button[aria-expanded]{color:#ffb56b}
+#dream-deepsleep .ds-node:not(.ds-native-pane) .ds-footer-actions button[aria-pressed]{color:#edc58b}
+#dream-deepsleep .ds-tools-repo{display:flex;align-items:center;gap:4px;max-width:100%;min-width:0}
+#dream-deepsleep .ds-tools-repo>button{flex-shrink:0}
+#dream-deepsleep .ds-node:not(.ds-native-pane) .ds-repo-badge{display:flex;align-items:center;gap:5px;min-width:0;max-width:100%;box-sizing:border-box;margin:0;padding:3px 7px;border:1px solid #9c7741;border-radius:5px;color:#ffe0a0;background:#211b12}
+#dream-deepsleep .ds-repo-badge>svg{width:15px;height:15px;flex-shrink:0;fill:none;stroke:#f2c96d;stroke-width:1.5;stroke-linejoin:round}
+#dream-deepsleep .ds-repo-badge>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+
+/* Floating connection points: no reserved gutter or terminal reflow. */
+#dream-deepsleep .ds-node{padding-left:0}
+#dream-deepsleep .ds-companions{position:absolute;inset:0;pointer-events:none;z-index:250}
+#dream-deepsleep .ds-wires.ds-character-wires{z-index:240}
+#dream-deepsleep .ds-avatar-anchor{position:absolute;display:flex;align-items:center;gap:3px;pointer-events:none;--avatar-height:104px}
+#dream-deepsleep .ds-avatar-anchor[data-size=small]{--avatar-height:72px}
+#dream-deepsleep .ds-avatar-anchor[data-size=large]{--avatar-height:144px}
+#dream-deepsleep .ds-avatar-anchor[hidden]{display:none}
+#dream-deepsleep .ds-avatar-port{pointer-events:auto;padding:2px 3px;min-width:22px;height:22px;font-size:10px;line-height:1;border:1px solid #80603a;border-radius:6px;background:#241b11;color:#ffcf83}
+#dream-deepsleep .ds-avatar-port[aria-pressed=true]{background:#794619;border-color:#ffc675;color:#fff3dd}
+#dream-deepsleep .ds-avatar-port:focus-visible{outline:2px solid #ffc675;outline-offset:2px}
+#dream-deepsleep .ds-avatar-slot{position:relative;width:calc(var(--avatar-height)*.87);height:var(--avatar-height);display:flex;align-items:center;justify-content:center;padding:0;border:0;background:transparent;box-shadow:none;cursor:grab;touch-action:none;pointer-events:auto;border-radius:8px}
+#dream-deepsleep .ds-avatar-slot[hidden]{display:none}
+#dream-deepsleep .ds-avatar-slot img{width:100%;height:100%;object-fit:contain;pointer-events:none;user-select:none}
+#dream-deepsleep .ds-avatar-slot:focus-visible{outline:1px dashed #ffc675;outline-offset:2px}
+#dream-deepsleep .ds-avatar-slot.ds-avatar-dragging{cursor:grabbing;filter:drop-shadow(0 2px 4px #0009)}
+#dream-deepsleep .ds-avatar-fallback{font:14px ui-monospace,monospace;color:#d7b16c;border:1px solid #685031;border-radius:6px;padding:4px}
+#dream-deepsleep[data-skin=characters] .ds-node{border-color:transparent;background:transparent;border-radius:2px}
+#dream-deepsleep[data-skin=characters] .ds-node-head{background:#191610;box-shadow:inset 0 1px #8b6b3b}
+#dream-deepsleep[data-skin=characters] .ds-terminal{box-shadow:inset 1px 0 #342a1b,inset -1px 0 #342a1b}
+#dream-deepsleep[data-skin=characters] .ds-ports{background:#171510}
+#dream-deepsleep #ds-character-toggle[aria-pressed=true]{color:#ffcf83;border-color:#a47c42;background:#302316}
+#dream-deepsleep .ds-character-choice{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:12px;color:#e4c58a;margin-top:6px}
+#dream-deepsleep .ds-character-choice select{font-size:12px;padding:3px 6px}
+
+/* Text layouts share one terminal and one read-only activity record. */
+#dream-deepsleep .ds-content{display:flex;flex:1;flex-direction:column;min-height:82px;min-width:0;overflow:hidden;background:#11100e}
+#dream-deepsleep .ds-content>.ds-terminal{min-height:70px}
+#dream-deepsleep .ds-event-panel{display:flex;flex-direction:column;min-height:0;min-width:0;flex:1;overflow:hidden;color:#f2ede3}
+#dream-deepsleep .ds-event-status{flex-shrink:0;margin:0;padding:5px 9px;color:#c7b99f;font-size:11px;line-height:1.35}
+#dream-deepsleep .ds-event-list{position:relative;flex:1;min-height:0;overflow:auto;overflow-anchor:none;padding:0 10px 6px;scrollbar-color:#6c5437 #11100e;font:13px/1.5 ui-monospace,SFMono-Regular,monospace}
+#dream-deepsleep .ds-event{border-bottom:1px solid #332a20;padding:5px 0;overflow-wrap:anywhere}
+#dream-deepsleep .ds-event summary{cursor:pointer;line-height:1.5}
+#dream-deepsleep .ds-event-label{color:#e9aa62;margin-right:10px}
+#dream-deepsleep .ds-event[data-kind=user] .ds-event-label{color:#f2d38e}
+#dream-deepsleep .ds-event[data-kind=error] .ds-event-label{color:#ff9b85}
+#dream-deepsleep .ds-event-preview{color:#bfb39f;font-size:12px}
+#dream-deepsleep .ds-event[open] .ds-event-preview{display:none}
+#dream-deepsleep .ds-event pre{margin:6px 0 8px;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;color:#f2ede3}
+#dream-deepsleep .ds-event-panel[data-layout=conversation] .ds-event{padding:10px 0}
+#dream-deepsleep .ds-event-panel[data-layout=activity] .ds-event-label{display:inline-block;min-width:115px}
+#dream-deepsleep .ds-with-events>.ds-terminal{flex:0 0 94px;min-height:70px}
+#dream-deepsleep .ds-terminal-toggle{flex-shrink:0;text-align:left;border-radius:0;font-size:11px;padding:4px 9px;background:#231d15;border-color:#51412b;color:#efd09a}
+#dream-deepsleep .ds-events-unavailable>.ds-event-panel{flex:0 0 auto;max-height:80px}
+#dream-deepsleep .ds-events-unavailable>.ds-terminal{flex:1}
+#dream-deepsleep .ds-event summary:focus-visible,#dream-deepsleep .ds-event-list:focus-visible{outline:1px solid #e9aa62;outline-offset:-1px}
+
+#dream-deepsleep .ds-event-panel[data-stale=true] .ds-event-list{opacity:.65}
+
+#dream-deepsleep .ds-appearance-controls{display:flex;flex-wrap:wrap;align-items:center;gap:0 12px}
+#dream-deepsleep .ds-display-name{display:flex;flex:1;min-width:215px;align-items:center;flex-wrap:wrap;gap:6px 8px;margin-top:6px;font-size:12px;color:#e4c58a}
+#dream-deepsleep .ds-display-name input{box-sizing:border-box;flex:1;width:100px;min-width:100px;max-width:100%;padding:4px 6px;border:1px solid #65543c;border-radius:4px;background:#11100e;color:#f2ede3;font:13px system-ui,sans-serif}
+#dream-deepsleep .ds-terminal-name-row{display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;min-width:0}
+#dream-deepsleep .ds-terminal-name-row .ds-display-name{min-width:min(215px,100%)}
+#dream-deepsleep .ds-terminal-name-row button{padding:4px 7px;font-size:12px}
+#dream-deepsleep .ds-name-status{flex-basis:100%;font-size:11px;color:#e4c58a;overflow-wrap:anywhere}
+#dream-deepsleep .ds-name-status:empty{display:none}
+
+/* Header collapse is a local view state; expanded geometry and PTY survive. */
+#dream-deepsleep .ds-node.ds-collapsed{min-height:44px}
+#dream-deepsleep .ds-node.ds-collapsed>:not(.ds-node-head):not(.ds-avatar-slot){display:none!important}
+#dream-deepsleep .ds-node.ds-collapsed .ds-node-head{height:42px;min-height:0;box-sizing:border-box}
+#dream-deepsleep .ds-node.ds-collapsed .ds-login{display:none}
+#dream-deepsleep .ds-collapsed-output{font-size:10px;color:#ffc675;white-space:nowrap}
+
+/* DREAM-277: shared compact frame, with useful input space in every layout. */
+#dream-deepsleep .ds-node-head{min-height:24px;background:#181612;border-bottom:1px solid #342d24}
+#dream-deepsleep .ds-node-head h2{font-size:12px;color:#e9c99e}
+#dream-deepsleep .ds-node-head .ds-state{font-size:10px}
+#dream-deepsleep .ds-node .ds-footer-tools{padding:3px 7px 4px;border-top:1px solid #342d24;background:#181612}
+#dream-deepsleep .ds-node .ds-repo-bar{min-height:26px;gap:6px;flex-wrap:nowrap}
+#dream-deepsleep .ds-tools-repo{flex:1;overflow:hidden;gap:6px}
+#dream-deepsleep .ds-node .ds-repo-badge{font-size:11px;min-width:0;flex:1;border:0;background:transparent;padding:2px 0;color:#bdb4a5}
+#dream-deepsleep .ds-node .ds-repo-badge>svg{width:13px;height:13px;stroke:#bca078}
+#dream-deepsleep .ds-node .ds-effort{font-size:11px;flex-shrink:0;padding:3px 5px;background:transparent;border:0;color:#dec18d;margin:0}
+#dream-deepsleep .ds-node .ds-tools-drawer{padding:6px 0 2px;max-height:185px;overflow:auto;border-top:1px solid #342d24}
+#dream-deepsleep .ds-node .ds-footer-actions{gap:4px}
+#dream-deepsleep .ds-node .ds-footer-actions button{font-size:11px;padding:3px 6px;min-height:25px;background:transparent;border:1px solid #40362a;color:#e0d4bf}
+#dream-deepsleep .ds-node .ds-launch-info{font-size:10px;color:#a99e8b;margin:3px 0 5px}
+#dream-deepsleep .ds-repo-bar .ds-terminal-status{max-width:30%;font-size:9px}
+#dream-deepsleep .ds-repo-bar .ds-terminal-status>span{display:none}
+#dream-deepsleep .ds-event-panel{flex:1 1 45%}
+#dream-deepsleep .ds-with-events>.ds-terminal{flex:1 1 55%;min-height:130px}
+#dream-deepsleep .ds-events-empty>.ds-event-panel,#dream-deepsleep .ds-events-unavailable>.ds-event-panel{flex:0 0 auto;max-height:42px}
+#dream-deepsleep .ds-events-empty>.ds-event-panel .ds-event-list{display:none}
+#dream-deepsleep .ds-events-empty>.ds-event-panel:has(.ds-event-retry:not([hidden])){max-height:none}
+#dream-deepsleep .ds-with-events.ds-events-unavailable>.ds-event-panel{flex:1 1 45%;max-height:none}
+#dream-deepsleep .ds-event-retry{font:inherit;padding:1px 6px;margin-left:8px;white-space:nowrap}
+#dream-deepsleep .ds-events-empty>.ds-terminal,#dream-deepsleep .ds-events-unavailable>.ds-terminal{flex:1;min-height:70px}
+#dream-deepsleep .ds-with-events.ds-events-unavailable>.ds-terminal{flex:1 1 55%;min-height:130px}
+#dream-deepsleep .ds-terminal-toggle{font-size:10px;padding:2px 8px;min-height:23px;background:#181612;border:0;border-top:1px solid #342d24;color:#bca98a}
+
+#dream-deepsleep .ds-node.ds-collapsed .ds-node-head{border-bottom:0}
+#dream-deepsleep[data-skin=characters] .ds-node{border:1px solid #493c29;background:#171510}
+#dream-deepsleep[data-skin=characters] .ds-node-head{box-shadow:none}
+#dream-deepsleep .ds-node .ds-node-note{font-size:11px;padding:3px 8px;max-height:42px}
+
+#dream-deepsleep .ds-node:not(.ds-native-pane) .ds-repo-badge{border:0;background:transparent;flex:0 1 auto;font-size:11px;min-width:0;padding:2px 0;color:#bdb4a5}
+#dream-deepsleep .ds-node .ds-footer-tools{padding-bottom:2px}
+
+/* Optional label stays beside creation controls in the board or shell header. */
+#dream-deepsleep .ds-terminal-name,#dream-deepsleep-header .ds-terminal-name{box-sizing:border-box;width:178px;max-width:100%;min-width:100px;font:inherit;color:inherit;background:var(--panel,#211e19);border:1px solid var(--line,#494034);border-radius:8px;padding:7px 10px}
+#dream-deepsleep .ds-terminal-name:focus-visible,#dream-deepsleep-header .ds-terminal-name:focus-visible{outline:2px solid #f6a06a;outline-offset:2px}
+
+/* One movable board channel, with explicit recipients and recorded delivery states. */
+#dream-deepsleep .ds-activity{display:flex;flex-direction:column;padding:0;overflow:hidden;max-width:calc(100% - 16px);border-radius:10px;background:#1c1812}
+#dream-deepsleep .ds-channel-head{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid #55432c;flex-shrink:0}
+#dream-deepsleep .ds-channel-head h2{flex:1;margin:0;font-size:15px}
+#dream-deepsleep .ds-channel-head button{padding:5px 8px;font-size:12px}
+#dream-deepsleep .ds-channel-move{cursor:grab;touch-action:none}
+#dream-deepsleep .ds-channel-size{position:absolute;left:1px;bottom:1px;padding:1px 4px!important;border:0!important;background:transparent!important;color:#c7a570!important;cursor:nesw-resize!important;touch-action:none;z-index:2}
+#dream-deepsleep .ds-channel-size:hover,#dream-deepsleep .ds-channel-size:focus-visible{color:#f5c986!important}
+#dream-deepsleep .ds-channel-about,#dream-deepsleep .ds-channel-empty{padding:8px 12px;margin:0;font-size:11px;flex-shrink:0}
+#dream-deepsleep .ds-channel-history{flex:1;min-height:70px;overflow:auto;padding:8px 12px;overflow-anchor:none;scrollbar-color:#80613d #1c1812}
+#dream-deepsleep .ds-channel-message{max-width:92%;padding:9px 11px;margin:0 0 12px;border:1px solid #53432d;border-radius:10px;background:#262119;overflow-wrap:anywhere}
+#dream-deepsleep .ds-channel-message.ds-channel-request{margin-left:8%;background:#38291a;border-color:#80532e}
+/* The project's open board and the direct link messages (2026-10-10): a pinned note, and a message on a cord. */
+#dream-deepsleep .ds-channel-message.ds-channel-board{background:#1f2420;border-color:#4f6a4f}
+#dream-deepsleep .ds-channel-message.ds-channel-board .ds-channel-author{color:#a8d8a0}
+#dream-deepsleep .ds-channel-message.ds-channel-direct{margin-left:4%;background:#23181a;border:1px dashed #b5523a}
+#dream-deepsleep .ds-channel-message.ds-channel-direct .ds-channel-author{color:#ff9a6a}
+#dream-deepsleep .ds-channel-message p{white-space:pre-wrap;font:14px/1.5 system-ui,sans-serif;color:#f2ede3;margin:6px 0}
+#dream-deepsleep .ds-channel-author{font-size:12px;font-weight:600;color:#f5c986}
+#dream-deepsleep .ds-channel-state{font-size:11px;color:#c5b898}
+#dream-deepsleep .ds-channel-message[data-state=failed] .ds-channel-state,#dream-deepsleep .ds-channel-message[data-state=failed] p{color:#ffb5a2}
+#dream-deepsleep .ds-channel-connections{flex-shrink:0;padding:7px 12px;border-top:1px solid #493b28;max-height:28%;overflow:auto;font-size:12px}
+#dream-deepsleep .ds-channel-connections summary{cursor:pointer}
+#dream-deepsleep .ds-channel-composer{position:relative;display:flex;flex-wrap:wrap;gap:7px;flex-shrink:0;padding:10px 12px;border-top:1px solid #55432c}
+#dream-deepsleep .ds-channel-composer textarea{box-sizing:border-box;width:100%;resize:vertical;max-height:150px;min-height:62px;font-size:14px}
+#dream-deepsleep .ds-channel-status{flex:1;min-width:150px;margin:0;font-size:11px;align-self:center}
+#dream-deepsleep .ds-channel-suggestions{position:absolute;bottom:100%;left:12px;right:12px;max-height:220px;overflow:auto;display:flex;flex-direction:column;gap:4px;padding:7px;border:1px solid #80613d;border-radius:8px;background:#272016;box-shadow:0 6px 24px #0008}
+#dream-deepsleep .ds-channel-suggestions button{text-align:left;white-space:normal;font-size:12px;padding:7px}
+#dream-deepsleep .ds-session-id{font:9px ui-monospace,monospace;color:#bbab8f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100px;flex-shrink:1}
+
+#dream-deepsleep .ds-node.ds-native-pane .ds-footer-tools{padding-top:2px;padding-bottom:2px}
+
+/* In and Out (the owner, 2026-10-10): wide rounded pills in the middle of a tile's top and bottom bars. The two sides
+   of a bar share its width, so the pill sits in the middle; a crowded side pushes it over instead of covering it. */
+#dream-deepsleep .ds-bar-side{display:flex;align-items:center;gap:inherit;flex:1 1 0}
+#dream-deepsleep .ds-bar-start{min-width:0}
+#dream-deepsleep .ds-bar-end{justify-content:flex-end}
+#dream-deepsleep .ds-port-pill{flex:none;min-width:72px;padding:3px 18px!important;border-radius:999px!important;font-size:11px!important;
+  font-weight:600;letter-spacing:.05em;color:#ffd7a8;background:#3a2716;border:1px solid #a8743d}
+#dream-deepsleep .ds-port-pill:hover:not(:disabled),#dream-deepsleep .ds-port-pill:focus-visible{color:#fff0d7;background:#4d321b;border-color:#e9aa62}
+#dream-deepsleep .ds-node[data-linking=true] .ds-port-pill{border-color:#ffb35c;box-shadow:0 0 0 2px #ff8a1c55}
+/* A shown character carries this tile's In and Out (its own buttons; the cords attach there), so the pills step aside. */
+#dream-deepsleep .ds-node.ds-character-shown .ds-port-pill{display:none}
+/* The Chat tab's controls for a Dream terminal (2026-10-10): one row under the bottom bar, starting at the repo,
+   drawn as the toolbar's own small rounded chips. */
+#dream-deepsleep .ds-chat-row{display:flex;flex-wrap:wrap;align-items:center;gap:5px;padding:0 0 3px;font-size:10.5px;line-height:16px;color:#c6bbaa;min-width:0}
+#dream-deepsleep .ds-chat-row .ds-chip{padding:0 9px!important;border-radius:999px!important;font-size:10.5px!important;line-height:16px;min-height:0;
+  background:transparent;border:1px solid #5a4630;color:#f0dcbc}
+#dream-deepsleep .ds-chat-row .ds-chip:hover:not(:disabled),#dream-deepsleep .ds-chat-row .ds-chip:focus-visible{border-color:#e9aa62;color:#fff0d7}
+#dream-deepsleep .ds-chat-row .ds-mode-chip[data-mode=auto]{border-color:#e9aa62;color:#ffd7a8;background:#3a2716}
+#dream-deepsleep .ds-chat-row .ds-preset-pick{display:flex;align-items:center;gap:5px;margin:0}
+#dream-deepsleep .ds-chat-row select{font-size:10.5px;padding:0 4px;height:18px;max-width:130px;min-height:0}
+#dream-deepsleep .ds-chat-row .ds-preset-cost{color:#a89a86;white-space:nowrap}
+#dream-deepsleep .ds-chat-row .ds-read-chip.on{border-color:#e9aa62;color:#ffd7a8;background:#3a2716}
+#dream-deepsleep .ds-chat-row .ds-ctx-info{color:#f5cf70;white-space:nowrap}
+
+/* The tile's bottom area, polished (the owner, 2026-10-11; this block overrides the layered rules above).
+   Two even rows. Row one: Tools and the repo on the left, Out in the middle, the terminal's id and Effort on the
+   right. Row two: three groups -- this terminal's mode and context | Read x2 and Handoff | the skill preset and
+   what it costs -- that wrap as whole groups on a narrow tile and never overlap. Every control is 24 px tall,
+   11 px text, 6 px apart; groups are 14 px apart. */
+#dream-deepsleep .ds-node .ds-footer-tools{padding:6px 10px 7px;background:#16130f;border-top:1px solid #3a3025}
+#dream-deepsleep .ds-node .ds-footer-tools .ds-repo-bar{min-height:24px;gap:8px;flex-wrap:nowrap}
+#dream-deepsleep .ds-node .ds-footer-tools .ds-tools-repo{gap:8px}
+#dream-deepsleep .ds-node .ds-footer-tools :is(.ds-tools-repo>button,.ds-effort,.ds-chip){height:24px;min-height:24px;box-sizing:border-box;
+  padding:0 10px!important;font:500 11px/22px system-ui,sans-serif!important;white-space:nowrap}
+#dream-deepsleep .ds-node .ds-footer-tools .ds-tools-repo>button{border-radius:6px;background:#221c15;border:1px solid #4a3b29;color:#f0dcbc}
+#dream-deepsleep .ds-node .ds-footer-tools .ds-tools-repo>button:hover,#dream-deepsleep .ds-node .ds-footer-tools .ds-tools-repo>button:focus-visible{border-color:#e9aa62}
+#dream-deepsleep .ds-node .ds-footer-tools .ds-repo-badge{font-size:11px;color:#c2b39c;gap:5px;padding:0;border:0;background:transparent}
+#dream-deepsleep .ds-node .ds-footer-tools .ds-effort{border-radius:6px;background:transparent;border:1px solid transparent;color:#e9c37f;margin:0}
+#dream-deepsleep .ds-node .ds-footer-tools .ds-effort:hover,#dream-deepsleep .ds-node .ds-footer-tools .ds-effort:focus-visible{border-color:#4a3b29}
+#dream-deepsleep .ds-node .ds-footer-tools .ds-session-id{font:10px ui-monospace,monospace;color:#8f8371;max-width:96px}
+#dream-deepsleep .ds-node .ds-footer-tools .ds-chat-row{margin-top:6px;padding:0;gap:6px 14px;font:11px/24px system-ui,sans-serif;color:#a89a86}
+#dream-deepsleep .ds-node .ds-footer-tools .ds-chip-group{display:flex;align-items:center;gap:6px;flex:0 1 auto;min-width:0}
+#dream-deepsleep .ds-node .ds-footer-tools .ds-chip-group:last-child{flex:1 1 140px}
+#dream-deepsleep .ds-node .ds-footer-tools .ds-chip{border-radius:999px;background:transparent;border:1px solid #4a3b29;color:#e9dcc6}
+#dream-deepsleep .ds-node .ds-footer-tools .ds-chip.on{border-color:#e9aa62;color:#ffd7a8;background:#3a2716}
+#dream-deepsleep .ds-node .ds-footer-tools .ds-mode-chip::before{content:"";display:inline-block;width:6px;height:6px;margin-right:6px;border-radius:50%;
+  background:currentColor;vertical-align:1px;opacity:.85}
+#dream-deepsleep .ds-node .ds-footer-tools .ds-ctx-info{font:10.5px ui-monospace,monospace;color:#d8b968;white-space:nowrap}
+#dream-deepsleep .ds-node .ds-footer-tools .ds-preset-pick{display:flex;align-items:center;gap:6px;margin:0;color:#a89a86;min-width:0;flex-shrink:0}
+#dream-deepsleep .ds-node .ds-footer-tools .ds-preset-pick select{height:24px;max-width:160px;min-width:90px;padding:0 6px;border-radius:6px;
+  font-size:11px;background:#221c15;border:1px solid #4a3b29;color:#f0dcbc;text-overflow:ellipsis}
+#dream-deepsleep .ds-node .ds-footer-tools .ds-preset-cost{font-size:10.5px;color:#8f8371;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}

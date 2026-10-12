@@ -64,6 +64,14 @@ def _isolate_runtime_settings(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _prompt_optimizer_off(monkeypatch):
+    """The prompt optimizer reads every typed prompt with two extra model requests (2026-10-11): off in tests,
+    Dream terminals they start included, so a test's model sees only the requests it scripts. Its own tests turn
+    it on."""
+    monkeypatch.setenv("DREAM_PROMPT_OPTIMIZER", "0")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_logs(tmp_path, monkeypatch):
     """Tests build real Engines whose _log_stderr writes to config.LOG_DIR — send
     that at a temp dir so the suite never pollutes the live var/logs/cli.log (which

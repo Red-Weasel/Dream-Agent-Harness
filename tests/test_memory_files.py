@@ -215,7 +215,9 @@ def test_the_index_is_loaded_into_the_wake_context(mem_root, tmp_path):
 def test_project_instructions_come_from_the_workspace(tmp_path, mem_root):
     ws = tmp_path / "ws"
     ws.mkdir()
-    assert instructions.project_instructions(ws) == ""
+    initial = instructions.project_instructions(ws)
+    assert '### DREAM.md' in initial
+    assert (ws / 'DREAM.md').exists() and (ws / 'AGENTS.md').exists()
     assert instructions.project_instructions(None) == ""
     (ws / "DREAM.md").write_text("Run tests with make test.\n")
     (ws / "CLAUDE.md").write_text("Never touch migrations.\n")

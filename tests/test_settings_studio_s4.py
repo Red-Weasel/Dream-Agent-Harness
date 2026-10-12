@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 from playwright.async_api import expect
 
+from chat_more import more
 from dream.core import council_config, moe, settings
 from dream.core.profiles import read_settings, settings_path
 from dream.core.providers import PROVIDERS
@@ -36,7 +37,8 @@ def council_file(tmp_path, monkeypatch):
 
 
 def _council(**changes):
-    cfg = moe.MoeConfig("machx", ["codex", "gemini"], advisor_models={"codex": "gpt-6-astra"},
+    # Gemini in a Council is Antigravity (DREAM-251..285): a saved Council naming the retired Gemini CLI is refused.
+    cfg = moe.MoeConfig("machx", ["codex", "antigravity"], advisor_models={"codex": "gpt-6-astra"},
                         advisor_efforts={"codex": "high"}, orchestrator_effort=None)
     cfg = moe.MoeConfig(**{**asdict(cfg), **changes})
     moe.save_config(cfg)
@@ -181,7 +183,7 @@ def test_the_council_section_reads_and_edits_moe_json_through_save_config(studio
     view = call({"action": "settings_get"})
     section = next(s for s in view["sections"] if s["id"] == "council")
     rows = {row["key"]: row for row in section["rows"]}
-    assert list(rows) == ["council.main", "council.advisor.codex", "council.advisor.gemini"]
+    assert list(rows) == ["council.main", "council.advisor.codex", "council.advisor.antigravity"]
     main = rows["council.main"]
     assert main["edit"] is None and "Council panel" in main["locked"] and "machx" in main["display"]
     codex = rows["council.advisor.codex"]
@@ -189,32 +191,32 @@ def test_the_council_section_reads_and_edits_moe_json_through_save_config(studio
     assert codex["origin"] == "global" and "gpt-6-astra" in codex["display"] and "high" in codex["display"]
     assert "moe.json" in codex["source_text"]
     assert any(m["id"] == "gpt-6-astra" for m in codex["edit"]["models"]) and "high" in codex["edit"]["efforts"]
-    gemini = rows["council.advisor.gemini"]
-    assert gemini["origin"] == "default" and gemini["edit"]["model"] == "" and gemini["edit"]["effort"] == ""
-    assert gemini["edit"]["removable"] is False and codex["edit"]["removable"] is True
-    assert "gemini" in gemini["label"].lower() or "Gemini" in gemini["label"]
+    agy = rows["council.advisor.antigravity"]
+    assert agy["origin"] == "default" and agy["edit"]["model"] == "" and agy["edit"]["effort"] == ""
+    assert agy["edit"]["removable"] is False and codex["edit"]["removable"] is True
+    assert "Antigravity" in agy["label"]
 
-    result = call({"action": "settings_save", "key": "council.advisor.gemini",
-                   "value": {"model": "gemini-3.1-pro-preview", "effort": ""}})
-    assert result["key"] == "council.advisor.gemini" and result["applies"]
+    result = call({"action": "settings_save", "key": "council.advisor.antigravity",
+                   "value": {"model": "gemini-3.1-pro-high", "effort": ""}})
+    assert result["key"] == "council.advisor.antigravity" and result["applies"]
     saved = moe.load_config()
-    assert saved.advisor_models == {"codex": "gpt-6-astra", "gemini": "gemini-3.1-pro-preview"}
+    assert saved.advisor_models == {"codex": "gpt-6-astra", "antigravity": "gemini-3.1-pro-high"}
     assert saved.advisor_efforts == {"codex": "high"} and saved.advisors == cfg.advisors
     assert json.loads(council_file.read_text()) == asdict(saved)
     assert len(written) == 1
-    row = _rows(result["settings"])["council.advisor.gemini"]
-    assert row["origin"] == "global" and "gemini-3.1-pro-preview" in row["display"]
+    row = _rows(result["settings"])["council.advisor.antigravity"]
+    assert row["origin"] == "global" and "gemini-3.1-pro-high" in row["display"]
 
     call({"action": "settings_save", "key": "council.advisor.codex", "value": {"model": "gpt-6-astra", "effort": "xhigh"}})
     assert moe.load_config().advisor_efforts == {"codex": "xhigh"}
     call({"action": "settings_save", "key": "council.advisor.codex", "value": {"model": "", "effort": "low"}})
-    assert moe.load_config().advisor_models == {"gemini": "gemini-3.1-pro-preview"}
+    assert moe.load_config().advisor_models == {"antigravity": "gemini-3.1-pro-high"}
     assert moe.load_config().advisor_efforts == {"codex": "low"}
     result = call({"action": "settings_save", "key": "council.advisor.codex", "value": None})
     saved = moe.load_config()
     assert "codex" not in saved.advisor_models and "codex" not in saved.advisor_efforts
     assert _rows(result["settings"])["council.advisor.codex"]["origin"] == "default"
-    assert saved.orchestrator == "machx" and saved.advisors == ["codex", "gemini"] and saved.max_concurrency == 3
+    assert saved.orchestrator == "machx" and saved.advisors == ["codex", "antigravity"] and saved.max_concurrency == 3
     assert len(written) == 4 and council_file.is_relative_to(council_file.parent.parent)
 
 
@@ -244,16 +246,16 @@ def test_a_council_edit_reaches_the_running_session_when_its_council_is_the_save
     context = SimpleNamespace(moe_config=saved)
     app.engine = SimpleNamespace(provider=SimpleNamespace(key="machx"), model="fixture-model",
                                  backend=SimpleNamespace(), _moe=saved, _tool_context=context)
-    result = call({"action": "settings_save", "key": "council.advisor.gemini", "value": {"model": "g-model", "effort": ""}})
-    assert app.engine._moe.advisor_models == {"codex": "gpt-6-astra", "gemini": "g-model"}
+    result = call({"action": "settings_save", "key": "council.advisor.antigravity", "value": {"model": "g-model", "effort": ""}})
+    assert app.engine._moe.advisor_models == {"codex": "gpt-6-astra", "antigravity": "g-model"}
     assert app.engine._moe is context.moe_config and app.moe is app.engine._moe
     assert app.engine._moe.advisors == saved.advisors and app.engine._moe.orchestrator == "machx"
     assert "this session" in result["applies"]
     # A session whose Council differs from the saved one keeps it: the file changes, the session says so.
-    live = moe.MoeConfig("codex", ["gemini"], advisor_models={"gemini": "live-model"})
+    live = moe.MoeConfig("codex", ["antigravity"], advisor_models={"antigravity": "live-model"})
     app.engine._moe = live
-    result = call({"action": "settings_save", "key": "council.advisor.gemini", "value": {"model": "h-model", "effort": ""}})
-    assert app.engine._moe is live and moe.load_config().advisor_models["gemini"] == "h-model"
+    result = call({"action": "settings_save", "key": "council.advisor.antigravity", "value": {"model": "h-model", "effort": ""}})
+    assert app.engine._moe is live and moe.load_config().advisor_models["antigravity"] == "h-model"
     assert "Council panel" in result["applies"] and "this session" in result["applies"]
 
 
@@ -330,7 +332,7 @@ def test_a_failing_layout_view_is_a_note_not_a_broken_tab(studio, monkeypatch):
 def test_secrets_still_never_reach_the_page(studio, monkeypatch):
     _, server, client, call = studio
     monkeypatch.setenv("OPENAI_API_KEY", "sk-fixture-value-0051")
-    _council(advisor_models={"codex": "gpt-6-astra", "gemini": "gemini-3.1-pro-preview"})
+    _council(advisor_models={"codex": "gpt-6-astra", "antigravity": "gemini-3.1-pro-high"})
     _write({"version": 1, "roles": {"critic": {"provider": "codex"}, "reviewer": {"model": "review-model"},
                                      "summarizer": {"model": "x", "token": "fixture-value-0052"}}})
     reply = client.post("/api/control", headers={"x-dream-token": server.token}, json={"action": "settings_get"})
@@ -348,7 +350,7 @@ async def test_settings_tab_edits_a_critic_role_and_a_council_advisor(settings_p
     page, url, errors = settings_page
     await page.goto(url)
     await expect(page.locator("#stat")).to_have_text("Ready")
-    await page.locator("#dream-controls-open").click()
+    await more(page, "dream-controls-open")          # Chat shows no bars (DREAM-240/242): Controls is under More
     await page.get_by_role("tab", name="Settings", exact=True).click()
     panel = page.locator("#dc-settings")
     for title in ("Roles", "Council", "Local engine layout"):
@@ -378,12 +380,12 @@ async def test_settings_tab_edits_a_critic_role_and_a_council_advisor(settings_p
     assert "roles" not in read_settings()
 
     # A Council advisor's model and effort, written to the temporary moe.json.
-    gemini = panel.locator('[data-key="council.advisor.gemini"]')
-    await expect(gemini.locator(".dc-source")).to_have_text("Default")
-    await gemini.get_by_label("Council advisor: Gemini · Google model").fill("gemini-3.1-pro-preview")
-    await gemini.get_by_role("button", name="Save").click()
-    await expect(panel.locator('[data-key="council.advisor.gemini"] .dc-source')).to_have_text("Saved")
-    assert moe.load_config().advisor_models["gemini"] == "gemini-3.1-pro-preview"
+    agy = panel.locator('[data-key="council.advisor.antigravity"]')
+    await expect(agy.locator(".dc-source")).to_have_text("Default")
+    await agy.get_by_label("Council advisor: Gemini · Antigravity model").fill("gemini-3.1-pro-high")
+    await agy.get_by_role("button", name="Save").click()
+    await expect(panel.locator('[data-key="council.advisor.antigravity"] .dc-source')).to_have_text("Saved")
+    assert moe.load_config().advisor_models["antigravity"] == "gemini-3.1-pro-high"
     codex = panel.locator('[data-key="council.advisor.codex"]')
     await codex.get_by_label("Council advisor: ChatGPT · Codex effort").select_option("xhigh")
     await codex.get_by_role("button", name="Save").click()

@@ -78,11 +78,11 @@ async def test_sdk_disconnect_does_not_hide_handoff_failure():
         await backend.disconnect()
 
 
-@pytest.mark.parametrize('provider', ['grok', 'gemini'])
+@pytest.mark.parametrize('provider', ['gemini'])
 def test_unsupported_cli_effort_rejected_without_mutation(provider):
     from dream.core.backends.cli_agent import adapter_for
     backend = CliAgentBackend(adapter_for(provider), system_prompt='test', cwd='/tmp')
-    with pytest.raises(ValueError, match='not implemented'):
+    with pytest.raises(ValueError, match='not supported'):
         backend.set_effort('high')
     assert backend._effort is None
     backend.set_effort(None)
@@ -102,8 +102,8 @@ def test_engine_rejected_effort_does_not_change_current_setting():
     from dream.core.backends.cli_agent import adapter_for
     engine = Engine(provider='grok')
     engine.backend = CliAgentBackend(adapter_for('grok'), system_prompt='test', cwd='/tmp')
-    with pytest.raises(ValueError, match='not implemented'):
-        engine.set_effort('high')
+    with pytest.raises(ValueError, match='not supported'):
+        engine.set_effort('max')
     assert engine.effort is None
     assert engine.backend._effort is None
 

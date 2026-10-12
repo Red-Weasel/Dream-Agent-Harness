@@ -173,10 +173,15 @@ def _parse(raw, request, evidence):
     return data
 
 
-async def _collect(backend, prompt, *, require_terminal):
+async def _collect(backend, prompt, *, require_terminal, effort=None):
     parts, count, terminal = [], 0, False
     try:
         await backend.connect()
+        if effort and hasattr(backend, 'set_effort'):
+            try:   # after connect, so a model that reports no such level keeps its own default instead of failing
+                backend.set_effort(effort)
+            except ValueError:
+                pass
         async with aclosing(backend.ask(prompt)) as events:
             async for event in events:
                 if event.kind == 'error' or (event.kind == 'result' and isinstance(event.data, dict) and event.data.get('is_error')):
@@ -203,34 +208,143 @@ async def _collect(backend, prompt, *, require_terminal):
 
 async def optimize(body, files, workspace, settings: ReviewSettings) -> dict:
     """Draft once with the caller's pinned provider; never fall back. Any tools it has are read-only."""
+    if settings.provider.key == 'antigravity':
+        raise ValueError('Antigravity does not provide enforced read-only prompt optimization yet. '
+                         'Use Quick structure or explicitly select another evaluator; your task was not sent.')
     request = validate_request(body)
     evidence = _evidence(files, workspace)
     prompt = json.dumps({'request': request, 'evidence': evidence,
                          'current_model': settings.model, 'current_provider': settings.provider.key}, ensure_ascii=False)
     try:
-        if settings.provider.kind == 'cli':
-            consultation = CLIConsultation(settings.provider, settings.model,
-                runtime_meter=attributed_meter(settings.provider, scope='prompt_optimizer', meter=settings.runtime_meter),
-                # It drafts prompts only, so it stays read-only whatever the session's mode.
-                cwd=str(workspace), mode='plan')
-            try:
-                consultation.prepare()
-                raw = await asyncio.wait_for(consultation.run(_SYSTEM + '\nSOURCE DATA\n' + prompt), settings.timeout)
-            finally:
-                consultation.close()
-        elif settings.provider.kind == 'anthropic':
-            # A Claude drafter runs like the main Claude path in the workspace (DREAM-137),
-            # pinned read-only like the CLI path; not Claude Code's posture (DREAM-140).
-            backend = review_backend(replace(settings, mode='plan'), [], _SYSTEM, Path(workspace))
-            backend.claude_code_posture = False
-            raw = await asyncio.wait_for(_collect(backend, prompt, require_terminal=False), settings.timeout)
-        else:
-            # SDK receives an empty temporary cwd, never the active project configuration.
-            with tempfile.TemporaryDirectory(prefix='dream-prompt-optimizer-') as cwd:
-                backend = review_backend(settings, [], _SYSTEM, Path(cwd))
-                raw = await asyncio.wait_for(_collect(backend, prompt, require_terminal=settings.provider.kind == 'openai'), settings.timeout)
+        raw = await _complete(_SYSTEM, prompt, workspace, settings)
     except asyncio.CancelledError:
         raise
     except Exception:
         raise RuntimeError('Prompt optimization could not finish with the selected provider. Check its connection and retry explicitly.') from None
     return _parse(raw, request, evidence)
+
+
+async def _complete(system, prompt, workspace, settings: ReviewSettings, effort=None) -> str:
+    """One read-only request to the pinned provider, no tools: its answer's text. `effort`: this request's reasoning
+    effort where the model takes one (the load setting is only the default for requests that name none)."""
+    if settings.provider.kind == 'cli':
+        consultation = CLIConsultation(settings.provider, settings.model,
+            runtime_meter=attributed_meter(settings.provider, scope='prompt_optimizer', meter=settings.runtime_meter),
+            # It drafts prompts only, so it stays read-only whatever the session's mode.
+            cwd=str(workspace), mode='plan')
+        try:
+            consultation.prepare()
+            return await asyncio.wait_for(consultation.run(system + '\nSOURCE DATA\n' + prompt), settings.timeout)
+        finally:
+            consultation.close()
+    if settings.provider.kind == 'anthropic':
+        # A Claude drafter runs like the main Claude path in the workspace (DREAM-137),
+        # pinned read-only like the CLI path; not Claude Code's posture (DREAM-140).
+        backend = review_backend(replace(settings, mode='plan'), [], system, Path(workspace))
+        backend.claude_code_posture = False
+        return await asyncio.wait_for(_collect(backend, prompt, require_terminal=False, effort=effort), settings.timeout)
+    # SDK receives an empty temporary cwd, never the active project configuration.
+    with tempfile.TemporaryDirectory(prefix='dream-prompt-optimizer-') as cwd:
+        backend = review_backend(settings, [], system, Path(cwd))
+        return await asyncio.wait_for(_collect(backend, prompt, require_terminal=settings.provider.kind == 'openai',
+                                               effort=effort), settings.timeout)
+
+
+# The terminal's prompt optimizer (the owner, 2026-10-11): the Claude Code mod made for the owner on 2026-10-10, in
+# Dream's own prompt. What is typed is read twice; a rewrite waits for Send or Edit; a clear prompt goes as typed.
+_OWNER = ('The prompt was written by a product owner with no formal software training. They know what they want '
+          'built and often leave out what a developer would say without thinking: security, scale, the software '
+          'stack, data, errors, testing, deployment. It is about to be sent to an AI coding agent that guesses when unsure.')
+
+REVIEW = _OWNER + '''
+
+Read the prompt and list what would force the agent to guess. Check:
+- the goal: what outcome is wanted, and for whom
+- scope: what to change and what to leave alone
+- how success will be checked
+- vague words ("better", "fix it", "clean up", "make it work") and references with no clear target ("it", "that")
+- several unrelated tasks in one prompt
+- what a developer would have specified FOR THIS TASK and the owner did not: security (secrets, input checks,
+  who may do what, data exposure), scale and speed, the stack (language, framework, versions, where it runs),
+  data and storage, error handling, tests, deployment and rollback. Leave out what does not apply to this task.
+Then read the recent conversation: is there a stated plan for the work? Is it going off course (the same
+failure repeated, scope growing, instructions that contradict each other)?
+
+A prompt that directly answers the assistant's last question (yes, no, a choice, a value) is clear.
+
+Answer with JSON only:
+{"clear": true|false, "findings": ["..."], "situation": "ok"|"no_plan"|"drifting", "note": "one sentence"}'''
+
+REWRITE = _OWNER + '''
+
+A first review of the prompt is given. Read the prompt again yourself, from the start. Drop findings of the
+first review that are wrong, add what it missed. Then decide whether to rewrite.
+
+Do NOT rewrite when the prompt is already clear, or directly answers the assistant's last question.
+
+When you rewrite:
+- Keep the owner's intent. Keep every name, file path, number, command and quoted text exactly as written.
+- Never invent a fact, a requirement, a technology or a decision. Where a decision is missing, tell the agent
+  to inspect the project, state its assumption and take the conventional default, and to ask one plain
+  question only where no default is defensible.
+- Use the precise engineering terms a senior developer would use, and say them plainly.
+- State the goal, the scope (what to touch, what to leave alone), the constraints, and how the result will
+  be verified. Add security, scale, stack, data, error-handling, testing or deployment guidance only where
+  it applies to this task.
+- When the situation is "no_plan" or "drifting": open by telling the agent to stop, summarise where the work
+  stands, and propose a short numbered plan before changing anything else.
+- No preamble, no praise, no explanation of what you changed. As short as completeness allows.
+
+Answer with JSON only:
+{"rewrite": true|false, "problems": ["at most five short phrases naming what was unclear"], "rewritten": "..."}'''
+
+
+def is_trivial(text: str) -> bool:
+    """A reply too short to be a task: an answer, an acknowledgement, a slash or shell line."""
+    text = text.strip()
+    return len(text.split()) < 3 or text[:1] in ('/', '!', '#')
+
+
+def digest(rows) -> str:
+    """The last few turns, each cut short, so a read can tell whether the work has a plan. rows: (role, text)."""
+    recent = [(role, text) for role, text in rows if text.strip()][-6:]
+    if not recent:
+        return '(this is the first prompt of the session)'
+    return '\n\n'.join(f'{role.upper()}: {text.strip()[:700]}' for role, text in recent)
+
+
+def question(prompt: str, recent: str, first_review: str | None = None) -> str:
+    review = '' if first_review is None else f'\n\n<first_review>\n{first_review}\n</first_review>'
+    return f'<recent_conversation>\n{recent}\n</recent_conversation>\n\n<prompt>\n{prompt}\n</prompt>{review}'
+
+
+def verdict(reply: str, original: str) -> dict | None:
+    """The second read's answer as {rewritten, problems}, or None when it says the prompt stands or cannot be read."""
+    start, end = reply.find('{'), reply.rfind('}')
+    if start < 0 or end <= start:
+        return None
+    try:
+        parsed = json.loads(reply[start:end + 1])
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    rewritten = parsed['rewritten'].strip() if isinstance(parsed.get('rewritten'), str) else ''
+    if parsed.get('rewrite') is not True or not rewritten or rewritten == original.strip():
+        return None
+    problems = parsed.get('problems') if isinstance(parsed.get('problems'), list) else []
+    return {'rewritten': rewritten, 'problems': [p for p in problems if isinstance(p, str)][:5]}
+
+
+async def review_twice(text: str, recent: str, workspace, settings: ReviewSettings, step=lambda n: None) -> dict | None:
+    """Two reads of a typed prompt: {rewritten, problems}, or None when it is clear as typed. Raises when a read
+    cannot be made; the caller says so and sends the prompt as typed."""
+    if settings.provider.key == 'antigravity':
+        raise ValueError('Antigravity has no enforced read-only mode for the optimizer yet')
+    # Low effort, as the Claude Code mod asks its model (2026-10-11): at a local model's xhigh default one read ran
+    # past the 60-second limit.
+    step(1)
+    first = await _complete(REVIEW, question(text, recent), workspace, settings, effort='low')
+    step(2)
+    second = await _complete(REWRITE, question(text, recent, first), workspace, settings, effort='low')
+    return verdict(second, text)

@@ -1,5 +1,7 @@
 """Boundary checks for the native desktop, without a display or model."""
 import json
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -7,6 +9,30 @@ import pytest
 
 from dream.desktop.protocol import browser_address, session_address
 from dream.desktop import launcher
+
+
+def test_recommendation_facts_render_without_harness_dependencies():
+    """The system-Python GTK process receives JSON, without venv site-packages."""
+    code = '''
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from dream.desktop.protocol import recommended_card
+card = recommended_card(None, [], facts={
+    'context_limit': 262144, 'configured_context': 262000,
+    'speculative': {'supported': True, 'enabled': True, 'draft': 'Native MTP', 'count': 3},
+})
+assert not any(name.startswith('dream.local') for name in sys.modules)
+print(json.dumps(dict(card['facts'])))
+'''
+    result = subprocess.run([sys.executable, '-I', '-S', '-c', code,
+                             str(Path(__file__).resolve().parents[1])],
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    facts = json.loads(result.stdout)
+    assert facts['Model context limit'] == '256K tokens'
+    assert facts['Launch context'] == '262,000 tokens'
+    assert facts['Speculative decoding'] == 'Supported · On'
+    assert facts['Draft tokens per step'] == '3'
 
 
 @pytest.mark.parametrize('raw, expected', [

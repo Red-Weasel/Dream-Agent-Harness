@@ -60,11 +60,13 @@ AUTO_CAPS = frozenset({READONLY, MEMORY})
 # SDK builtins + Dream natives, by what they can do to the world.
 _READ_ONLY = {
     "Read", "Glob", "Grep", "LS", "NotebookRead", "TodoWrite",
-    "read_file", "list_dir",
+    "read_file", "list_dir", "artifact_read",
     "media_read",
     # Dream MCP tools that only observe.
     "recall", "recall_sessions", "read_notes", "web_search", "browse", "see", "computer_observe",
     "skill_list", "skill_load",
+    # RAM: reading the project's shared board
+    "ram_read",
     "skill_find", "skill_open", "skill_file", "skill_refresh",
     "library_list", "library_search", "library_read", "library_find", "library_resolve",
     "checkpoint_list",
@@ -96,6 +98,7 @@ _READ_ONLY = {
     "memory_list", "memory_read", "read_session",
     # Phase 11: listing open work is reading
     "task_list",
+    "session_list", "session_inbox",
     # Phase 12: searching and offering plugins and skills changes nothing
     "search_plugins", "search_skills", "suggest_plugin_install", "suggest_skills",
     "demonstration_list", "demonstration_read", "capability_lab_inspect",
@@ -121,6 +124,9 @@ _MEMORY = {"remember", "note", "forget", "skill_save", "skill_patch",
            "task_add", "task_update",
            # DREAM-108: moving a memory or session between projects is Dream's own memory, like memory_write
            "memory_move"}
+# RAM: a post on the project's shared board is the session's own record, advice to the others; capped and
+# refused when it looks like a secret (dream.memory.ram), and nothing on the board runs
+_MEMORY |= {"ram_post"}
 _WRITE = {"Write", "Edit", "MultiEdit", "NotebookEdit", "write_file", "library_materialize",
           "str_replace_edit", "copy_files", "save_screenshot", "copy_starter_component",
           "super_inline_html", "gen_pptx", "github_import_files",
@@ -511,6 +517,134 @@ def _shell_effect(command: str, workspace: Path, *, network: bool = False) -> tu
                     if reason:
                         return reason, []
     return "", []
+
+
+# Auto mode inside the enforced sandbox (the owner, 2026-10-11: as few stops as Claude Code's auto mode). The sandbox
+# keeps a command in the project: the rest of the machine is read-only, home is an empty temporary folder, other
+# programs are out of sight and the project's .git is read-only. What it cannot make harmless still asks: a delete
+# that is bulk, outside the project, or of code or a project file; a git write (it has to run outside the sandbox,
+# which the owner chooses); and sending data out.
+_DELETE_LIMIT = 5
+_CODE_SUFFIXES = frozenset({
+    ".py", ".pyi", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rs", ".go", ".c", ".cc", ".cpp", ".cxx", ".h",
+    ".hh", ".hpp", ".java", ".kt", ".kts", ".swift", ".rb", ".php", ".cs", ".scala", ".sh", ".bash", ".zsh", ".fish",
+    ".ps1", ".sql", ".html", ".htm", ".css", ".scss", ".sass", ".less", ".vue", ".svelte", ".lua", ".r", ".m", ".mm",
+    ".dart", ".ex", ".exs", ".erl", ".hs", ".ml", ".clj", ".pl", ".ipynb", ".cu", ".cuh", ".sycl", ".glsl", ".hlsl",
+    ".toml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".lock", ".env", ".properties", ".gradle", ".cmake", ".mk",
+    # work files and stores: scenes, layered images, designs, edits, game projects, databases, office documents
+    ".blend", ".psd", ".kra", ".xcf", ".ai", ".fig", ".sketch", ".afdesign", ".afphoto", ".indd", ".prproj", ".aep",
+    ".kdenlive", ".drp", ".unity", ".uproject", ".tscn", ".godot", ".db", ".sqlite", ".sqlite3", ".duckdb",
+    ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".key", ".numbers", ".pages"})
+_PROJECT_NAMES = frozenset({
+    "package.json", "package-lock.json", "tsconfig.json", "jsconfig.json", "composer.json", "deno.json",
+    "requirements.txt", "constraints.txt", "readme.md", "license", "license.md", "claude.md", "agents.md", "dream.md",
+    "gemini.md", "changelog.md", "contributing.md", "dockerfile", "makefile", "cmakelists.txt", "go.mod", "go.sum"})
+_SENDS_OUT = frozenset({"ssh", "scp", "sftp", "ftp", "gh"})
+_UPLOAD_FLAGS = frozenset({"-d", "-F", "-T", "--json", "--form", "--form-string", "--upload-file", "--data",
+                           "--data-raw", "--data-binary", "--data-urlencode", "--data-ascii"})
+
+
+def _delete_reason(verb: str, args: list[str], workspace: Path, *, piped: bool = False) -> str:
+    """Why a delete must ask in auto mode, or "" when it is a few ordinary files inside the project."""
+    flags = [a for a in args if a.startswith("-") and a != "-"]
+    targets = [a for a in args if not a.startswith("-") or a == "-"]
+    if piped or not targets:
+        return "deletes files it cannot name in advance (bulk)"
+    if any(c in a for a in targets for c in "*?[]{}$`~"):
+        return "deletes by pattern or variable (bulk)"
+    if verb in {"rm", "shred"} and any(f in {"-r", "-R", "--recursive"} or (not f.startswith("--") and ("r" in f or "R" in f))
+                                       for f in flags):
+        return "deletes a folder (bulk)"
+    if len(targets) > _DELETE_LIMIT:
+        return f"deletes {len(targets)} files at once (bulk)"
+    for raw in targets:
+        path = (Path(raw) if Path(raw).is_absolute() else workspace / raw).resolve()
+        if path == workspace or not path.is_relative_to(workspace):
+            return f"deletes outside the project: {raw}"
+        relative = path.relative_to(workspace)
+        if any(part.startswith(".") for part in relative.parts):
+            return f"deletes a hidden or config file: {relative}"
+        if verb == "rmdir" or path.is_dir():
+            if not path.is_dir() or any(path.iterdir()):
+                return f"deletes a folder (bulk): {relative}"
+            continue
+        name = relative.name.lower()
+        if not Path(name).suffix or Path(name).suffix in _CODE_SUFFIXES or name in _PROJECT_NAMES:
+            return f"deletes code or a project file: {relative}"
+    return ""
+
+
+def _sandbox_auto_reason(command: str, workspace: Path, depth: int = 0) -> str:
+    """Auto mode, enforced sandbox: "" runs the command; otherwise why it still asks (see _DELETE_LIMIT above)."""
+    if depth > 3:
+        return "nested shell too deep to read"
+    try:
+        parts = _shell_parts(command)
+    except ValueError:
+        return "unparseable shell command"
+    for part in parts:
+        words, piped = list(part), False
+        while words and ("=" in words[0] or words[0] in {
+                "command", "exec", "env", "nohup", "time", "builtin", "xargs"} or words[0].startswith("-")):
+            piped = piped or words[0] == "xargs"
+            words.pop(0)
+        if not words:
+            continue
+        verb, args = Path(words[0]).name, words[1:]
+        if verb in {"timeout", "nice", "stdbuf"}:
+            nested = list(args)
+            while nested and nested[0].startswith("-"):
+                option = nested.pop(0)
+                if option in {"-s", "--signal", "-k", "--kill-after", "-n", "--adjustment"} and nested:
+                    nested.pop(0)
+            if verb == "timeout" and nested:
+                nested.pop(0)
+            reason = _sandbox_auto_reason(shlex.join(nested), workspace, depth + 1)
+            if reason:
+                return reason
+            continue
+        if verb in {"rm", "rmdir", "unlink", "shred"}:
+            reason = _delete_reason(verb, args, workspace, piped=piped)
+            if reason:
+                return reason
+        elif verb == "git":
+            safe = {"status", "diff", "log", "show", "ls-files", "rev-parse", "rev-list", "describe", "grep", "blame",
+                    "cat-file", "help"}
+            if not args or args[0] not in safe or any(a in {"--ext-diff", "--textconv"} or a.startswith("--output")
+                                                      for a in args):
+                return "changes or publishes repository state: git writes run outside the sandbox"
+        elif verb in {"curl", "wget"}:
+            method = [b for a, b in zip(args, args[1:]) if a in {"-X", "--request", "--method"}]
+            method += [a.split("=", 1)[1] for a in args if a.startswith(("--request=", "--method="))]
+            method += [a[2:] for a in args if a.startswith("-X") and len(a) > 2]
+            if (any(a in _UPLOAD_FLAGS or a.startswith(("--data", "--form", "--upload-file", "--post-", "--body"))
+                    for a in args) or any(m.upper() in {"POST", "PUT", "PATCH", "DELETE"} for m in method)):
+                return "sends data out"
+        elif verb in _SENDS_OUT or (verb == "rsync" and any(
+                ":" in a and not a.startswith(("/", ".", "-")) for a in args)):
+            return "sends data out or reaches another machine"
+        elif verb in {"npm", "pnpm", "yarn", "cargo", "twine", "docker", "podman"} and any(
+                a in {"publish", "push", "login", "logout", "deploy", "upload"} for a in args):
+            return "publishes or changes credentials"
+        elif verb == "find" and any(a in {"-delete", "-exec", "-execdir", "-ok", "-okdir"} for a in args):
+            return "runs a command or a delete on every match (bulk)"
+        elif verb == "sed" and "e" in args:
+            return "runs embedded shell"
+        elif _names_binary(verb, _INTERPRETERS) and verb in {"bash", "sh", "dash", "zsh"}:
+            for i, arg in enumerate(args):
+                if arg in _INLINE_CODE_FLAGS and i + 1 < len(args):
+                    reason = _sandbox_auto_reason(args[i + 1], workspace, depth + 1)
+                    if reason:
+                        return reason
+    return ""
+
+
+# Dream's own tools that run in auto mode without asking (2026-10-11). Not here, so they still ask: computer_action
+# (it can click and type in a real desktop window), checkpoint_restore (it rewrites project files), any other MCP
+# server's tools and every self-built tool -- all of them act outside the sandbox.
+_AUTO_BUILTINS = frozenset({"session_send", "library_create", "library_manage", "library_replace", "media_create",
+                            "register_assets", "unregister_assets", "save_as_template", "end_conversation",
+                            "computer_open", "computer_close"})
 
 
 def _static_shell_read(command: str) -> bool:
@@ -945,6 +1079,10 @@ def decide(
         if mode == "auto" and scoped and execution_scope.allows_deletion(paths):
             return "allow", "explicit red-team deletion scope"
         raw = tool_input.get("paths")
+        if (mode == "auto" and isinstance(raw, list) and raw and all(isinstance(v, str) for v in raw)
+                and not (scoped and execution_scope.red_team)):
+            reason = _delete_reason("rm", list(raw), workspace)   # auto mode says why a delete still asks
+            return ("ask", reason) if reason else ("allow", "a few ordinary files inside the project (auto mode)")
         given = [str(v) for v in raw if isinstance(v, str)] if isinstance(raw, list) else []
         shown = ", ".join(given[:3]) + (" …" if len(given) > 3 else "")
         return "ask", f"deletes: {shown or '?'}"
@@ -952,6 +1090,9 @@ def decide(
     if cap == SHELL:
         if mode == "plan":
             return "deny", "plan mode — no commands"
+        if mode == "auto":
+            # The owner, 2026-10-11: no sandbox, and auto mode runs every command without asking.
+            return "allow", "auto mode"
         command = str(tool_input.get("command") or "")
         effect, deletions = _shell_effect(command, workspace,
                                           network=contained and execution_scope.network)
@@ -963,6 +1104,10 @@ def decide(
                     and tool_name in {"run_bash", f"mcp__{config.MCP_SERVER_NAME}__run_bash"}
                     and _bounded_output_cleanup(command, workspace)):
                 return "allow", "bounded image-output cleanup inside workspace containment"
+            if mode == "auto" and contained and not execution_scope.red_team:
+                # The sandbox itself keeps writes inside the project, as for the plain contained commands below.
+                reason = _sandbox_auto_reason(command, workspace)
+                return ("ask", reason) if reason else ("allow", "inside the sandbox (auto mode)")
             if _shell_unconfined(command, workspace):
                 return "ask", f"outside workspace (shell): {command[:60]}"
             return "ask", effect
@@ -996,6 +1141,9 @@ def decide(
         return "deny", "plan mode — no changes"
     if scoped and execution_scope.red_team:
         return "deny", "tool has no enforced red-team execution boundary"
+    short = _short(tool_name)
+    if mode == "auto" and short in _AUTO_BUILTINS and short not in _CUSTOM_NAMES:
+        return "allow", "Dream's own tool (auto mode)"
     return "ask", "tool may change things"
 
 

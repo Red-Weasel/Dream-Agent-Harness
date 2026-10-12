@@ -236,8 +236,21 @@ async def test_cancel_inside_a_tool_handler_still_closes_the_round():
             raise asyncio.CancelledError()  # Ctrl-C landing mid-handler
         return {"content": [{"type": "text", "text": "ok"}]}
 
-    b = _backend([_tool("read_file", handler)])
-    b._client = _ScriptedClient([_multi_call_round(n=3)])
+    tool = _tool("read_file", handler)
+    tool.input_schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+    b = _backend([tool])
+    # Three DISTINCT read_file calls in one round. Identical calls are collapsed by
+    # the stream repetition guard before they run, which would leave no third call
+    # to stub; this test is about the cancel, so each call reads a different file.
+    b._client = _ScriptedClient([[
+        *(_sse({"choices": [{"delta": {"tool_calls": [
+            {"index": i, "id": f"c{i}",
+             "function": {"name": "read_file",
+                          "arguments": json.dumps({"path": f"notes/part{i}.txt"})}}
+        ]}, "finish_reason": None}]}) for i in range(3)),
+        _sse({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+        "data: [DONE]",
+    ]])
 
     with pytest.raises(asyncio.CancelledError):
         async for _ in b.ask("go"):

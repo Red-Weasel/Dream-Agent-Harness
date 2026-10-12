@@ -5,7 +5,6 @@ import asyncio
 import json
 import socket
 import subprocess
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -124,8 +123,8 @@ async def test_prepared_note_is_bounded_snapshot_without_raw_reason(engine, monk
     assert backend.system_prompt == saved  # no claim of a live status feed
 
 
-@pytest.mark.parametrize('kind', ['script', 'shell', 'ordinary_approved_shell'])
-async def test_unavailable_execution_is_typed_without_losing_refusal(tmp_path, monkeypatch, kind):
+async def test_unavailable_execution_is_typed_without_losing_refusal(tmp_path, monkeypatch):
+    # run_script's workers still run in the sandbox; run_bash has none since 2026-10-11 (the next test).
     scope = ex.ExecutionScope(tmp_path)
 
     async def unavailable(checked_scope):
@@ -133,29 +132,26 @@ async def test_unavailable_execution_is_typed_without_losing_refusal(tmp_path, m
 
     monkeypatch.setattr(ex, 'probe_sandbox', unavailable)
     with pytest.raises(ex.ExecutionRefused) as caught:
-        if kind == 'script':
-            await ex.run_contained(['inert fixture argv'], scope)
-        else:
-            command = 'inert fixture command'
-            approval = ex.CommandApproval(command, scope, time.monotonic() + 60) if kind.startswith('ordinary') else None
-            await ex.execute_bash(command, ex.ExecutionContext(scope, 'auto', approval))
+        await ex.run_contained(['inert fixture argv'], scope)
     assert type(caught.value).__name__ == 'ExecutionUnavailable'
-    expected = ('sandbox unavailable: fixture namespace denied. Worker was not run.' if kind == 'script' else
-                'sandbox unavailable: fixture namespace denied. Command was not run; '
-                'explicit approval for this exact uncontained command is required.')
-    assert str(caught.value) == expected
+    assert str(caught.value) == 'sandbox unavailable: fixture namespace denied. Worker was not run.'
 
 
-async def test_new_denial_does_not_replace_saved_evidence(engine, monkeypatch):
+async def test_auto_shell_runs_on_the_host_without_probing_and_keeps_saved_evidence(engine, monkeypatch):
+    # No shell sandbox (the owner, 2026-10-11): run_bash in auto runs the command on the host, in the workspace. It
+    # never probes the sandbox (the autouse guard forbids it) and leaves the evidence saved for run_script alone.
     cached = ex.SandboxCapability(True, 'fixture startup passed', engine.execution_scope, '/fixture/bwrap')
     engine.execution_capability = cached
+    ran = []
 
-    async def unavailable(scope):
-        return ex.SandboxCapability(False, 'fixture revoked after startup', scope)
+    async def host(argv, *, cwd, **kwargs):
+        ran.append((list(argv), Path(cwd).resolve()))
+        return 'fixture result'
 
-    monkeypatch.setattr(ex, 'probe_sandbox', unavailable)
-    with pytest.raises(ex.ExecutionRefused, match='fixture revoked after startup'):
-        await ex.execute_bash('inert fixture command', ex.ExecutionContext(engine.execution_scope, 'auto'))
+    monkeypatch.setattr(ex, 'run_owned', host)
+    result, _ = await ex.execute_bash('inert fixture command', ex.ExecutionContext(engine.execution_scope, 'auto'))
+    assert result == 'fixture result'
+    assert ran == [(['/bin/bash', '--noprofile', '--norc', '-c', 'inert fixture command'], engine.workspace.resolve())]
     assert engine.execution_capability is cached
     assert engine.runtime_status()['execution']['checked'] is True
     assert engine.runtime_status()['execution']['reason'] == 'fixture startup passed'
@@ -272,7 +268,7 @@ async def test_shell_success_and_timeout_keep_output(tool_context, monkeypatch, 
     text = out['content'][0]['text']
     assert 'fixture output' in text and bool(out.get('is_error')) is timeout
     if timeout:
-        assert text.startswith('Command timed out (limit 120s or scope expiry);')
+        assert text.startswith('Command timed out (limit 1800s or scope expiry);')
     else:
         assert 'exit 0' in text
     assert 'prerequisite' not in text
@@ -282,6 +278,9 @@ async def test_shell_success_and_timeout_keep_output(tool_context, monkeypatch, 
 def test_tool_contract_keeps_schema_and_explains_prerequisites(tool, key):
     assert tool.name == ('run_script' if key == 'code' else 'run_bash')
     assert tool.input_schema == {'type': 'object', 'properties': {key: {'type': 'string'}}, 'required': [key]}
+    if key == 'command':   # run_bash has no sandbox, so no execution prerequisite to explain (2026-10-11)
+        assert 'no sandbox' in tool.description and 'prerequisite' not in tool.description
+        return
     assert 'prerequisite' in tool.description
     assert 'rewriting' in tool.description
     if key == 'code':

@@ -9,6 +9,19 @@ def module():
     return importlib.import_module('dream.core.council_config')
 
 
+@pytest.fixture(autouse=True)
+def no_real_home(tmp_path, monkeypatch):
+    """Every test here runs against an empty temporary HOME and CODEX_HOME with no NVM_DIR. Effort and model
+    choices read the Codex model cache under CODEX_HOME, and the CLI lookup reads fixed folders under HOME (and
+    NVM_DIR), so no real configuration, cache, install or sign-in is looked at and "not installed" is really so."""
+    root = tmp_path / 'home'
+    root.mkdir()
+    monkeypatch.setenv('HOME', str(root))
+    monkeypatch.setenv('CODEX_HOME', str(root / '.codex'))
+    monkeypatch.delenv('NVM_DIR', raising=False)
+    return root
+
+
 def test_config_preserves_models_limits_and_empty_council():
     raw = dict(orchestrator='machx', advisors=['codex'], advisor_models={'codex': 'chosen-model'},
                max_concurrency=2, timeout_seconds=42.5, legal_review=True,
@@ -42,12 +55,20 @@ def test_persisted_invalid_config_does_not_coerce(tmp_path, monkeypatch):
     assert moe.load_config() is None
 
 
-def test_choices_report_only_local_prerequisites(monkeypatch):
+def test_choices_report_only_local_prerequisites(monkeypatch, no_real_home):
     monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    # Not on PATH and, with the empty temporary HOME, in none of the known install folders either.
     monkeypatch.setattr('shutil.which', lambda binary: None)
     choices = {item['key']: item for item in module().provider_choices()}
     assert choices['machx']['available'] is True
     assert choices['codex']['available'] is False
+    # The same lookup finds a CLI installed in a known folder that PATH misses; nothing about sign-in is read.
+    target = no_real_home / '.local' / 'bin' / 'codex'
+    target.parent.mkdir(parents=True)
+    target.write_text('#!/bin/sh\nexit 0\n')
+    target.chmod(0o755)
+    found = {item['key']: item for item in module().provider_choices()}
+    assert found['codex']['available'] is True and 'sign-in not checked' in found['codex']['note']
     assert choices['openai']['available'] is False
     assert 'not' in choices['machx']['note'].lower()
     assert set(choices['machx']) == {'key', 'label', 'available', 'note', 'efforts', 'effort_note', 'models', 'model_note'}

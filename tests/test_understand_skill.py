@@ -1,7 +1,6 @@
 """DREAM-102: the compact Dream-native `understand` skill -- a repository map for the Understand panel, step by step.
 
-Owner, 2026-09-23: "Can you rewrite the skill shorter and get the same result? -- i dont see why youd need 30,000
-characters to accomplish 'map this repo' ... just fix it so it at least behaves correctly." The plugin's 58,868-byte
+Owner, 2026-09-23: [feedback] The plugin's 58,868-byte
 SKILL.md is written for Claude Code subagents and a shell that can see the plugin folder; in Dream the scripts run
 with run_bash, whose sandbox shows the plugin folder read-only as `$UA_SKILLS` (DREAM-105), and the live MiMo run spent
 ~90 tool calls re-deriving its environment.

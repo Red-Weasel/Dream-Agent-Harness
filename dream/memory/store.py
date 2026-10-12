@@ -15,9 +15,11 @@ blocking the loop should wrap calls in ``anyio.to_thread.run_sync``.
 from __future__ import annotations
 
 import math
+import json
 import re
 import sqlite3
 import threading
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -352,6 +354,12 @@ class MemoryStore:
                 add_column(self._conn, "memories", "description", "TEXT NOT NULL DEFAULT ''")
             if "mem_type" not in cols:
                 add_column(self._conn, "memories", "mem_type", "TEXT NOT NULL DEFAULT ''")
+            # Additive lifecycle metadata; absent metadata on old rows remains eligible.
+            for column, default in (("lifecycle", "{}"), ("lifecycle_error", "")):
+                if column not in cols:
+                    add_column(self._conn, "memories", column, f"TEXT NOT NULL DEFAULT '{default}'")
+            if "source_from_file" not in cols:
+                add_column(self._conn, "memories", "source_from_file", "INTEGER NOT NULL DEFAULT 0")
             # Migration: links gained an ``auto`` flag (0 = written as [[link]] in the
             # body, 1 = discovered by embedding similarity).
             lcols = {r[1] for r in self._conn.execute("PRAGMA table_info(memory_links)")}
@@ -795,7 +803,7 @@ class MemoryStore:
         slug: str | None = None,
         tags: str = "",
         salience: float = 1.0,
-        source_session: str | None = None,
+        source_session: Any = _DEFAULT,
         description: str = "",
         mem_type: str = "",
         *,
@@ -804,11 +812,17 @@ class MemoryStore:
         created_at: str | None = None,
         project: str | None = None,
         reassign: bool = False,
+        lifecycle: Any = _DEFAULT,
+        lifecycle_error: str = "",
+        updated_at: str | None = None,
+        source_from_file: bool = False,
     ) -> dict[str, Any]:
         """Upsert a searchable memory; optionally persist its file before commit.
 
         ``embed=False`` leaves semantic indexing to ``backfill_embeddings`` and
         never calls the embedder. Markdown persistence excludes the derived index.
+        Omitted source_session retains existing provenance; explicit None clears
+        it, allowing authoritative file sync to remove a deleted source field.
 
         DREAM-108: a new memory belongs to ``project`` (default: this store's project;
         '' for a store without one). An update keeps the memory's project and is refused
@@ -820,9 +834,13 @@ class MemoryStore:
             raise ValueError(f"kind must be semantic|procedural|episodic, got {kind!r}")
         if mem_type and mem_type not in MEM_TYPES:
             raise ValueError(f"type must be one of {', '.join(MEM_TYPES)}, got {mem_type!r}")
+        from .curation import lifecycle_json
+        if lifecycle is not _DEFAULT:
+            lifecycle = lifecycle_json(lifecycle)
         owner = project if project is not None else self.project
-        now = _now()
-        with self._lock, self._conn:
+        now = updated_at or _now()
+        from .longterm import memory_edit_lock
+        with memory_edit_lock() if persist_markdown else nullcontext(), self._lock, self._conn:
             if not slug:  # the remember tool forwards the model's empty string as-is
                 slug = self._free_slug(kind, title, owner)
             else:
@@ -845,10 +863,11 @@ class MemoryStore:
             if existing:
                 self._conn.execute(
                     "UPDATE memories SET kind=?, title=?, body=?, tags=?, salience=?, "
-                    "source_session=COALESCE(?, source_session), updated_at=?, "
+                    "source_session=CASE WHEN ? THEN source_session ELSE ? END, updated_at=?, "
                     "description=COALESCE(NULLIF(?, ''), description), "
                     "mem_type=COALESCE(NULLIF(?, ''), mem_type), project=? WHERE slug=?",
-                    (kind, title, body, tags, salience, source_session, now,
+                    (kind, title, body, tags, salience, source_session is _DEFAULT,
+                     None if source_session is _DEFAULT else source_session, now,
                      description, mem_type,
                      owner if reassign and owner is not None else existing["project"], slug),
                 )
@@ -864,7 +883,8 @@ class MemoryStore:
                     "INSERT INTO memories(slug, kind, title, body, tags, salience, "
                     "source_session, created_at, updated_at, description, mem_type, project) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (slug, kind, title, body, tags, salience, source_session, now, now,
+                    (slug, kind, title, body, tags, salience,
+                     None if source_session is _DEFAULT else source_session, now, now,
                      description, mem_type or default_type(kind, title, body), owner or ""),
                 )
             if content_changed and existing:
@@ -874,6 +894,13 @@ class MemoryStore:
             if created_at:
                 self._conn.execute(
                     "UPDATE memories SET created_at=? WHERE slug=?", (created_at, slug)
+                )
+            if source_from_file or persist_markdown:
+                self._conn.execute("UPDATE memories SET source_from_file=1 WHERE slug=?", (slug,))
+            if lifecycle is not _DEFAULT:
+                self._conn.execute(
+                    "UPDATE memories SET lifecycle=?, lifecycle_error=? WHERE slug=?",
+                    (lifecycle, lifecycle_error, slug),
                 )
             row = dict(
                 self._conn.execute(
@@ -1246,6 +1273,133 @@ class MemoryStore:
                 self._bump_access([r["id"] for r in top])
         return top
 
+    def _memory_size_sql(self, alias="", columns=None):
+        """Raw byte preflight over every projected field, before Python decoding.
+
+        Include nullable provenance and future schema columns as well as body.
+        Separate length(CAST(... AS BLOB)) calls avoid concatenating large values.
+        Numeric columns are included too because SQLite permits text storage.
+        """
+        names = columns or [name.strip() for name in self._mem_cols.split(",")]
+        prefix = alias + "." if alias else ""
+        return "(" + "+".join(
+            f'COALESCE(length(CAST({prefix}"{name}" AS BLOB)),0)' for name in names
+        ) + ")"
+
+    def lifecycle_target(self, slug):
+        """Metadata-only lookup keeps supersession checks within the byte bound."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT slug, project, lifecycle, lifecycle_error FROM memories WHERE slug=? AND "
+                + self._memory_size_sql(columns=("slug", "project", "lifecycle", "lifecycle_error"))
+                + "<=?", (slug, 65536)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def active_memory_page(self, *, scope=_DEFAULT, limit=64, max_bytes=262144, after_id=0):
+        """Bounded index page for advisory curation; oversized rows stay untouched."""
+        from .curation import MAX_ACTIVE_ROWS, MAX_ACTIVE_BYTES, MAX_MEMORY_BYTES
+        if type(limit) is not int or not 1 <= limit <= MAX_ACTIVE_ROWS:
+            raise ValueError("active page limit must be between 1 and 64")
+        if type(max_bytes) is not int or not 1 <= max_bytes <= MAX_ACTIVE_BYTES:
+            raise ValueError("active byte budget must be between 1 and 262144")
+        if type(after_id) is not int or after_id < 0:
+            raise ValueError("after_id must be nonnegative")
+        where, params = self._scope_sql("project", self._scope(scope))
+        with self._lock:
+            steps = 0
+            def budget():
+                nonlocal steps
+                steps += 1
+                return int(steps > 2000)
+            self._conn.set_progress_handler(budget, 1000)
+            try:
+                cursor = self._conn.execute(
+                    f"SELECT {self._mem_cols} FROM memories WHERE id>? "
+                    "AND " + self._memory_size_sql() + "<=?"
+                    + where + " ORDER BY id LIMIT ?",
+                    (after_id, min(MAX_MEMORY_BYTES, max_bytes), *params, limit),
+                )
+                rows, used = [], 0
+                for row in cursor:
+                    item = dict(row)
+                    size = len(json.dumps(item, ensure_ascii=False).encode("utf-8"))
+                    if used + size > max_bytes:
+                        break
+                    rows.append(item)
+                    used += size
+                return rows
+            finally:
+                self._conn.set_progress_handler(None, 0)
+
+    def search_active_memories(self, query: str, kind=None, limit=8, since=None,
+                               until=None, scope=_DEFAULT, max_bytes=262144):
+        """Bounded keyword evidence only, without models, links or recency fallback.
+
+        Reads at most 64 candidates / 256 KiB. Lifecycle exclusions are explicit;
+        conflicts remain visible. Oversized facts stay available through ordinary
+        memory APIs. SQLite work is capped at two million VM steps and raises on
+        exhaustion instead of reporting a fabricated empty result.
+        """
+        from .curation import active_status, lifecycle_json, MAX_MEMORY_BYTES
+        if not isinstance(query, str) or not query.strip() or len(query) > MAX_RECALL_QUERY_CHARS:
+            raise ValueError("query must be a nonempty string of at most 256 characters")
+        if type(limit) is not int or not 1 <= limit <= MAX_RECALL_RESULTS:
+            raise ValueError("limit must be between 1 and 20")
+        if type(max_bytes) is not int or not 1 <= max_bytes <= 262144:
+            raise ValueError("invalid active byte budget")
+        match = _fts_query(query)
+        if match is None:
+            return []
+        where, params = self._scope_sql("m.project", self._scope(scope))
+        sql = ("SELECT m.id FROM memories_fts JOIN memories m ON m.id=memories_fts.rowid "
+               "WHERE memories_fts MATCH ? AND " + self._memory_size_sql("m") + "<=?" + where)
+        params = [match, min(MAX_MEMORY_BYTES, max_bytes), *params]
+        for field, value, op in (("kind", kind, "="), ("created_at", since, ">="),
+                                 ("created_at", self._normalize_until(until), "<=")):
+            if value:
+                sql += f" AND m.{field}{op}?"
+                params.append(value)
+        sql += " ORDER BY bm25(memories_fts)*(0.5+m.salience), m.id LIMIT 64"
+        with self._lock:
+            steps = 0
+            def budget():
+                nonlocal steps
+                steps += 1
+                return int(steps > 2000)
+            self._conn.set_progress_handler(budget, 1000)
+            try:
+                ids = [r[0] for r in self._conn.execute(sql, params)]
+                out, used = [], 0
+                for mid in ids:
+                    selected = self._conn.execute(
+                        f"SELECT {self._mem_cols} FROM memories WHERE id=? AND "
+                        + self._memory_size_sql() + "<=?",
+                        (mid, min(MAX_MEMORY_BYTES, max_bytes - used)),
+                    ).fetchone()
+                    if selected is None:
+                        continue
+                    row = dict(selected)
+                    size = len(json.dumps(row, ensure_ascii=False).encode('utf-8'))
+                    if used + size > max_bytes:
+                        break
+                    used += size
+                    try:
+                        target_slug = json.loads(lifecycle_json(row.get('lifecycle'))).get('superseded_by')
+                    except ValueError:
+                        target_slug = None
+                    target = self.lifecycle_target(target_slug) if target_slug else None
+                    status = active_status(row, target=target)
+                    if status in ('eligible', 'conflict'):
+                        if status == 'conflict':
+                            row['lifecycle_conflict'] = True
+                        out.append(row)
+                    if len(out) == limit:
+                        break
+                return out
+            finally:
+                self._conn.set_progress_handler(None, 0)
+
     def search_memories_with_alternatives(
         self,
         query: str,
@@ -1256,6 +1410,7 @@ class MemoryStore:
         until: str | None = None,
         bump: bool = True,
         scope: Any = _DEFAULT,
+        active: bool = False,
     ) -> list[dict[str, Any]]:
         """Run caller-supplied query alternatives in one bounded recall operation.
 
@@ -1267,17 +1422,23 @@ class MemoryStore:
             raise ValueError(f"limit must be an integer from 1 to {MAX_RECALL_RESULTS}")
         alternative_queries = _bounded_alternative_queries(query, alternative_queries)
         scope = self._scope(scope)
-        primary = self.search_memories(
-            query, kind=kind, limit=limit, since=since, until=until, bump=False, scope=scope
-        )
+        # Active recall is keyword-only and shares a fixed byte allowance across
+        # primary/alternative searches. Legacy browsing keeps its existing API.
+        def search(q):
+            if active:
+                return self.search_active_memories(
+                    q, kind=kind, limit=limit, since=since, until=until, scope=scope,
+                    max_bytes=262144 // (1 + len(alternative_queries)),
+                )
+            return self.search_memories(
+                q, kind=kind, limit=limit, since=since, until=until, bump=False, scope=scope,
+            )
+        primary = search(query)
         primary_direct = [row for row in primary if not row.get("via_recency")]
         alternative_hits: list[dict[str, Any]] = []
         seen = {row["id"] for row in primary_direct}
         for alternative in alternative_queries:
-            hits = self.search_memories(
-                alternative, kind=kind, limit=limit, since=since, until=until, bump=False,
-                scope=scope,
-            )
+            hits = search(alternative)
             for row in hits:
                 if row.get("via_recency") or row["id"] in seen:
                     continue
@@ -1327,6 +1488,7 @@ class MemoryStore:
 
     def top_memories(
         self, limit: int = 8, prefer_facet: str | None = "personal", scope: Any = _DEFAULT,
+        *, active: bool = False,
     ) -> list[dict[str, Any]]:
         """The wake-up set: salience blended with recency decay, so memories that haven't
         been touched in a while fade and fresh/frequently-used ones surface. ``prefer_facet``
@@ -1336,12 +1498,48 @@ class MemoryStore:
         ``scope``: the projects it draws from (DREAM-108), default this store's."""
         where, params = self._scope_sql("project", self._scope(scope))
         with self._lock:
-            rows = [
-                dict(r)
-                for r in self._conn.execute(
+            if active:
+                if type(limit) is not int or not 1 <= limit <= 64:
+                    raise ValueError("active wake limit must be between 1 and 64")
+                steps = 0
+                def budget():
+                    nonlocal steps
+                    steps += 1
+                    return int(steps > 2000)
+                self._conn.set_progress_handler(budget, 1000)
+                try:
+                    # Candidate ranking is deliberately bounded. The final decay
+                    # score below applies within these 64 salient/recent rows.
+                    cursor = self._conn.execute(
+                        f"SELECT {self._mem_cols} FROM memories WHERE "
+                        + self._memory_size_sql() + "<=65536" + where
+                        + " ORDER BY salience DESC, COALESCE(last_accessed,updated_at,created_at) DESC, id LIMIT 64",
+                        params,
+                    )
+                    from .curation import active_status, lifecycle_json
+                    rows, used = [], 0
+                    for item in cursor:
+                        row = dict(item)
+                        size = len(json.dumps(row, ensure_ascii=False).encode('utf-8'))
+                        if used + size > 262144:
+                            break
+                        used += size
+                        try:
+                            target_slug = json.loads(lifecycle_json(row.get('lifecycle'))).get('superseded_by')
+                        except ValueError:
+                            target_slug = None
+                        target = self.lifecycle_target(target_slug) if target_slug else None
+                        status = active_status(row, target=target)
+                        if status in ('eligible', 'conflict'):
+                            if status == 'conflict':
+                                row['lifecycle_conflict'] = True
+                            rows.append(row)
+                finally:
+                    self._conn.set_progress_handler(None, 0)
+            else:
+                rows = [dict(r) for r in self._conn.execute(
                     f"SELECT {self._mem_cols} FROM memories WHERE 1=1" + where, params
-                ).fetchall()
-            ]
+                ).fetchall()]
         if not rows:
             return []
         now = datetime.now(timezone.utc)

@@ -48,6 +48,10 @@ async def probe_none(self):
 oc.OpenAICompatBackend.ask = scripted_ask
 oc.OpenAICompatBackend._probe_n_ctx = probe_none  # there is no server to ask
 
+from dream.local import machx  # noqa: E402
+
+machx.served_model_id = lambda: "scripted"  # the session's model: before a turn the TUI asks which is served
+
 from dream.tui import app as appmod  # noqa: E402
 from dream.telemetry.gpu import GpuDeviceSample, GpuSnapshot  # noqa: E402
 from telemetry_guard import guard_telemetry  # noqa: E402
@@ -83,6 +87,7 @@ async def main():
         appmod.GpuSampler = lambda: sampler
         app = appmod.App(provider="machx", model="scripted", consolidate_on_exit=False,
                          workspace=os.environ["DREAM_ROOT"], gui=False)
+        app.show_tasks = True  # The telemetry fixture explicitly expands details.
         try:
             await app.run()
             # Require the real App shutdown to stop and release its sampler.

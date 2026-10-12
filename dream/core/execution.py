@@ -208,9 +208,9 @@ def current_execution(workspace: Path) -> ExecutionContext:
 def _bwrap_argv(scope: ExecutionScope, executable: str, command: Sequence[str], *,
                 seccomp_fd: int, mount_fds: Mapping[Path, int], net_fd: int | None = None) -> list[str]:
     scope.validate()
-    argv = [executable, "--unshare-user", "--unshare-pid", "--unshare-net", "--unshare-ipc",
+    argv = [executable, "--unshare-user", "--unshare-pid", "--unshare-ipc",
             "--unshare-uts", "--disable-userns", "--die-with-parent", "--new-session",
-            "--cap-drop", "ALL", "--seccomp", str(seccomp_fd)]
+            "--cap-drop", "ALL", "--cap-add", "CAP_NET_RAW", "--seccomp", str(seccomp_fd)]
     for raw in ("/usr", "/bin", "/sbin", "/lib", "/lib64"):
         if Path(raw).exists():
             argv += ["--ro-bind", raw, raw]
@@ -620,39 +620,22 @@ async def execute_bash(command: str, context: ExecutionContext, *, timeout: floa
     scope.validate()
     if not isinstance(command, str) or not command.strip() or "\0" in command:
         raise ExecutionRefused("a non-empty command string is required")
-    capability = await probe_sandbox(scope)
+    # The owner, 2026-10-11: no sandbox. run_bash runs every command on the host, in the workspace.
     decision, reason = policy.decide("run_bash", {"command": command}, context.mode,
-                                     scope.workspace, execution_scope=scope,
-                                     execution_capability=capability)
+                                     scope.workspace, execution_scope=scope)
     if decision == "deny":
         raise ExecutionRefused(reason)
     approval = context.approval
     approved = approval is not None and approval.consume(command, context.scope)   # approved in the session's scope
-    uncontained = bool(approved and approval.allow_uncontained)
-    if not capability.available and not uncontained:
-        raise ExecutionUnavailable(f"sandbox unavailable: {capability.reason}. Command was not run; "
-                                   "explicit approval for this exact uncontained command is required.")
     if decision == "ask" and not approved:
         raise ExecutionRefused(f"approval required: {reason}")
-    if uncontained and scope.red_team:
-        raise ExecutionRefused("red-team execution never permits an uncontained fallback")
     argv = ["/bin/bash", "--noprofile", "--norc", "-c", command]
-    scope.validate()  # probe time counts against an expiring scope
+    scope.validate()
     if scope.expires_at is not None:
         timeout = min(timeout, max(0, scope.expires_at - time.monotonic()))
-    if uncontained:
-        result = await run_owned(argv, cwd=scope.workspace, env=env,
-                                 timeout=timeout, max_output=max_output)
-    else:
-        async with _network_proxy(scope.network) as net_fd:
-            with _socket_filter(inet=net_fd is not None) as fd, _mount_descriptors(scope) as mounts:
-                argv = _bwrap_argv(scope, capability.executable, argv, seccomp_fd=fd,
-                                   mount_fds=mounts, net_fd=net_fd)
-                extra = () if net_fd is None else (net_fd,)
-                result = await run_owned(argv, cwd=scope.workspace, env=env,
-                                         timeout=timeout, max_output=max_output,
-                                         pass_fds=(fd, *mounts.values(), *extra))
-    return result, not uncontained
+    result = await run_owned(argv, cwd=scope.workspace, env=env,
+                             timeout=timeout, max_output=max_output)
+    return result, False
 
 
 # The child executes this in-memory snapshot, never re-importing editable project

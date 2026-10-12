@@ -513,13 +513,10 @@ def consult_permission(mode: str, workspace: str, preapproved=(), execution=None
                 return PermissionResultAllow()
             return PermissionResultDeny(message="Not run: a consultation may not change the main session's "
                                                 "plan, todos, skills, tasks or memories.")
-        scope, capability = execution() if execution is not None else (None, None)
-        native_shell = tool_name in {"run_bash", config.tool_id("run_bash")}
-        decision, reason = policy.decide(tool_name, tool_input, mode, Path(workspace),
-                                         execution_scope=scope,
-                                         execution_capability=capability if native_shell else None)
-        if native_shell and capability is not None and not capability.available and decision != "deny":
-            decision, reason = "ask", "outside workspace protection unavailable"
+        scope, _ = execution() if execution is not None else (None, None)
+        # No shell sandbox (2026-10-11): decide as run_bash itself does, without the sandbox probe's evidence; a
+        # read-only command it would ask about is refused here with the reason, not later as "approval required".
+        decision, reason = policy.decide(tool_name, tool_input, mode, Path(workspace), execution_scope=scope)
         if decision == "allow":
             return PermissionResultAllow()
         why = reason or decision
@@ -712,13 +709,25 @@ class AnthropicBackend(Backend):
         self._cards: _SubagentCards | None = None
         # DREAM-213: the session's local helpers (delegate_local), whose workers the owner's controls reach.
         self.local_helpers = local_helpers
+        if local_helpers is not None:
+            # delegate_local uses a separate HTTP worker backend. Give the
+            # session-owned helper the same frozen standing rules as SDK workers.
+            capture = getattr(local_helpers, "capture_standing_rules", None)
+            if capture is not None:
+                capture(system_prompt, workspace=cwd)
         self.mcp_server = mcp_server
         # ONLY the exempt Dream tools (read-only + own-mind memory) are pre-approved
         # here. Mutating Dream tools and every self-built custom tool are omitted, so
         # the SDK routes them to can_use_tool → the mode policy. Pre-approving all of
         # them (the old behavior) let plan mode and workspace isolation be bypassed.
         self.preapproved_tool_ids = preapproved_tool_ids
-        self.agents = agents
+        # Snapshot standing rules when the session is constructed. Agent definitions may
+        # be shared between sessions, so never mutate a supplied definition in place.
+        from dataclasses import replace
+        from ..instructions import worker_prompt
+        self.agents = ({name: replace(definition, prompt=worker_prompt(
+            definition.prompt, system_prompt, workspace=cwd, agent=name))
+            for name, definition in agents.items()} if agents else agents)
         self.permission_cb = permission_cb
         self.model = model
         self.stderr_cb = stderr_cb
@@ -774,7 +783,7 @@ class AnthropicBackend(Backend):
             prompt += (f"\n\n## Sub-agents at once\nAt most {limit} of your sub-agents (the Agent tool) run at the same "
                        "time in this session: the owner's limit. Launch as many as the job needs; the others wait their "
                        "turn and start as earlier ones finish.")
-        return sdk_options(
+        options = sdk_options(
             system_prompt=prompt,
             mcp_servers={config.MCP_SERVER_NAME: self.mcp_server},
             preapproved_tool_ids=self.preapproved_tool_ids,
@@ -786,6 +795,16 @@ class AnthropicBackend(Backend):
             stderr=self.stderr_cb,
             agent_limit=limit,
         )
+        # Use the same installed CLI as sign-in/native panes. The SDK prefers
+        # its older bundled executable, which can refuse newer account models.
+        from ..cli_discovery import find_cli, node_child_env
+        executable = find_cli('claude')
+        if executable is not None:
+            options.cli_path = executable
+            child_env = node_child_env('claude', executable)
+            if child_env is not None:
+                options.env['PATH'] = child_env['PATH']
+        return options
 
     async def connect(self) -> None:
         self._agent_slots = _agent_slots()      # the owner's max agents for this session's CLI (its ask rule)
@@ -818,6 +837,7 @@ class AnthropicBackend(Backend):
                 self._budget_failures = None
             raise
         tool_by_id: dict[str, str] = {}
+        last_request_context = None
         # DREAM-212: this turn's sub-agents as Nested cards. Display only (gate round 1, finding 3): a fault in them is
         # logged and that update dropped, never raised into the lead's turn; a cancellation, not an Exception, still
         # goes through.
@@ -916,6 +936,14 @@ class AnthropicBackend(Backend):
                         elif d.get("type") == "thinking_delta":
                             yield Event("thinking_delta", d.get("thinking", ""))
                 elif isinstance(msg, AssistantMessage):
+                    # ResultMessage usage covers every tool round; only an
+                    # individual assistant response describes one context window.
+                    usage = getattr(msg, "usage", None)
+                    counts = [usage.get(key, 0) for key in (
+                        "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"
+                    )] if isinstance(usage, dict) and "input_tokens" in usage else []
+                    last_request_context = (sum(counts) if counts and all(
+                        type(value) is int and value >= 0 for value in counts) else None)
                     text_parts: list[str] = []
                     for block in msg.content:
                         if isinstance(block, TextBlock):
@@ -953,9 +981,21 @@ class AnthropicBackend(Backend):
                         "total_cost_usd": msg.total_cost_usd,
                         "subtype": msg.subtype,
                         "usage": msg.usage,
+                        "usage_scope": "turn",
+                        "context_tokens": last_request_context,
                         "api_error_status": getattr(msg, "api_error_status", None),
                         "terminal_reason": getattr(msg, "terminal_reason", None),
                     }
+                    if msg.is_error:
+                        details = getattr(msg, 'errors', None)
+                        if not isinstance(details, list):
+                            details = []
+                        details = [value[:1000] for value in details[:3] if isinstance(value, str) and value.strip()]
+                        report = getattr(msg, 'result', None)
+                        if not details and isinstance(report, str) and report.strip():
+                            details = [report[:1000]]
+                        if details:
+                            result['provider_errors'] = details
                 elif isinstance(msg, SystemMessage):
                     mapped("system", msg)   # the SDK's task messages end background sub-agents' cards (gate round 1)
                     slot_task(msg)
@@ -1020,6 +1060,8 @@ class AnthropicBackend(Backend):
             reason = json.dumps(str(result["terminal_reason"])[:120])
             error = (f"SDK turn incomplete. Reported subtype: {subtype}; terminal reason: {reason}. "
                      "Review the partial results before continuing.")
+            if result.get('provider_errors'):
+                error += ' Provider report: ' + json.dumps(result['provider_errors'], ensure_ascii=True)
         else:
             error = None
         if budget_failures:

@@ -1,6 +1,6 @@
 """DREAM-170 skill presets, phase 1: Default is no filter at all (the tools, the tools sent at 16K/75K/250K and the
 system prompt are byte-identical whether the presets file is missing, corrupt or says Default); a preset narrows the
-tools, MCP servers and skills a session starts with, never below the 19 core tools, and never mid-session."""
+tools, MCP servers and skills a session starts with, never below the 20 core tools, and never mid-session."""
 from __future__ import annotations
 
 import asyncio
@@ -109,7 +109,8 @@ def test_legal_cuts_the_tools_to_the_core_and_its_groups():
     built = registry.build(extra_tools=EXTRA)
     names = set(built["names"])
     groups = {t.name: t.handler.__module__.rsplit(".", 1)[-1] for t in built["catalog"]}
-    assert len(built["catalog"]) == 113 and len(names) == 35
+    # DREAM-251..285 added artifact_read (a core tool), ram_read and ram_post.
+    assert len(built["catalog"]) == 116 and len(names) == 36
     assert names == set(presets.CORE_TOOLS) | {n for n, g in groups.items() if g in LEGAL_GROUPS} | {"show_to_user"}
 
 
@@ -117,7 +118,7 @@ def test_the_core_tools_survive_an_empty_preset():
     _user_file(json.dumps({"active": "Bare", "presets": {"Bare": {}}}))
     assert presets.start_session() == ("Bare", None)
     assert set(registry.build(extra_tools=EXTRA)["names"]) == set(presets.CORE_TOOLS)
-    assert len(presets.CORE_TOOLS) == 19
+    assert len(presets.CORE_TOOLS) == 20                          # artifact_read joined the core (DREAM-251..285)
 
 
 def test_the_builtin_presets_name_real_skills_and_tool_groups():
@@ -209,8 +210,8 @@ async def test_the_workspace_overview_edits_and_the_terminal_command(tmp_path, m
     monkeypatch.setattr(presets, "_CATALOG", list(registry._BASE_TOOLS) + EXTRA)
     over = presets.overview([])
     costs = {p["name"]: p["cost"] for p in over["presets"]}
-    assert over["session"] == over["active"] == "Default" and costs["Legal"]["tools"] == 35
-    assert costs["Default"]["tools"] == 113 and {"name": "web", "tools": 2, "core": 0, "names": ["web_search", "browse"]} in over["groups"]
+    assert over["session"] == over["active"] == "Default" and costs["Legal"]["tools"] == 36
+    assert costs["Default"]["tools"] == 116 and {"name": "web", "tools": 2, "core": 0, "names": ["web_search", "browse"]} in over["groups"]
     presets.edit("create", {"name": "Contracts"}, over["sha256"])
     sha = presets.listing()["sha256"]
     with pytest.raises(presets.Conflict):                                   # the second view's stale revision

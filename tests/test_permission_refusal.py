@@ -110,9 +110,9 @@ async def test_owner_no_at_the_prompt_is_a_plain_decline(app):
     assert len(app.prompts) == 1
 
 
-async def test_always_in_sandbox_grants_this_exact_command_for_the_session(app):
+async def test_always_grants_this_exact_command_for_the_session(app):
     async def answer(choices):
-        assert "always in sandbox" in choices
+        assert "[a]lways this exact command" in choices   # (no shell sandbox since 2026-10-11)
         return "a"
     app._read_answer = answer
     assert await app._permission("run_bash", {"command": OUTSIDE}) is True

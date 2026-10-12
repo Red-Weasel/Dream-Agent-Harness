@@ -197,8 +197,26 @@ class Engine:
     async def start(self) -> None:
         try:
             await self._start()
-        except Exception:
-            await self._cleanup()
+        except BaseException as startup_error:
+            if getattr(self, "_cli_mcp_name", None):
+                # Registration may commit before cancellation is delivered.
+                # Own teardown until it finishes, including repeated Stop.
+                cleanup = asyncio.create_task(self._cleanup())
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        break
+                try:
+                    cleanup.result()
+                except BaseException as cleanup_error:
+                    startup_error.add_note("CLI startup cleanup failed: " + type(cleanup_error).__name__)
+                    self._log_stderr("CLI startup cleanup failed: " + type(cleanup_error).__name__)
+            else:
+                # SDK cancellation scopes must be closed in their owning task.
+                await self._cleanup()
             raise
 
     async def _start(self) -> None:
@@ -356,6 +374,9 @@ class Engine:
         # to a few KB. See build_system_prompt's docstring for the tier contract.
         stable: list[str] = []
         stable.append(guidance(self.provider, self.profile, self.model, vision=getattr(self, "_vision", None)))
+        if {'session_list', 'session_send', 'session_inbox'} <= set(getattr(self, '_session_tools', {})):
+            from .linked_sessions import PROMPT_GUIDANCE
+            stable.append(PROMPT_GUIDANCE)
         stable.append(
             "\n## Council\nThe current Council roster is supplied with each turn. "
             "Use consult for one configured advisor or council for all. Advisors are "
@@ -547,6 +568,7 @@ class Engine:
                 cwd=str(self.workspace),
                 model=self.model,
                 sandbox_getter=sandbox_getter,
+                mode_getter=self._mode_getter,
                 mcp_config=mcp_config,
                 idle_timeout=self.profile.idle_timeout_s,
             )
@@ -834,7 +856,8 @@ class Engine:
             raise RuntimeError("This CLI adapter cannot attach the shared Dream tools")
         from .execution import run_owned
         self._cli_mcp_name = name  # cleanup even if registration finishes during cancellation
-        result = await run_owned(register, cwd=self.workspace, env=self._cli_setup_env(), timeout=20, max_output=4096)
+        register, setup_env = self._cli_mcp_command(register)
+        result = await run_owned(register, cwd=self.workspace, env=setup_env, timeout=20, max_output=4096)
         if result.timed_out or result.returncode:
             raise RuntimeError("Could not register shared Dream tools with " + self.provider.label
                                + "; inspect the CLI's MCP setup. " + result.output.decode("utf-8", "replace")[:300])
@@ -843,8 +866,20 @@ class Engine:
     def _cli_setup_env() -> dict:
         import os
         keys = ("PATH", "HOME", "LANG", "LC_ALL", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
-                "CODEX_HOME", "GROK_HOME", "GEMINI_CLI_HOME")
+                "CODEX_HOME", "GROK_HOME", "GEMINI_CLI_HOME", "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
+                "GEMINI_CLI_SYSTEM_DEFAULTS_PATH")
         return {key: os.environ[key] for key in keys if key in os.environ}
+
+    def _cli_mcp_command(self, argv: list[str]) -> tuple[list[str], dict]:
+        from .cli_discovery import node_child_env
+        command = list(argv)
+        env = self._cli_setup_env()
+        adapter = getattr(self.backend, 'adapter', None)
+        executable = getattr(self.backend, '_executable', None)
+        if executable and command and command[0] == getattr(adapter, 'cmd', None):
+            command[0] = executable
+            env = node_child_env(adapter.cmd, executable, env=env) or env
+        return command, env
 
     async def _deregister_persistent_mcp(self) -> None:
         name = self._cli_mcp_name
@@ -857,7 +892,8 @@ class Engine:
             return
         try:
             from .execution import run_owned
-            result = await run_owned(argv, cwd=self.workspace, env=self._cli_setup_env(), timeout=10, max_output=1024)
+            argv, setup_env = self._cli_mcp_command(argv)
+            result = await run_owned(argv, cwd=self.workspace, env=setup_env, timeout=10, max_output=1024)
             if result.returncode or result.timed_out:
                 self._log_stderr(f"CLI MCP cleanup incomplete for {name}; remove this stale registration with the provider CLI")
         except Exception as exc:
@@ -1042,9 +1078,12 @@ class Engine:
     async def _authorize_tool(self, name: str, args: dict) -> bool:
         from . import policy
         if self._user_can_use_tool is None:
+            # No shell sandbox (2026-10-11): a shell command is decided as run_bash itself decides it, without the
+            # sandbox probe's evidence (with it, a read-only command counted as contained); other tools keep it.
+            shell = policy.capability(name) == policy.SHELL
             decision, _ = policy.decide(name, args, "ask", self.workspace,
                                        execution_scope=self.execution_scope,
-                                       execution_capability=self.execution_capability)
+                                       execution_capability=None if shell else self.execution_capability)
             return decision == "allow"
         from contextlib import nullcontext
         # Capture this turn's meter so cancellation or a later turn cannot
@@ -1737,12 +1776,17 @@ class Engine:
         usage = data.get("usage") or {}
         stats = data.get("stats") or {}
         try:
-            # Current context fill = the LAST round's input (+cache) tokens.
-            toks = int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0)
-            toks += int(usage.get("cache_read_input_tokens", 0) or 0)
-            toks += int(usage.get("cache_creation_input_tokens", 0) or 0)
-            if toks:
-                self.last_context_tokens = toks
+            # CLI adapters can report whole-turn/session totals without a last
+            # request size. Explicit None means unavailable, not a huge context.
+            if 'context_tokens' in data:
+                tokens = data['context_tokens']
+                self.last_context_tokens = tokens if type(tokens) is int and tokens >= 0 else None
+            else:
+                toks = int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0)
+                toks += int(usage.get("cache_read_input_tokens", 0) or 0)
+                toks += int(usage.get("cache_creation_input_tokens", 0) or 0)
+                if toks:
+                    self.last_context_tokens = toks
             # Cumulative tokens: prefer the WHOLE-TURN aggregate (the openai-compat
             # backend sums every tool round into stats); `usage` alone is only the
             # final round, which undercounts a multi-tool turn. Anthropic carries no
@@ -1751,7 +1795,14 @@ class Engine:
                 self.session_tokens += (int(stats.get("prompt_tokens") or 0)
                                         + int(stats.get("completion_tokens") or 0))
             else:
-                spent = int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0)
+                # Canonical prompt_tokens includes cache reads. Anthropic-style
+                # raw input_tokens excludes them and needs the separate fields.
+                if usage.get('prompt_tokens') is not None:
+                    spent = int(usage['prompt_tokens'])
+                else:
+                    spent = int(usage.get('input_tokens') or 0)
+                    spent += int(usage.get('cache_read_input_tokens') or 0)
+                    spent += int(usage.get('cache_creation_input_tokens') or 0)
                 spent += int(usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0)
                 self.session_tokens += spent
         except (TypeError, ValueError):

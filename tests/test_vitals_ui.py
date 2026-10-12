@@ -10,6 +10,7 @@ import time
 import pytest
 from playwright.async_api import expect
 
+from chat_more import more
 from dream.core.backends.base import Event
 from test_desktop_companion import studio  # noqa: F401
 from test_plan_strip import CONNECTED, STRIP, _plan, _url
@@ -32,7 +33,8 @@ async def _open(srv, page, url, layout, width):
     await page.goto(_url(url, layout))
     await expect(page.locator("#stat")).to_have_text(CONNECTED)
     if await page.locator("#rail").evaluate("el => el.classList.contains('hide')"):
-        await page.locator("#railtoggle").click()                       # the metrics rail, open
+        await more(page, "railtoggle")                                  # the metrics rail, open: Chat shows no bars
+                                                                        # (DREAM-240/242), Metrics is under More
     await expect(page.locator("#railbody")).to_be_visible()
 
 

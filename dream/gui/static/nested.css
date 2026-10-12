@@ -220,6 +220,11 @@ html.companion[data-dream-view=nested] #rail:not(.hide){z-index:6;inset:0 0 0 au
 .nd .nd-send{height:32px;padding:0 var(--nd-s4);border:0;border-radius:calc(var(--nd-r-lg) - var(--nd-s2));background:var(--nd-accent);color:var(--nd-on-accent);font-weight:600;flex:none}
 #dream-nested-page .nd-send:hover,#dream-nested-page .nd-send:focus-visible{background:var(--nd-accent);color:var(--nd-on-accent);border-color:transparent;filter:brightness(1.08)}
 .nd .nd-send:disabled{cursor:default;opacity:.6}
+/* Stop for the orchestrator's turn, beside Steer while a turn runs (the owner, 2026-10-04). */
+.nd .nd-stop-turn{height:32px;padding:0 var(--nd-s4);margin-right:var(--nd-s2);border:1px solid var(--nd-fail);border-radius:calc(var(--nd-r-lg) - var(--nd-s2));background:transparent;color:var(--nd-fail);font-weight:600;flex:none}
+.nd .nd-stop-turn[hidden]{display:none}
+#dream-nested-page .nd-stop-turn:hover,#dream-nested-page .nd-stop-turn:focus-visible{background:var(--nd-fail);color:var(--nd-bg);border-color:var(--nd-fail)}
+.nd .nd-stop-turn:disabled{cursor:default;opacity:.6}
 .nd-status{margin:var(--nd-s1) 0 0;padding-left:var(--nd-s2);font-size:var(--nd-t12);color:var(--nd-fg2)}
 .nd-status:empty{display:none}
 .nd-status[data-error=true]{color:var(--nd-fail)}

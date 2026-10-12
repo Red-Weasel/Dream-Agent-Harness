@@ -346,17 +346,43 @@ async def test_a_paused_worker_can_be_stopped():
     client = _Engine([], {"inspect": [_sub_toolcall("web_search", {"query": "source"}), _sub_final("never asked")]})
     b = _researcher_backend(events, client)
     run = asyncio.ensure_future(b._run_subagent("researcher", "inspect"))
-    run_id = await _until(lambda: client.run_ids.get("inspect"))
-    b.worker_control("agent_pause", run_id)
-    await _until(lambda: any(r.get("status") == "paused" for r in _rows(events)))
-    assert b.worker_control("agent_stop", run_id) == {"run_id": run_id, "agent": "researcher", "state": "stopping",
-                                                      "changed": True}
-    answer, failed = await asyncio.wait_for(run, 5)
-    assert failed and answer == STOPPED.format(agent="researcher", where="after its request 1; its work is incomplete")
+    try:
+        run_id = await _until(lambda: client.run_ids.get("inspect"))
+        b.worker_control("agent_pause", run_id)
+        await _until(lambda: any(r.get("status") == "paused" for r in _rows(events)))
+        assert b.worker_control("agent_stop", run_id) == {"run_id": run_id, "agent": "researcher", "state": "stopping",
+                                                          "changed": True}
+        answer, failed = await asyncio.wait_for(run, 5)
+    finally:
+        if not run.done():                                     # a failure above must not leave the worker running
+            run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+    assert failed
+    # The Stop contract: what the lead is told about the stop is unchanged, whole, and comes first. This worker had
+    # finished one web_search before it paused, so the record of that outcome (DREAM-252) follows it as a block.
+    said, gap, record = answer.partition("\n\n[worker incomplete] ")
+    assert gap, answer
+    assert said == STOPPED.format(agent="researcher", where="after its request 1; its work is incomplete")
+    lines = record.split("\n")
+    header = dict(part.split("=", 1) for part in lines[0].split("; "))
+    assert {k: header.get(k) for k in ("reason", "requests", "tools_completed", "tools_failed", "tools_uncertain")} == {
+        "reason": "stopped", "requests": "1", "tools_completed": "1", "tools_failed": "0", "tools_uncertain": "0"}
+    assert "tools_not_run" not in header, "every call the worker made ran"
+    outcomes = [line for line in lines if line.startswith("- #")]
+    assert len(outcomes) == 1 and outcomes[0].startswith("- #1 web_search completed: "), record
+    assert "seen" in outcomes[0], "what the tool returned before the pause is kept"
+    # No session workspace is bound here, so nothing was saved and no handle is claimed.
+    assert "handle:" not in record and "record: not saved (no session workspace is bound)" in lines[-1], record
     assert [r["status"] for r in _rows(events) if r["kind"] == "status"] == [
         "running", "pausing", "paused", "interrupted"]
     assert _rows(events)[-1]["text"] == "Stopped by you."
-    assert client.sent("inspect") == 1
+    await asyncio.sleep(0.05)
+    rows = _rows(events)
+    assert client.sent("inspect") == 1, "no request after the Stop"
+    assert [r["kind"] for r in rows].count("request") == 1
+    assert [r["kind"] for r in rows].count("tool_use") == 1 and [r["kind"] for r in rows].count("tool_result") == 1, (
+        "no tool ran after the Stop")
+    assert rows[-1]["text"] == "Stopped by you.", "nothing was reported after the Stop"
 
 
 async def test_pause_all_holds_every_worker_at_its_boundary_and_the_leads_order_holds():

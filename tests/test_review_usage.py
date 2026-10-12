@@ -51,6 +51,17 @@ def test_cli_usage_is_observed_and_never_double_counts_terminal_totals(provider,
         assert parent.phases[f'council:{provider}:lead']['requests'] == 1
 
 
+def test_antigravity_consultation_includes_separately_reported_cache_input():
+    parent = meter()
+    proxy = attributed_meter(get_provider('antigravity'), scope='council', meter=parent)
+    event = {'event': 'result', 'result': {'usage': {
+        'input_tokens': 100, 'output_tokens': 12, 'cache_read_tokens': 70}}}
+    _record_usage('antigravity', json.dumps(event).encode(), proxy)
+    assert parent.prompt_tokens == 170
+    assert parent.output_tokens == 12
+    assert parent.cached_tokens == 70
+
+
 async def test_sdk_advisor_and_evaluator_count_result_usage_without_live_queries(monkeypatch, tmp_path):
     from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
     async def query(**kwargs):

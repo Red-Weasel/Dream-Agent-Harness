@@ -7,11 +7,14 @@ the engine lives in its own session (start_new_session), where no terminal hangu
 The engine is now tied to the process that spawned it and owns its lifecycle: the desktop's
 `python -m dream.desktop.startup run` session process, or the terminal `dream local` process.
 PR_SET_PDEATHSIG delivers SIGTERM (the engine's orderly stop) when that process dies by any means,
-and a small watchdog SIGKILLs the engine if it is still alive after a grace period (default 120 s).
-`--keep-hot` stays untied.
+and a small watchdog waits a grace period (default 120 s) for it to exit. Since DREAM-253 the watchdog
+never SIGKILLs: an engine still alive after the grace is left running, reported in the engine log and
+in the watchdog's exit status. `--keep-hot` stays untied.
 
 Every test uses real processes and a stand-in engine (`python -c "time.sleep(600)"`); no engine,
-GPU or model is involved, and the launch lock, port and DREAM_ROOT are private to the test.
+GPU or model is involved, and the launch lock, port and DREAM_ROOT are private to the test. The
+SIGKILLs in this file are the tests' own: to the stand-in OWNER (the crash under test) and, in the
+fixtures' cleanup, to stand-ins the product now rightly leaves running.
 """
 from __future__ import annotations
 
@@ -225,13 +228,55 @@ def test_the_deliberate_crash_leaves_no_core_dump(tmp_path, owners):
     assert (death.si_status, death.si_code) == (signal.SIGSEGV, os.CLD_KILLED)   # CLD_DUMPED: a core was dumped
 
 
-def test_engine_ignoring_sigterm_is_killed_after_the_grace(tmp_path, owners):
+def test_engine_ignoring_sigterm_is_left_running_and_never_killed(tmp_path, owners):
+    """DREAM-253: the watchdog used to SIGKILL this engine after the grace. It now leaves when the grace is over
+    and says in the engine log that the engine is still running. The stand-in is killed by the `owners` fixture's
+    cleanup only (a CPU-only `python -c`; that cleanup is the test's, not something the product does)."""
     owner = owners(helper_owner(tmp_path, child=STUBBORN), env={"DREAM_ENGINE_KILL_GRACE_S": "1"})
+    assert owner.watchdog is not None
     assert ignores_sigterm(owner.engine_pid)
     owner.proc.send_signal(signal.SIGKILL)
-    assert not gone_within(owner.engine, 0.5)            # SIGTERM alone does not stop this one
-    assert gone_within(owner.engine, 4.0)                # the watchdog's SIGKILL does
-    assert "SIGKILL" in (tmp_path / "machx.log").read_text()
+    assert gone_within(owner.watchdog, 5.0)              # the watchdog waited its 1 s grace and left
+    assert not gone_within(owner.engine, 1.5)            # nothing killed the engine: it is still there
+    log = (tmp_path / "machx.log").read_text()
+    assert f"engine pid {owner.engine_pid} still running 1 s after SIGTERM" in log
+    assert "SIGKILL" not in log and "force-killed" in log
+    assert f"engine pid {owner.engine_pid} stopped" not in log           # no false "stopped"
+
+
+def test_the_watchdog_exits_nonzero_when_the_engine_outlasts_the_grace(tmp_path):
+    """The watchdog's own exit status reports the incomplete stop. Here the watchdog is this test's child (the real
+    script, started as engine_guard._watch starts it), so its status can be read; the owner and the stubborn engine
+    are stand-ins, and the `finally` kills them -- the test's cleanup, not the product's."""
+    sys.path.insert(0, str(REPO))
+    from dream.local import engine_guard
+    engine = subprocess.Popen([sys.executable, "-c", STUBBORN], start_new_session=True,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    owner = subprocess.Popen([sys.executable, "-c", SLEEPER])
+    owner_fd, engine_fd, watchdog = os.pidfd_open(owner.pid), os.pidfd_open(engine.pid), None
+    try:
+        assert ignores_sigterm(engine.pid)
+        watchdog = subprocess.Popen(
+            [sys.executable, "-I", str(Path(engine_guard.__file__).resolve()), str(owner_fd), str(engine_fd),
+             "1", "1", str(owner.pid), str(engine.pid)],
+            pass_fds=(owner_fd, engine_fd), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, start_new_session=True)
+        owner.kill()                                     # the stand-in owner dies
+        owner.wait(5)
+        out, _ = watchdog.communicate(timeout=10)
+        assert watchdog.returncode == engine_guard.INCOMPLETE_STOP != 0
+        assert engine.poll() is None                     # SIGTERM was sent and ignored; nothing stronger followed
+        assert f"sent SIGTERM to engine pid {engine.pid}" in out
+        assert f"engine pid {engine.pid} still running 1 s after SIGTERM" in out
+        assert "SIGKILL" not in out and f"engine pid {engine.pid} stopped" not in out
+    finally:
+        for proc in (watchdog, owner, engine):
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+            if proc is not None:
+                proc.wait(5)
+        os.close(owner_fd)
+        os.close(engine_fd)
 
 
 def test_default_grace_is_two_minutes(monkeypatch):

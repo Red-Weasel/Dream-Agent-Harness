@@ -14,6 +14,9 @@ Scripted transports only: no engine, no model, no GPU.
 from __future__ import annotations
 
 import copy
+import json
+import math
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -45,16 +48,23 @@ class _Engine:
         return _PostResp(self.replies[min(len(self.posted), len(self.replies)) - 1])
 
 
-def _lanes_session(*replies, props=None, result_chars=1600, ran=None):
-    """The owner's session: MachX, 16 lanes of 32,768 beside a 262,144 lead, the launch preset's max_tokens 16,384."""
+def _lanes_session(*replies, props=None, result_chars=1600, ran=None, result=None, describe=None):
+    """The owner's session: MachX, 16 lanes of 32,768 beside a 262,144 lead, the launch preset's max_tokens 16,384.
+    `result`: the k-th call's text, instead of "R<k> yyy..."; `describe`: the tools' description, instead of
+    "<name> tool" (both None = the session as it always was)."""
     n = {"k": 0}
 
     async def search(a):
         if ran is not None:
             ran.append(a)
         n["k"] += 1
-        return {"content": [{"type": "text", "text": f"R{n['k']} " + "y" * result_chars}]}
-    b = sub_backend([sub_tool("web_search", search), sub_tool("recall", search)], _researcher())
+        text = f"R{n['k']} " + "y" * result_chars if result is None else result(n["k"])
+        return {"content": [{"type": "text", "text": text}]}
+    tools = [sub_tool("web_search", search), sub_tool("recall", search)]
+    if describe is not None:
+        for tool in tools:
+            tool.description = describe
+    b = sub_backend(tools, _researcher())
     b._local_options = {"max_tokens": PRESET}
     b._server_props = _props() if props is None else props
     b._server_props_model = b.model
@@ -457,3 +467,156 @@ def test_before_the_engine_has_said_anything_the_task_tool_is_word_for_word_as_b
     [schema] = [s for s in b.tool_schemas if s["function"]["name"] == "task"]
     assert schema["function"]["description"] == TASK_TOOL.format(runs="One subagent runs at a time", context="")
     assert _task_text(b) == schema["function"]["description"]
+
+
+# --- 5: DREAM-252 in the lane: one large tool result is cut to fit, and the worker's next reply still has room ----
+#
+# The whole path, on the session above (a 32,768 lane beside the 262,144 lead): the worker's first request, one
+# tool call whose result is far larger than the lane, the result as it enters the worker's history, the second
+# request, the final answer. Every outgoing payload is re-counted here with the counter admission itself uses
+# (backend._calibrated_counter, so a calibration other than 1.0 is counted too) and the max_tokens actually sent.
+
+CAP = 24_000                                                 # config.TOOL_RESULT_CAP's default, pinned below
+FIRST_LINE = "R1 FIRST LINE: première ligne — 最初の行 — первая строка\n"
+# 4 UTF-8 bytes a character: the 24,000 characters _clamp keeps are about 27,400 tokens as admission counts them
+# (bytes / 3.5), past 80 % of the lane (26,214) on their own, though only 6,000 at chars/4.
+BIG_RESULT = FIRST_LINE + "🎼" * 60_000
+# Tool descriptions are part of every request (the schemas), in bytes: non-ASCII ones cost more than they look.
+DESCRIPTION = "检索工具 — recherche détaillée dans les sources 🎼. " * 40
+CUT_RE = re.compile(r"\A(.*)\n\n\[\.\.\. (\d+) chars elided\]\n\[Dream: this result was cut to leave room in this "
+                    r"worker's context window for its next reply\. Ask for a narrower range to read the rest\.\]",
+                    re.DOTALL)
+OVERFLOW_CHOICES = ["return", "compact", "handoff"]
+
+
+def _full_account(b, payload, window=SLOT_CTX):
+    """One sent payload, counted whole as admission counts it: messages, schemas, the max_tokens it asks for and
+    the margin, with the session's calibrated counter and method."""
+    counter, method = b._calibrated_counter()
+    return openai_compat.account(payload["messages"], payload["tools"], window, payload["max_tokens"],
+                                 counter=counter, method=method)
+
+
+def _big_read_session(choice, calib, monkeypatch, *, result=BIG_RESULT):
+    monkeypatch.setattr(openai_compat, "_TOOL_RESULT_CAP", CAP)
+    b = _lanes_session(_sub_toolcall("web_search", {"q": "1"}), _sub_final("DONE"),
+                       result=lambda k: result, describe=DESCRIPTION)
+    b.apply_context_policy({**settings.CONTEXT_DEFAULTS, "subagent_overflow": choice})
+    b._calib = calib
+    return b
+
+
+def _no_recovery_or_handoff(posted):
+    for payload in posted:
+        for m in payload["messages"]:
+            text = str(m.get("content"))
+            assert m.get("name") != "dream_recovery_instruction", "a recovery / report request went out"
+            assert "automatic Handoff" not in text and "STOP." not in text
+            assert not (m.get("role") == "tool" and text.startswith("[elided:")), "the observation was stubbed away"
+
+
+@pytest.mark.parametrize("calib", [1.0, 1.25], ids=["uncalibrated", "calibrated x1.25"])
+@pytest.mark.parametrize("choice", OVERFLOW_CHOICES)
+async def test_a_large_result_in_a_lane_is_cut_to_fit_and_the_worker_answers_in_two_requests(choice, calib, monkeypatch):
+    b = _big_read_session(choice, calib, monkeypatch)
+    assert b._lane_ctx() == SLOT_CTX and b._window() == N_CTX
+    out, failed = await b._run_subagent("researcher", "find X")
+    assert (out, failed) == ("DONE", False)
+    posted = b._client.posted
+    assert len(posted) == 2, "two ordinary requests: the task, then the answer from what was read"
+    _no_recovery_or_handoff(posted)
+    first, second = posted
+    assert [m["role"] for m in second["messages"]] == ["system", "user", "assistant", "tool"]
+
+    # The observation: its first characters as the tool returned them, then what was left out, counted once.
+    observation = second["messages"][3]["content"]
+    cut = CUT_RE.match(observation)
+    assert cut, observation[-400:]
+    kept, elided = cut.group(1), int(cut.group(2))
+    assert kept.startswith(FIRST_LINE) and BIG_RESULT.startswith(kept)
+    assert len(FIRST_LINE) < len(kept) < CAP, "this result needed a cut below the cap, and kept more than its head"
+    assert len(kept) + elided == len(BIG_RESULT), "the count is of the whole result, _clamp's part added once"
+    assert observation.count("chars elided]") == 1
+
+    # Without the cut the same request would not have fitted the lane: the case is the one DREAM-252 is about.
+    counter, method = b._calibrated_counter()
+    assert (method is None) == (calib == 1.0)
+    limit = math.floor(b._trigger_at(SLOT_CTX) * SLOT_CTX)
+    whole = copy.deepcopy(second["messages"])
+    whole[3]["content"] = openai_compat._clamp(BIG_RESULT, CAP)
+    assert openai_compat.account(whole, second["tools"], SLOT_CTX, 0, counter=counter,
+                                 method=method).input_tokens > limit
+
+    # Only that content changed: the call's id and arguments, the schemas and the older messages are as they were.
+    assert second["messages"][:2] == first["messages"]
+    assert second["messages"][3]["tool_call_id"] == "s1"
+    [call] = second["messages"][2]["tool_calls"]
+    assert call["id"] == "s1" and call["function"]["name"] == "web_search"
+    assert json.loads(call["function"]["arguments"]) == {"q": "1"}
+    assert second["tools"] == first["tools"]
+    assert DESCRIPTION in json.dumps(first["tools"], ensure_ascii=False), "the non-ASCII descriptions are sent"
+
+    # Every payload, whole: input + the max_tokens asked for + the margin stay inside the lane.
+    for payload in posted:
+        report = _full_account(b, payload)
+        assert report.window == SLOT_CTX and report.output == payload["max_tokens"] >= 1
+        assert report.margin == openai_compat._CTX_MARGIN
+        assert report.remaining >= 0, report.as_dict()
+    after_cut = _full_account(b, second)
+    assert after_cut.input_tokens <= limit, "past the trigger line"
+    assert second["max_tokens"] >= b._worker_reply_reserve(b._lane_ctx()), "the reply the cut made room for"
+
+
+@pytest.mark.parametrize("choice", OVERFLOW_CHOICES)
+async def test_a_result_that_fits_its_lane_enters_whole_under_a_calibrated_count(choice, monkeypatch):
+    fitting = "R1 " + "y" * 20_000                           # about 7,150 calibrated tokens: well inside the lane
+    b = _big_read_session(choice, 1.25, monkeypatch, result=fitting)
+    out, failed = await b._run_subagent("researcher", "find X")
+    assert (out, failed) == ("DONE", False)
+    posted = b._client.posted
+    assert len(posted) == 2
+    _no_recovery_or_handoff(posted)
+    assert posted[1]["messages"][3] == {"role": "tool", "tool_call_id": "s1", "content": fitting}
+    assert posted[1]["tools"] == posted[0]["tools"]
+    for payload in posted:
+        assert _full_account(b, payload).remaining >= 0
+
+
+@pytest.mark.parametrize("calib", [1.0, 1.25], ids=["uncalibrated", "calibrated x1.25"])
+@pytest.mark.parametrize("choice", OVERFLOW_CHOICES)
+async def test_the_leads_budgeting_is_unchanged_by_a_lane_worker_that_was_cut_to_fit(choice, calib, monkeypatch):
+    b = _big_read_session(choice, calib, monkeypatch)
+    lead_history, lead_tools = copy.deepcopy(b.messages), copy.deepcopy(b._request_tools())
+    before = b._admit_request(b.messages + [{"role": "user", "content": "hello"}], b._request_tools())
+    out, failed = await b._run_subagent("researcher", "find X")
+    assert (out, failed) == ("DONE", False)
+    assert b.messages == lead_history, "the worker's rounds stay out of the lead's history"
+    assert b._request_tools() == lead_tools
+    assert b._window() == N_CTX and b.n_ctx == N_CTX and b._calib == calib
+    assert b._max_tokens(b._ctx_fill()) == PRESET, "the lead keeps the launch preset's ceiling"
+    after = b._admit_request(b.messages + [{"role": "user", "content": "hello"}], b._request_tools())
+    assert (after.window, after.output) == (N_CTX, PRESET)
+    assert after.as_dict() == before.as_dict()
+
+
+# --- 6: _cut_observation on a tail it did not write --------------------------------------------------------
+
+CUT_SAYS = ("[Dream: this result was cut to leave room in this worker's context window for its next reply. Ask for "
+            "a narrower range to read the rest.]")
+
+
+@pytest.mark.parametrize("digits", ["9" * 5000, "1" + "0" * 100_000],
+                         ids=["5,000 digits (past Python's int-from-str limit)", "100,001 digits"])
+def test_a_result_ending_in_an_elision_marker_with_a_huge_count_is_cut_without_a_crash(digits):
+    # A tool's own text may end the way _clamp's tail does, with any number in it: that is data, not Dream's count.
+    text = "HEAD " + "x" * 500 + f"\n\n[... {digits} chars elided]"
+    out = openai_compat._cut_observation(text, 100)
+    assert isinstance(out, str) and out.startswith(text[:100]) and out.endswith(CUT_SAYS)
+
+
+@pytest.mark.parametrize("keep", [-5, 0, 10**9])
+def test_a_cut_asked_for_outside_the_result_is_held_to_it(keep):
+    text = "HEAD " + "x" * 500
+    out = openai_compat._cut_observation(text, keep)
+    kept = text[:max(0, min(keep, len(text)))]
+    assert out == f"{kept}\n\n[... {len(text) - len(kept)} chars elided]\n{CUT_SAYS}"

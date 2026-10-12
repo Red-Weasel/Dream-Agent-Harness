@@ -38,6 +38,19 @@ class LocalHelpers:
         # switched to another keeps its tools. None: not checked.
         self._lead = lead
         self.running: list[Any] = []
+        # Captured by the owning Claude backend before its first tool call. None
+        # preserves the legacy standalone-helper fallback for non-Claude callers.
+        self._standing_head = None
+
+    def capture_standing_rules(self, head: str, *, workspace=None) -> None:
+        """Snapshot this session's standing rules without its lead history or wake.
+
+        The extracted SystemPrompt keeps provenance even when there are no rules;
+        workers must not replace an intentionally empty snapshot with later disk reads.
+        Each Engine owns its LocalHelpers instance, so no process-global context is used.
+        """
+        from .instructions import worker_prompt
+        self._standing_head = worker_prompt("", head, workspace=workspace)
 
     def control(self, action: str, run_id: Any = None, text: Any = None) -> dict[str, Any] | None:
         """The owner's Stop, Pause, Resume or Message for a helper's worker -> its answer, or None when no running
@@ -152,7 +165,9 @@ class LocalHelpers:
         from .profiles import resolve_profile
         from .subagents import local_subagents
         helper = OpenAICompatBackend(
-            provider=self.provider, model=model, system_prompt="", tools=self.tools, permission_cb=self.permission_cb,
+            provider=self.provider, model=model,
+            system_prompt=self._standing_head if self._standing_head is not None else "",
+            tools=self.tools, permission_cb=self.permission_cb,
             subagents=self._subagents if self._subagents is not None else local_subagents(),
             profile=resolve_profile(self.provider, model=model), worker_streaming=self.emit is not None)
         if self.emit is not None:

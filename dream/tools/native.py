@@ -16,7 +16,7 @@ from . import mirror
 from .context import ctx, err, ok
 
 _MAX_READ = 200_000
-_BASH_TIMEOUT = 120
+_BASH_TIMEOUT = 1800   # seconds; the owner, 2026-10-11 (was 120)
 
 
 def _resolve(raw: str) -> Path:
@@ -46,16 +46,21 @@ def _resolve(raw: str) -> Path:
 )
 async def read_file(args: dict[str, Any]) -> dict[str, Any]:
     from ..files import read_document
+    from ..core.read_effects import note_read_failure
     from .context import in_thread
 
     raw = args.get("path")
     if not isinstance(raw, str) or not raw:
+        note_read_failure(read_file.handler, 'invalid_path')
         return err("read_file needs a 'path' argument.")
+    plain_text_lines = False
     try:
         p = _resolve(raw)
         if not p.is_file():
+            note_read_failure(read_file.handler, 'missing_file')
             return err(f"No file at {p}")
         if 'start_line' in args or 'line_count' in args:
+            plain_text_lines = True
             return ok(await in_thread(_read_lines, p, int(args.get('start_line') or 1), int(args.get('line_count') or 200)))
         options = {key: args[key] for key in ('offset', 'limit', 'page_start', 'page_count', 'sheet', 'query') if key in args}
         text = await in_thread(read_document, p, workspace=ctx().workspace, **options)
@@ -65,6 +70,8 @@ async def read_file(args: dict[str, Any]) -> dict[str, Any]:
                      "For lines, call read_file with start_line and line_count.]")
         return ok(text)
     except Exception as e:
+        if plain_text_lines:
+            note_read_failure(read_file.handler, 'plain_text_lines')
         return err(f"Could not read {raw}: {type(e).__name__}: {e}")
 
 
@@ -106,6 +113,9 @@ async def write_file(args: dict[str, Any]) -> dict[str, Any]:
     raw = args.get("path")
     if not raw:
         return err("write_file needs a 'path' argument.")
+    from ..core.worker_checkpoints import protected_write
+    if protected_write(ctx().workspace, raw):
+        return err("Dream checkpoint authority and saved originals cannot be written by file tools.")
     content = args.get("content", "")
     append = args.get("append") is True
     p = _resolve(raw)
@@ -222,14 +232,10 @@ def _describe_run(command: str, rc: int, text: str) -> str:
 
 @tool(
     "run_bash",
-    "Run a bash command and return its combined stdout/stderr (asks for approval; read with "
-    "read_file/list_dir/grep instead). Verified workspace "
-    "containment is a prerequisite for routine contained commands; consequential actions "
-    "require approval. An unavailable execution prerequisite cannot be fixed by rewriting "
-    "the command. The sandbox sees this workspace, plus installed skills' script folders "
-    "read-only ($UA_SKILLS); it has public internet through "
-    "a proxy (HTTP_PROXY/HTTPS_PROXY are set: curl, wget, pip, npm and git use them), "
-    "while this machine's own services (localhost) and the local network are unreachable. "
+    "Run a bash command and return its combined stdout/stderr (asks for approval in Ask and Accept "
+    "edits, runs without asking in Auto; read with read_file/list_dir/grep instead). There is no "
+    "sandbox: the command runs on this computer, in the workspace, with the user's normal access, "
+    "network and local services included. Installed skills' script folders are at $UA_SKILLS. "
     "Avoid '2>/dev/null': suppressing errors hides the reason a "
     "command did nothing, which is the single most common way to get stuck.",
     {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},

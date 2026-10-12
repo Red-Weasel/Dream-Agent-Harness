@@ -875,8 +875,12 @@ async def test_browser_open_rejects_other_schemes(tmp_path,url):
 
 def test_permissions_keep_real_actions_gated_in_auto_and_plan(tmp_path):
     assert policy.decide('computer_observe',{},'plan',tmp_path)[0]=='allow'
+    # Auto mode (the owner, 2026-10-11): opening and closing run; a real action (click, type) still asks.
+    assert policy.decide('computer_action',{},'auto',tmp_path)[0]=='ask'
+    for name in ['computer_open','computer_close']:
+        assert policy.decide(name,{},'auto',tmp_path)[0]=='allow'
+        assert policy.decide(name,{},'ask',tmp_path)[0]=='ask'
     for name in ['computer_open','computer_action','computer_close']:
-        assert policy.decide(name,{},'auto',tmp_path)[0]=='ask'
         assert policy.decide(name,{},'plan',tmp_path)[0]=='deny'
 
 

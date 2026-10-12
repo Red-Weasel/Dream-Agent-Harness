@@ -1,7 +1,6 @@
 """DREAM-103: the Understand-Anything sibling skills in Dream.
 
-Owner, 2026-09-23, after the Understand map run: "i want the skills and tool calls to work properly ... prob need to make
-fix to all unless the one just utilizes the others". The map (DREAM-102's curated `understand`) uses none of the plugin's
+Owner, 2026-09-23, after the Understand map run: [feedback]. The map (DREAM-102's curated `understand`) uses none of the plugin's
 eight siblings; each is its own command. Two cannot work in Dream as written: `understand-dashboard` resolves the plugin
 through shell paths the sandbox cannot see and launches a web server, although Dream already shows the map in its
 Understand dock (sidebar "Understand ⌬", DREAM-087); `understand-domain` resolves PLUGIN_ROOT through shell candidates,

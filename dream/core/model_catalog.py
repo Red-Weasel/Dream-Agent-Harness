@@ -1,12 +1,9 @@
 """Offline Council model suggestions, not account access or readiness checks.
 
-Bundled text/code catalogs verified 2026-09-11 against:
-https://platform.claude.com/docs/en/models/overview
-https://platform.claude.com/docs/en/build-with-claude/effort
-https://developers.openai.com/api/docs/models
-https://docs.x.ai/developers/models
-https://ai.google.dev/gemini-api/docs/models
-Codex fallback is a snapshot of installed models_cache.json on that date.
+Bundled choices reflect requested labels and conventional IDs, not verified
+vendor availability, account access or installed CLI capabilities. Native
+providers validate effort suggestions. Codex cache metadata narrows requested
+efforts when a matching entry exists; missing entries remain suggestions.
 Runtime only reads that cache; it never refreshes it or starts a provider.
 """
 from __future__ import annotations
@@ -16,7 +13,7 @@ import json
 import os
 from pathlib import Path
 
-_NATIVE = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+_NATIVE = ['low', 'medium', 'high', 'xhigh', 'max']
 _HTTP = ['medium', 'high', 'xhigh']  # Values Dream's existing HTTP adapter forwards.
 
 
@@ -25,34 +22,36 @@ def _choice(model: str, label: str, efforts: list[str]) -> dict:
 
 
 _CODEX = [
-    _choice('gpt-6-astra', 'GPT-6 Astra', _NATIVE),
-    _choice('gpt-5.6-sol', 'GPT-5.6 Sol', _NATIVE),
-    _choice('gpt-5.6-terra', 'GPT-5.6 Terra', _NATIVE),
-    _choice('gpt-5.6-luna', 'GPT-5.6 Luna', _NATIVE[:-1]),
-    _choice('gpt-5.5', 'GPT-5.5', _NATIVE[:4]),
-    _choice('gpt-5.3-codex-spark', 'GPT-5.3 Codex Spark', _NATIVE[:4]),
+    _choice(model.lower(), model, _NATIVE) for model in (
+        'GPT-6.1-Sol', 'GPT-6-Astra', 'GPT-6-Sol', 'GPT-6-Luna',
+        'GPT-5.6-Sol', 'GPT-5.6-Terra', 'GPT-5.6-Luna')
 ]
 _CATALOG = {
     'anthropic': [
-        _choice('claude-fable-5-1', 'Claude Fable 5.1', _NATIVE[:-1]),
-        # The Frontier loop's default judge (plan section 5 question 12, DREAM-218); account access is not checked.
-        _choice('claude-opus-5-5', 'Claude Opus 5.5', _NATIVE[:-1]),
-        _choice('claude-opus-5', 'Claude Opus 5', _NATIVE[:-1]),
-        _choice('claude-sonnet-5', 'Claude Sonnet 5', _NATIVE[:-1]),
-        _choice('claude-haiku-4-5-20251001', 'Claude Haiku 4.5', []),
+        _choice('claude-' + label.lower().replace(' ', '-').replace('.', '-'), label, _NATIVE)
+        if label != 'Haiku 4.5' else _choice('claude-haiku-4-5-20251001', label, _NATIVE)
+        for label in ('Opus 5.5', 'Fable 5.1', 'Sonnet 5.5', 'Haiku 4.5',
+                      'Sonnet 5', 'Opus 5', 'Fable 5', 'Opus 4.8', 'Opus 4.7',
+                      'Opus 4.6', 'Sonnet 4.6')
     ],
-    'openai': [_choice(m['id'], m['label'], _HTTP) for m in _CODEX[:4]],
+    'openai': [_choice(model, label, _HTTP) for model, label in (
+        ('gpt-6-astra', 'GPT-6-Astra'), ('gpt-5.6-sol', 'GPT-5.6-Sol'),
+        ('gpt-5.6-terra', 'GPT-5.6-Terra'), ('gpt-5.6-luna', 'GPT-5.6-Luna'))],
     'xai': [_choice('grok-4.6', 'Grok 4.6', _HTTP)],
-    'grok': [_choice('grok-4.6', 'Grok 4.6', [])],
+    'grok': [_choice(model, label, _NATIVE[:4]) for model, label in (
+        ('grok-4.7', 'Grok 4.7'), ('grok-4.7-fast', 'Grok 4.7 Fast'),
+        ('grok-4.6', 'Grok 4.6'), ('grok-4.5', 'Grok 4.5'))],
+    'antigravity': [
+        _choice('gemini-3.8-flash-high', 'Gemini-3.8-Flash · High', _NATIVE),
+        _choice('gemini-3.8-flash-medium', 'Gemini-3.8-Flash · Medium', _NATIVE),
+        _choice('gemini-3.8-flash-low', 'Gemini-3.8-Flash · Low', _NATIVE),
+        _choice('gemini-3.1-pro-high', 'Gemini-3.1 Pro · High', _NATIVE),
+        _choice('gemini-3.1-pro-low', 'Gemini-3.1 Pro · Low', _NATIVE),
+    ],
     'gemini': [
-        _choice('gemini-3.1-pro-preview', 'Gemini 3.1 Pro Preview', []),
-        *[_choice(f'gemini-{v}-flash', f'Gemini {v} Flash', [])
-          for v in ('3.8', '3.7', '3.6', '3.5')],
-        _choice('gemini-3.5-flash-lite', 'Gemini 3.5 Flash Lite', []),
-        _choice('gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite', []),
-        _choice('gemini-3-flash-preview', 'Gemini 3 Flash Preview', []),
-        *[_choice(f'gemini-2.5-{v}', f'Gemini 2.5 {label}', [])
-          for v, label in [('pro', 'Pro'), ('flash', 'Flash'), ('flash-lite', 'Flash Lite')]],
+        _choice('gemini-3.5-flash-lite', 'Gemini-3.5-Flash-Lite', ['off', 'on']),
+        _choice('gemini-3.8-flash', 'Gemini-3.8-Flash', ['off', 'on']),
+        _choice('gemini-3.1-pro-preview', 'Gemini-3.1 Pro', ['off', 'on']),
     ],
 }
 
@@ -78,15 +77,19 @@ def _cached_codex() -> list[dict]:
         return []
     choices = {}
     for model in models:
-        if not isinstance(model, dict) or model.get('visibility') != 'list':
+        if not isinstance(model, dict):
             continue
         slug = model.get('slug')
+        # Requested labels stay visible, but matching capability metadata is
+        # authoritative even when the CLI hides that entry from its own picker.
+        if model.get('visibility') != 'list' and not any(choice['id'] == slug for choice in _CODEX):
+            continue
         if not _safe_text(slug) or slug in choices:
             continue
         label = model.get('display_name')
         levels = model.get('supported_reasoning_levels', [])
         levels = levels if isinstance(levels, list) else []
-        efforts = [level for level in _NATIVE if any(
+        efforts = [level for level in [*_NATIVE, 'ultra'] if any(
             isinstance(item, dict) and item.get('effort') == level for item in levels)]
         choices[slug] = _choice(slug, label if _safe_text(label) else slug, efforts)
     return list(choices.values())
@@ -95,7 +98,13 @@ def _cached_codex() -> list[dict]:
 def model_choices(provider: str) -> list[dict]:
     """Known models only; callers preserve custom and previously saved IDs."""
     if provider == 'codex':
-        return _cached_codex() or deepcopy(_CODEX)
+        cached = {choice['id']: choice for choice in _cached_codex()}
+        choices = deepcopy(_CODEX)
+        for choice in choices:
+            known = cached.pop(choice['id'], None)
+            if known is not None:
+                choice['efforts'] = [effort for effort in _NATIVE if effort in known['efforts']]
+        return choices + list(cached.values())
     return deepcopy(_CATALOG.get(provider, []))
 
 

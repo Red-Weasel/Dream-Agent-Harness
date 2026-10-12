@@ -17,7 +17,9 @@ def test_runtime_alternatives_are_readonly_without_exposing_all_etc(tmp_path):
     assert ['--ro-bind', str(alternatives), str(alternatives)] in mounts
     assert not any(mount[1] == '/etc' or mount[2] == '/etc' for mount in mounts)
     assert not any(mount[0] == '--bind' and mount[2].startswith('/etc') for mount in mounts)
-    assert '--unshare-net' in argv and '--seccomp' in argv and '--remount-ro' in argv
+    # The sandbox shares the host's network namespace since Codex's DREAM-251..285 batch (acbb173); its seccomp
+    # filter still refuses socket creation (test_real_boundary_scripts_symlinks_git_secrets_and_host_socket).
+    assert '--seccomp' in argv and '--remount-ro' in argv
 
 
 def test_absent_alternatives_is_optional(tmp_path, monkeypatch):

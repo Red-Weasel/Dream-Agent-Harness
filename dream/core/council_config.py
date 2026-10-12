@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import math
-import shutil
+import shutil  # noqa: F401  (kept as a module attribute: tests replace shutil.which through it)
 from dataclasses import fields
 
+from .cli_discovery import locate_command
 from .moe import MoeConfig
 from .model_catalog import model_choices, model_efforts
 from .profiles import shown
@@ -49,6 +50,10 @@ def parse_config(data: object) -> MoeConfig:
     unknown = set(data) - {f.name for f in fields(MoeConfig)}
     if unknown:
         raise ConfigError(', '.join(sorted(shown(key) for key in unknown)), 'Unknown Council configuration field')
+    # Retired consumer Gemini subscriptions must not silently fall back to paid
+    # API credentials. Preserve the file; require a deliberate Antigravity choice.
+    if data.get('orchestrator') == 'gemini' or ('gemini' in data.get('advisors', []) if isinstance(data.get('advisors'), list) else False):
+        raise ConfigError('providers', 'Gemini CLI consumer access has moved to Antigravity. Select antigravity in Council; saved configuration is preserved. Legacy enterprise/API Gemini remains available through an explicit standalone CLI selection.')
     main = data.get('orchestrator')
     if not isinstance(main, str) or main not in PROVIDERS:
         raise ConfigError('orchestrator', 'Choose a known Council main provider')
@@ -89,10 +94,13 @@ def provider_choices(*, model=None, capabilities=None) -> list[dict]:
     """Availability means local prerequisites only, never authenticated readiness."""
     choices = []
     for key, provider in PROVIDERS.items():
+        if key == 'gemini':
+            continue  # Legacy enterprise/API CLI remains explicitly addressable; consumer menu uses agy.
         if key == 'machx':
             available, note = True, 'Attach to an existing server only; model readiness not checked.'
         elif provider.kind == 'cli':
-            available = bool(shutil.which(provider.cli_cmd or key))
+            # The same lookup the spawning code uses (DREAM-246): installed, nothing about sign-in.
+            available = bool(locate_command(provider.cli_cmd or key))
             note = 'CLI installed; sign-in not checked.' if available else 'Install the provider CLI; sign-in not checked.'
         elif provider.kind == 'anthropic':
             available, note = True, 'Claude SDK available; sign-in and model readiness not checked.'
@@ -102,11 +110,18 @@ def provider_choices(*, model=None, capabilities=None) -> list[dict]:
         levels = effort_choices(key, model=model, capabilities=capabilities if key == 'machx' else None)
         effort_note = ('Captured local model capability; no probe.' if key == 'machx' else
                        'Native adapter effort values; model support is checked by the provider.') if levels else 'Effort is unavailable or not reported for this provider/model.'
+        if key == 'gemini':
+            effort_note = ('Extended thinking: On = high; Off = reduced, not disabled. '
+                           'Applies to the selected main-chat model only; native fallback and auxiliary models may differ. '
+                           'Requires Linux CLI 0.52.0 and nonconflicting plain JSON settings.')
+        if key == 'antigravity':
+            note += ' Native CLI permissions apply; plan is guidance, not read-only containment. Shared tools require native permission approval.'
+            effort_note = 'Antigravity CLI1.3.0 effort; model support is validated by agy. Reduced effort does not disable Gemini thinking.'
         choices.append(dict(key=key, label=provider.label, available=available, note=note,
                             efforts=levels, effort_note=effort_note, models=model_choices(key),
                             model_note=('Codex cache or bundled model suggestions; account access is not checked.'
                                         if key == 'codex' else
-                                        'Known model suggestions; account access is not checked. Custom IDs remain supported.')))
+                                        'Owner-requested model suggestions; vendor availability and account access are not checked. Custom IDs remain supported.')))
     return choices
 
 
@@ -118,6 +133,10 @@ def effort_choices(provider: str, model=None, capabilities=None) -> list[str]:
         return ['low', 'medium', 'high', 'xhigh', 'max']
     if provider == 'codex':
         return ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+    if provider == 'grok':
+        return ['low', 'medium', 'high', 'xhigh']
+    if provider == 'antigravity':
+        return ['low', 'medium', 'high', 'xhigh', 'max']
     if provider in ('openai', 'xai'):
         return ['medium', 'high', 'xhigh']
     if provider == 'machx':

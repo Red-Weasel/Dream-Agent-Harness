@@ -119,6 +119,74 @@ def test_end_without_text_emits_only_result():
     assert events[0].data["subtype"] == "success"
 
 
+def test_turn_aggregate_usage_preserves_cache_without_claiming_context_fill():
+    adapter = GrokAdapter()
+    usage = {"prompt_tokens": 1000, "completion_tokens": 20,
+             "prompt_tokens_details": {"cached_tokens": 800}}
+    result = adapter.translate({"type": "end", "usage": usage}, {})[-1].data
+    assert result["usage"] == usage
+    assert result["usage_scope"] == "turn"
+    assert result["context_tokens"] is None
+    # A smaller following turn is independent, not a reset of a session total.
+    second = adapter.translate({"type": "end", "usage": {"prompt_tokens": 50}}, {})[-1].data
+    assert second["usage"]["prompt_tokens"] == 50
+
+
+def test_response_usage_sets_last_context_without_counting_usage_twice():
+    adapter, state = GrokAdapter(), {}
+    assert adapter.translate({"type": "usage", "usage": {
+        "input_tokens": 200, "cache_read_input_tokens": 800}}, state) == []
+    assert adapter.translate({"type": "usage", "usage": {
+        "input_tokens": 30, "cache_read_input_tokens": 900,
+        "cache_creation_input_tokens": 10, "output_tokens": 50}}, state) == []
+    aggregate = {"input_tokens": 230, "cache_read_input_tokens": 1700}
+    result = adapter.translate({"type": "end", "usage": aggregate}, state)[-1].data
+    assert result["context_tokens"] == 940
+    assert result["usage"] == aggregate
+
+
+def test_malformed_response_usage_does_not_invent_context():
+    for usage in (None, {}, {"input_tokens": True}, {"input_tokens": -1},
+                  {"input_tokens": 10, "cache_read_input_tokens": "20"}):
+        adapter, state = GrokAdapter(), {}
+        assert adapter.translate({"type": "usage", "usage": usage}, state) == []
+        assert adapter.translate({"type": "end"}, state)[-1].data["context_tokens"] is None
+
+
+def test_native_tool_events_correlate_and_completed_duplicate_does_not_repeat():
+    adapter, state = GrokAdapter(), {}
+    initial = {"type": "tool_call", "toolCallId": "call-1", "toolName": "read_file",
+               "status": "in_progress", "rawInput": {"path": "example.txt"}}
+    events = adapter.translate(initial, state)
+    assert adapter.translate(initial, state) == []
+    events += adapter.translate({"type": "tool_call_update", "toolCallId": "call-1",
+                                 "status": "in_progress"}, state)
+    final = {"type": "tool_call_update", "toolCallId": "call-1",
+             "status": "completed", "rawOutput": {"lines": 42}}
+    events += adapter.translate(final, state)
+    assert adapter.translate(final, state) == []
+    assert [e.kind for e in events] == ["tool_use", "tool_result"]
+    assert events[0].data["input"] == {"path": "example.txt"}
+    assert events[1].data["id"] == events[0].data["id"] == "call-1"
+    assert events[1].data["name"] == "read_file"
+    assert json.loads(events[1].data["content"]) == {"lines": 42}
+    assert events[1].data["is_error"] is False
+
+
+def test_native_tool_failure_and_distinct_retry_keep_their_own_receipts():
+    adapter, state = GrokAdapter(), {}
+    events = adapter.translate({"type": "tool_call", "toolCallId": "bad",
+        "toolName": "read_file", "status": "failed", "content": [
+            {"type": "content", "content": {"type": "text", "text": "Unavailable"}}]}, state)
+    assert events[-1].data["is_error"] is True
+    assert events[-1].data["content"] == "Unavailable"
+    retry = adapter.translate({"type": "tool_call", "toolCallId": "retry",
+        "toolName": "read_file", "status": "completed", "rawOutput": "ready"}, state)
+    assert [e.kind for e in retry] == ["tool_use", "tool_result"]
+    assert retry[-1].data["is_error"] is False
+    assert adapter.translate({"type": "tool_call_update", "status": "completed"}, state) == []
+
+
 def test_empty_text_delta_is_dropped():
     adapter = GrokAdapter()
     state: dict = {}

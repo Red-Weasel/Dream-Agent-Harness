@@ -35,6 +35,8 @@ QWEN38 = '<think> Reasoning effort is set to xhigh.'
 MODELS = {   # (architecture, header identity, extra load controls, efforts, thinking default)
     'qwen27': ('qwen35', {'general.name': 'Qwen3.8-27B', 'tokenizer.chat_template': QWEN38},
                ['slot_ctx', 'prompt_cache'], ('low', 'medium', 'high', 'xhigh'), True),
+    'qwenflash': ('qwen4exp', {'general.name': 'Qwen3.8-Flash-Next', 'tokenizer.chat_template': QWEN38},
+                  ['slot_ctx', 'prompt_cache'], ('low', 'medium', 'high', 'xhigh'), True),
     'glm': ('glm5next', {'general.name': 'GLM 5.3 Flash'}, ['threads'], ('low', 'high', 'max'), True),
     'mimo': ('mimo2', {'general.name': 'MiMo-V2.6-Flash-RL'}, ['prompt_cache'], (), True),
     'plain': ('llama', {'general.name': 'Some Llama'}, [], (), True),
@@ -117,7 +119,7 @@ def test_a_lanes_models_fields_name_the_sub_agent_context(onboarding_class, tmp_
     names = [c['name'] for c in data['controls']]
     assert names[names.index('parallel') + 1] == 'slot_ctx'
     assert data['selection']['options']['parallel'] == 1 and data['selection']['options']['slot_ctx'] == 0
-    assert onboarding_class.__init__.__globals__['FIELD_LABELS'] == {'slot_ctx': 'sub-agent context'}
+    assert onboarding_class.__init__.__globals__['FIELD_LABELS']['slot_ctx'] == 'Sub-agent context · tokens'
 
 
 # --- the screen's logic, with GTK replaced ---------------------------------------------------------------------------
@@ -265,7 +267,7 @@ def test_the_card_sits_to_the_right_of_the_fields_and_reads_clearly(tmp_path, ke
     assert not panel.message.get_text().startswith('Context is a starting recommendation')
     if key == 'qwen27':
         names = [lab.get_text() for lab in _labels(panel.grid)]
-        assert 'sub-agent context' in names and 'parallel' in names and 'slot ctx' not in names
+        assert 'Sub-agent context · tokens' in names and 'Parallel requests' in names and 'slot ctx' not in names
         active = 'INSTRUCT' if mode == 'instruct' else 'THINKING'
         pill = next(lab for lab in _labels(panel.card) if lab.get_text() == 'In use')
         heading = pill.get_parent().get_children()[0]
@@ -290,5 +292,5 @@ def test_the_screen_with_advanced_closed_keeps_the_card(tmp_path):
                             shot='qwen27-advanced-closed-2000')
     assert panel.card.get_mapped() and not panel.advanced.get_expanded()
     card = _box(panel.card, panel)
-    assert card[0] >= panel.grid.get_preferred_width()[1] + 24          # where it is with Advanced open: it stays put
+    assert card[0] > panel.fields_column.get_allocation().width          # where it is with Advanced open: it stays put
     window.destroy()

@@ -495,7 +495,7 @@ async def test_actual_engine_accounts_first_result_once_and_retains_required_con
     events = await collect(engine)
     failed = rc != 0 or duplicate
     assert len(results(events)) == 1 and results(events)[0]['is_error'] is failed
-    assert engine.session_tokens == 18 and engine.last_context_tokens == 11
+    assert engine.session_tokens == 18 and engine.last_context_tokens is None
     assert engine.total_cost_usd == .25
     assert engine.runtime_meter.prompt_tokens == 11 and engine.runtime_meter.output_tokens == 7
     assert engine.runtime_meter.phases['lead']['requests'] == 1

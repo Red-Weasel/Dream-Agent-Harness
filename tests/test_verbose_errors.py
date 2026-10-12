@@ -154,3 +154,24 @@ def test_footer_counts_only_successful_writes():
     assert "declined.txt" not in app.activity["created"]
     assert [n for _, n in app._recent_files] == ["ok.txt"]
     assert "t3" in app._pending_activity  # still pending, uncommitted
+    assert app.changed_files == {"ok.txt"}
+    use("t4", "ok.txt")
+    result("t4", "write_file", is_error=False)
+    assert app.changed_files == {"ok.txt"}  # repeated edits are one file
+    app._reset_session_accounting()
+    assert app.changed_files == set()
+    assert app.tool_count == 0
+
+
+def test_changes_distinguishes_paths_batches_and_excludes_shell():
+    app = _bare_app()
+    for tid, name, inputs in [
+        ('a', 'write_file', {'path': 'src/index.py'}),
+        ('b', 'write_file', {'path': 'tests/index.py'}),
+        ('c', 'write_file', {'path': 'src/index.py'}),
+        ('d', 'copy_files', {'files': [{'src': 'a', 'dest': 'lib/a.py'}, {'src': 'b', 'dest': 'lib/b.py'}]}),
+        ('e', 'run_bash', {'command': 'rm obsolete.txt'}),
+    ]:
+        app._render_event(SimpleNamespace(kind='tool_use', data={'id': tid, 'name': name, 'input': inputs}))
+        app._render_event(SimpleNamespace(kind='tool_result', data={'id': tid, 'name': name, 'content': 'ok', 'is_error': False}))
+    assert app.changed_files == {'src/index.py', 'tests/index.py', 'lib/a.py', 'lib/b.py'}

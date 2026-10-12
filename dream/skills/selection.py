@@ -336,7 +336,11 @@ def _request_text(prompt: str) -> str:
                            r'\b(?:use|using|apply|open|follow|load|invoke|run)\s+(?:the\s+)?(?:installed\s+)?skill\s+$', before, re.I)
         # An explicit invocation inside a quotation is task data; a quoted name
         # inside an actual skill invocation is an argument to that invocation.
-        if '$' not in body and (filename or (named_skill and re.fullmatch(r'[\w-]+', body))):
+        # A skill name may carry a namespace alias (plugin:skill): name segments joined by single colons,
+        # nothing else -- no spaces, so a quoted sentence is still task data. This grammar (one colon or
+        # several) only admits a quoted ARGUMENT to routing; it is not the loader's authority on what a
+        # valid name is. Which skill is meant is decided by exact catalog names in _explicit_position.
+        if '$' not in body and (filename or (named_skill and re.fullmatch(r'[\w-]+(?::[\w-]+)*', body))):
             return match[0]
         return ' '
 
@@ -351,12 +355,17 @@ def _positive_actions(prompt: str) -> str:
 
 
 def _explicit_position(prompt: str, name: str) -> int | None:
-    quoted = r'[\x22\x27`]?'
+    # the quote marks _request_text keeps around a named skill: straight, backtick and curly
+    quoted = r'[\x22\x27`“”‘’]?'
     skill_name = re.escape(name)
+    # The name must end here. A colon that carries on into another name segment is a longer name
+    # (`plugin` is not `$plugin:skill`, nor `plugin:skill` `$plugin:skill:child`); a colon followed by
+    # anything else is punctuation ("$writing: tighten this").
+    name_end = r'(?!:*[\w-])'
     pattern = re.compile(
-        rf'(?<![\w$])\${skill_name}(?![\w-])|'
+        rf'(?<![\w$])\${skill_name}{name_end}|'
         rf'\b(?:use|using|apply|open|follow|load|invoke|run)\s+(?:the\s+)?{quoted}{skill_name}{quoted}\s+skill\b|'
-        rf'\b(?:use|using|apply|open|follow|load|invoke|run)\s+(?:the\s+)?(?:installed\s+)?skill\s+{quoted}{skill_name}(?![\w-])', re.I)
+        rf'\b(?:use|using|apply|open|follow|load|invoke|run)\s+(?:the\s+)?(?:installed\s+)?skill\s+{quoted}{skill_name}{name_end}', re.I)
     negated = False
     for match in pattern.finditer(prompt):
         before = prompt[max(0, match.start() - 40):match.start()]
@@ -383,7 +392,8 @@ def _read_workflow(skill: loader.FileSkill, limit: int) -> str:
 
 
 def select_for_task(prompt: str, skills: Iterable[loader.FileSkill] | None = None,
-                    *, max_chars: int = MAX_GUIDANCE_CHARS, used: Iterable[str] = ()) -> TaskGuidance:
+                    *, max_chars: int = MAX_GUIDANCE_CHARS, used: Iterable[str] = (),
+                    discovery_mode: object = None) -> TaskGuidance:
     """Choose at most two relevant workflows; explicit names outrank task matches.
 
     Only shipped curated packages match implicitly. Opted-in external packages
@@ -392,7 +402,22 @@ def select_for_task(prompt: str, skills: Iterable[loader.FileSkill] | None = Non
     `used`: the tool names this session has already called (Engine.tools_used), raw or
     as the SDK path's `mcp__dream__<name>`; in Blender work frontend-design needs a
     web-page word (DREAM-120).
+
+    DREAM-258: in the experimental description mode nothing is selected and no SKILL.md is opened: the reply is
+    the empty guidance, so the caller injects no workflow body and records no skill as opened. The skill index
+    in the wake-up and skill_find / skill_open carry discovery there. Every other mode, an unknown value
+    included, selects exactly as before.
+
+    Which mode (correction 1): `discovery_mode` when the caller hands one, else the mode the PROCESS STARTED in
+    (discovery.startup), the same frozen value the system prompt and a backend built without a mode follow.
+    The environment is not read here per call: DREAM_DISCOVERY_MODE changed while Dream runs neither turns
+    eager workflow bodies back on under a session that announced description mode, nor silences selection in a
+    session that started in the default. This function has no session to ask; a caller that built one backend
+    in another mode must pass that mode here itself (the Engine does not today, so it follows the process's).
     """
+    from ..core import discovery
+    if discovery.resolve(discovery_mode).descriptions:
+        return TaskGuidance()
     budget = max(0, int(max_chars))          # a caller with a large window may pass more than the default (guidance_budget)
     prompt = _request_text(prompt)
     opt_out = re.search(r"\b(?:do not|don't|never|avoid|skip|without)\s+(?:(?:use|using|load|loading|apply|applying)\s+)?(?:(?:any|all|automatic|extra|additional|installed)\s+)?skills?\b", prompt, re.I)

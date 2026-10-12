@@ -156,18 +156,20 @@ def test_the_backend_takes_the_policy_and_a_launch_choice_wins_for_its_launch():
     assert launched._context_overflow == "stop"
 
 
-def _app(live):
+def _app(live, workspace):
     from dream.tui.app import App
-    app = App(provider="machx", model="fixture")
+    # A workspace of the test's own: opening one writes DREAM.md, AGENTS.md and CLAUDE.md there (DREAM-259); the
+    # default, config.ROOT, is the source tree.
+    app = App(provider="machx", model="fixture", workspace=workspace)
     app.engine = SimpleNamespace(store=None, backend=live, provider=get_provider("machx"), model="fixture")
     app.renderer.console = Console(file=io.StringIO(), width=200, force_terminal=False, color_system=None)
     return app
 
 
-def test_slash_settings_applies_to_the_running_session():
+def test_slash_settings_applies_to_the_running_session(tmp_path):
     live = _backend()
     live.apply_context_policy()
-    app = _app(live)
+    app = _app(live, tmp_path)
     asyncio.run(app._command("/settings set behaviour.context_overflow stop"))
     assert live._context_overflow == "stop"
     asyncio.run(app._command("/settings set behaviour.context_trigger 70"))
@@ -425,7 +427,10 @@ async def test_return_is_the_default_and_hands_back_a_marked_incomplete_report()
     out, failed = await b._run_subagent("researcher", "find X")
     assert failed
     assert out.startswith("(subagent 'researcher' stopped at about ") and "behaviour.subagent_overflow = return" in out
-    assert "NOT complete" in out and out.endswith("Did 12 searches; found X in f3; left: verify Y.")
+    # DREAM-252: the worker's own report, then the record Dream kept of the run's tool outcomes
+    report, _, record = out.partition("\n\n[worker incomplete] ")
+    assert "NOT complete" in report and report.endswith("\n\nDid 12 searches; found X in f3; left: verify Y.")
+    assert record.startswith("reason=context_return;")
     assert all(openai_compat._est_tokens(p["messages"]) <= 0.80 * SUB_WINDOW for p in _work(b))
     warned = [m for p in _work(b) for m in p["messages"] if "context warning" in str(m.get("content"))]
     assert warned and warned[0]["role"] == "tool" and "return your report" in warned[0]["content"]
@@ -660,7 +665,9 @@ async def test_a_refusal_before_the_trigger_returns_the_work_as_a_report(monkeyp
     b._client = _SubEngine(rounds=200)
     out, failed = await b._run_subagent("researcher", "find X")
     assert failed and "stopped when the window could not take another request" in out, out[:300]
-    assert out.endswith("Did 12 searches; found X in f3; left: verify Y.")
+    report, _, record = out.partition("\n\n[worker incomplete] ")          # DREAM-252: the report, then the record
+    assert report.endswith("\n\nDid 12 searches; found X in f3; left: verify Y.")
+    assert record.startswith("reason=context_return;"), record[:80]     # handoff: after its handoffs, it returned
     assert not [f for e, f in b.runtime_meter.records if e == "compaction"]
 
 

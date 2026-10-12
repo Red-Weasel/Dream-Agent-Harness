@@ -17,7 +17,7 @@ import httpx
 import pytest
 
 from dream import config
-from dream.core import policy
+from dream.core import policy, project_bootstrap
 from dream.core.context_budget import account
 from dream.core.engine import Engine
 from dream.core.providers import Provider
@@ -173,7 +173,10 @@ async def run_task(e, transport, prompt=None):
     # pytest's disposable tree retains actual HTTP/event/artifact evidence for review.
     (e.workspace.parent / f'{e.workspace.name}-evidence.json').write_text(json.dumps(evidence, indent=2))
     assert evidence['sentinel_unchanged']
-    assert {path.name for path in e.workspace.iterdir()} == {'shipping.py', 'untouched.bin'}
+    # DREAM-259: preparing the Engine's prompt initializes the workspace's canonical instruction files, as Dream wrote them
+    assert {path.name for path in e.workspace.iterdir()} == {'shipping.py', 'untouched.bin', *project_bootstrap.NAMES}
+    assert {n: (e.workspace / n).read_text() for n in project_bootstrap.NAMES} == {
+        'DREAM.md': project_bootstrap.TEMPLATE, **project_bootstrap.POINTERS}
     assert report['total'] == 5
     assert all(case['failures'] == ['Missing case record.'] for case in report['cases'][1:])
     assert any(turn['role'] == 'user' and turn['content'] == prompt for turn in evidence['session_turns'])

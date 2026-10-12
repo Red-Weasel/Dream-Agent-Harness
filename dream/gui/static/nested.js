@@ -277,18 +277,34 @@
   function said(d){const w=d&&typeof d==='object'?d:null;const s=String((w?w.text:d)||'');const i=s.indexOf(READ_AGAIN);return i>=0?s.slice(0,i):s;}
   // A message keeps the time this page saw it arrive; a replayed one has none (the history carries no time).
   function message(role,extra={}){if(S.messages.length>=MAX_MESSAGES)S.messages.shift();const m={role,text:'',thinking:'',at:null,...extra};S.messages.push(m);return m;}
+  // Which turn a Stop was asked of (DREAM-255). S.turn is only "a turn runs", and S.turnNo starts over with every
+  // history, so neither names a turn: turnId counts every turn boundary this page has seen (a start, an end, a
+  // history) and never goes back, and the session id is part of the key. stopReq numbers the requests; a boundary
+  // moves it on, so an answer still on its way belongs to no request and is dropped. stopNote is what Stop wrote in
+  // the composer's status line. stopReset runs inside the event, not at the next render: an end and a start that
+  // share one animation frame never render the gap between them.
+  let turnId=0, stopReq=0, stopBusy=false, stopNote='';
+  const turnKey=()=>`${S.session}#${turnId}`;
+  function stopReset(){
+    turnId++; stopReq++; stopBusy=false;
+    const b=document.getElementById('nd-stop'), st=document.getElementById('nd-status');
+    if(b){ b.disabled=false; b.textContent='Stop'; }
+    if(st&&stopNote&&st.textContent===stopNote){ st.textContent=''; delete st.dataset.error; }   // only Stop's own words: a send's receipt stays
+    stopNote='';
+  }
   function onEvent(m,replay){
     const d=m.data, now=replay?null:Date.now();
     switch(m.kind){
-      case 'hello': S.provider=String(d?.provider||''); S.model=String(d?.model||'').slice(0,160); S.engine=lanesOf(d?.lanes); S.steeringTarget=d?.steering_target||null; S.session=String(d?.session_id||''); if(!S.order.length) S.pins=loadPins(); break;
+      case 'hello': { const was=S.session; S.provider=String(d?.provider||''); S.model=String(d?.model||'').slice(0,160); S.engine=lanesOf(d?.lanes); S.steeringTarget=d?.steering_target||null; S.session=String(d?.session_id||''); if(!S.order.length) S.pins=loadPins(); if(S.session!==was) stopReset(); break; }
       case 'history':
         S=Object.assign(fresh(),{provider:S.provider,model:S.model,engine:S.engine,steeringTarget:S.steeringTarget,session:S.session,open:S.open}); S.pins=loadPins();
+        stopReset();   // a reconnect or another session: what Stop said was about the turn this page showed before
         setTimeout(settlePins,0);   // the chat replays the retained events synchronously after this one
         break;
       case 'lanes': { const v=lanesOf(d); if(!v) return; S.engine=v; break; }   // not in the history: hello carries the current count
       case 'steering_ready': S.steeringTarget=d||null; break;
       case 'user': { const text=said(d); S.lastUser=text; S.current=null; message('you',{text,at:now}); break; }
-      case 'turn_start': S.turn=true; S.turnNo++; break;   // a new turn: the last one's failures leave the stack
+      case 'turn_start': S.turn=true; S.turnNo++; stopReset(); break;   // a new turn: the last one's failures leave the stack, and a Stop asked of the last one is not this one's
       case 'text_delta': S.turn=true; if(!S.current) S.current=message('dream',{at:now}); S.current.text=grow(S.current.text,d); break;
       case 'thinking_delta': S.turn=true; if(!S.current) S.current=message('dream',{at:now}); S.current.thinking=grow(S.current.thinking,d); break;
       // The text of a tool call while the model writes it (MachX streams it; the chat shows it as "Writing"). The owner,
@@ -321,7 +337,8 @@
       case 'plan': S.planTitle=String(d?.title||'').slice(0,300); break;
       case 'result': case 'turn_end': case 'error':
         S.turn=false; S.current=null; S.writing='';
-        if(m.kind==='turn_end') S.steeringTarget=null;   // like the chat: a steer target dies with its turn
+        stopReset();   // the turn is over: "still running", a refusal or "nothing to interrupt" was about it
+        if(m.kind==='turn_end') S.steeringTarget=null;  // like the chat: a steer target dies with its turn
         for(const r of S.tools.values()) if(r.badge==='Running') r.badge=m.kind==='turn_end'&&d?.interrupted?'Interrupted':'No result returned';
         S.tools.clear();
         // A worker still live when its turn ends has no report coming; a later terminal row still overrides this.
@@ -390,7 +407,7 @@
           <div class="nd-box">
             <label class="nd-sr" for="nd-compose">Message the orchestrator</label>
             <textarea id="nd-compose" rows="2" placeholder="Message the orchestrator"></textarea>
-            <div class="nd-row"><span class="nd-hint" id="nd-hint"></span><button type="button" class="nd-send" id="nd-send">Send</button></div>
+            <div class="nd-row"><span class="nd-hint" id="nd-hint"></span><button type="button" class="nd-stop-turn" id="nd-stop" title="Stop the orchestrator's turn" hidden>Stop</button><button type="button" class="nd-send" id="nd-send">Send</button></div>
           </div>
           <p class="nd-status" id="nd-status" role="status" aria-live="polite"></p>
         </div>
@@ -564,6 +581,7 @@
     sc.scrollTop=stick?sc.scrollHeight:st;
     needs();
     $('nd-send').textContent=S.turn?'Steer':'Send';
+    $('nd-stop').hidden=!S.turn;   // the owner, 2026-10-04: [feedback]. What Stop said leaves in stopReset, with the event.
     $('nd-hint').textContent=S.turn?'A turn is running: this goes to the orchestrator at its next model request':'Enter to send · Shift+Enter for a new line';
   }
   // The Needs-you stack (DREAM-194), above the conversation and outside its scroll so a waiting request is never
@@ -596,6 +614,7 @@
       +`<p class="nd-ask-tool">${esc(title)}</p>${first?`<p class="nd-ask-reason">${esc(first)}</p>`:''}<button type="button" class="nd-pill nd-open-form" data-form="${i}" data-fk="form-${i}">Open Chat</button></div>`;
   }
   if(stream) new MutationObserver(ms=>{ if(ms.some(m=>[...m.addedNodes,...m.removedNodes].some(n=>n.nodeType===1&&n.matches('form.qform')))) schedule(); }).observe(stream,{childList:true});
+  const needsDrawn=[null,null];   // the HTML the stack's two boxes hold now
   function needs(){
     const asks=[...S.asks.values()], forms=openForms(), fails=S.order.filter(l=>(l.state==='failed'||l.state==='stopped')&&l.turn===S.turnNo);
     if(!fails.length) needsShut=null;   // nothing to fold (a new turn cleared them): the next ones start as the window says
@@ -605,8 +624,11 @@
     if(shut&&document.activeElement?.closest?.('#nd-stack .nd-ask-fail')) focusAfter='#nd-needs-fold';   // the focused row folds away (a resize to a short window)
     fold.hidden=!fails.length; fold.textContent=shut?`Show failed or stopped (${fails.length})`:'Hide failed or stopped'; fold.setAttribute('aria-expanded',String(!shut));
     $('nd-stack').hidden=n>0&&!items.length; $('nd-needs-sec').classList.toggle('nd-asking',asks.length+forms.length>0);
-    $('nd-stack-first').innerHTML=items.length?items[0]:n?'':'<p class="nd-muted">Nothing is waiting on you.</p>';
-    rest.innerHTML=items.slice(1).join(''); rest.scrollTop=top;
+    // Rewritten only when the content changed (the owner, 2026-10-04: [feedback]): every stream event comes through here, and replacing the rows each time swapped a
+    // button between a click's press and release and sent an opened report back to its top.
+    const firstHTML=items.length?items[0]:n?'':'<p class="nd-muted">Nothing is waiting on you.</p>', restHTML=items.slice(1).join('');
+    if(needsDrawn[0]!==firstHTML){ $('nd-stack-first').innerHTML=firstHTML; needsDrawn[0]=firstHTML; }
+    if(needsDrawn[1]!==restHTML){ rest.innerHTML=restHTML; needsDrawn[1]=restHTML; rest.scrollTop=top; }
     $('nd-stack-note').textContent=stackNote;
     fitNeeds();
   }
@@ -654,6 +676,28 @@
     return data;
   }
   const post=(action,extra)=>api('/api/control',{action,...extra}).then(d=>d.result);
+  // Stop for the orchestrator's own turn: the Chat view's interrupt. The answer goes to the composer's status line
+  // (DREAM-255: the hint is hidden at a short height and rewritten by every render, so a refusal there was lost). The
+  // button is off and says so while the request is in flight. An accepted request is not a stopped turn: the receipt
+  // says only that Dream took it, and leaves with the turn; the turn's end is the server's turn_end, nothing here.
+  // The route answers HTTP 200 with result.interrupted: true when it cancelled something, false when it had nothing
+  // to cancel. Only true is "requested"; false is said as what it is, and an answer without either is not guessed at.
+  // An answer is shown only on the turn it was asked of (turnKey and stopReq, above onEvent): one that arrives after
+  // that turn ended says nothing, whatever it is, and never lands on the next turn or another session.
+  const STOP_ASKED='Stop requested. The turn is still running until Dream reports that it ended.';
+  const STOP_NONE='Nothing was stopped: Dream reported nothing it could interrupt. If this turn is still running, it was not asked to stop.';
+  const STOP_UNSAID='Dream answered without saying whether it interrupted anything. Treat the turn as still running.';
+  async function stopTurn(){
+    if(stopBusy||!S.turn) return;
+    const b=$('nd-stop'), st=$('nd-status'), mine=++stopReq, key=turnKey();
+    const say=(text,bad)=>{ if(mine!==stopReq||key!==turnKey()||!S.turn) return;   // asked of a turn that is gone
+      st.textContent=stopNote=text; if(bad) st.dataset.error='true'; else delete st.dataset.error; };
+    stopBusy=true; stopNote=''; b.disabled=true; b.textContent='Stopping…'; st.textContent=''; delete st.dataset.error;
+    try{ const res=await post('interrupt'), took=res&&typeof res==='object'?res.interrupted:undefined;
+      say(took===true?STOP_ASKED:took===false?STOP_NONE:STOP_UNSAID,took!==true); }
+    catch(e){ say(e.message,true); }
+    finally{ if(mine===stopReq){ stopBusy=false; b.disabled=false; b.textContent='Stop'; } }   // a turn boundary already gave the button back
+  }
   // An answer describes the worker when its request left: a status row that arrived meanwhile is newer (the real server
   // sends a Stop's terminal row before the response), so a lane that finished or got a row since keeps what it has.
   // A worker still waiting for an engine lane stays Queued when it is resumed.
@@ -860,6 +904,7 @@
     goalOpen=!goalOpen;$('nd-goal').classList.toggle('nd-goal-cut',!goalOpen);
     b.textContent=goalOpen?'Show less':'Show all';b.setAttribute('aria-expanded',String(goalOpen));});
   const compose=$('nd-compose'), sendBtn=$('nd-send'), status=$('nd-status');
+  $('nd-stop').addEventListener('click',stopTurn);
   const RECEIPT={pending:'Saved; it goes to the orchestrator with its next model request.',
     included:"Added to the orchestrator's next model request; not sent yet.",
     submitted:'Sent with a model request. This does not confirm that the orchestrator followed it.',
@@ -869,7 +914,20 @@
   const drafts=new Map();   // one steering receipt id per text, kept across a failed POST: a retry never delivers twice
   async function submit(given){   // the composer's words, or a retry's (DREAM-194)
     const own=given===undefined, text=(own?compose.value:given).trim(); if(!text||sending) return;
-    sending=true; sendBtn.disabled=true; status.textContent=''; delete status.dataset.error; schedule();
+    sending=true; sendBtn.disabled=true; status.textContent=''; delete status.dataset.error; stopNote=''; schedule();   // the line is the send's now
+    if(LOGIN_COMMAND.test(text)){
+      // DREAM-246: a sign-in request, not a message to the orchestrator. The chat's loginCommand sends it; it is never
+      // steered or queued, takes no steering receipt id, and the status line shows the session's own answer as text.
+      // A later answer (the window opened, or did not) replaces the line only while the line is still this request's.
+      const typed=compose.value; let shown=null;
+      const show=(message,bad)=>{ if(shown!==null&&status.textContent!==shown) return;
+        status.textContent=shown=message; if(bad) status.dataset.error='true'; else delete status.dataset.error; };
+      try{
+        const asked=await loginCommand(text,[],show);
+        if(asked&&own&&compose.value===typed) compose.value='';
+        return asked;
+      } finally{ sending=false; sendBtn.disabled=false; schedule(); }
+    }
     const steer=S.turn, body={prompt:text,attachments:[]};
     if(steer){ let d=drafts.get(text); if(!d){ d={id:crypto.randomUUID().replaceAll('-',''),target:S.steeringTarget}; drafts.set(text,d); } body.delivery='steer'; body.steering_id=d.id; body.steering_target=d.target; }
     else if(document.getElementById('read-twice')?.getAttribute('aria-pressed')==='true') body.read_twice=true;   // the chat's Read x2 toggle; a queued send only

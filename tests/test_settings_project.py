@@ -25,6 +25,7 @@ from playwright.async_api import async_playwright, expect
 from rich.console import Console
 from starlette.testclient import TestClient
 
+from chat_more import more
 from dream import config, management
 from dream.core import moe, settings
 from dream.core.profiles import read_settings, settings_path
@@ -550,7 +551,7 @@ async def test_settings_tab_saves_to_the_chosen_scope(settings_page, tmp_path):
     project = tmp_path.resolve() / ".dream" / "settings.json"
     await page.goto(url)
     await expect(page.locator("#stat")).to_have_text("Ready")
-    await page.locator("#dream-controls-open").click()
+    await more(page, "dream-controls-open")          # Chat shows no bars (DREAM-240/242): Controls is under More
     await page.get_by_role("tab", name="Settings", exact=True).click()
     panel = page.locator("#dc-settings")
     scope = panel.locator(".dc-settings-scope")

@@ -20,6 +20,8 @@ class Conversation:
         self.trimmed = False
         self._lock = threading.Lock()
         self._open = {}     # run_id -> that worker's open delta row (DREAM-190)
+        self._row_ids = {}
+        self._next_id = 0
 
     def append(self, event):
         kind = getattr(event, 'kind', '')
@@ -62,6 +64,8 @@ class Conversation:
                 size = len(data.get('text', ''))
             else:
                 self.events.append({'kind': kind, 'data': data})
+                self._row_ids[id(self.events[-1])] = str(self._next_id)
+                self._next_id += 1
                 if kind == 'agent_activity':
                     # A run's new delta row is its open row; any other row of that run closes it.
                     if data.get('kind') in {'text_delta', 'thinking_delta'}:
@@ -71,6 +75,7 @@ class Conversation:
             self.chars += size
             while self.events and (self.chars > self.max_chars or len(self.events) > self.max_events):
                 gone = self.events.popleft()
+                self._row_ids.pop(id(gone), None)
                 self.chars -= len(str(gone['data']))
                 self.trimmed = True
                 if gone['kind'] == 'agent_activity' and self._open.get(gone['data'].get('run_id')) is gone:
@@ -86,13 +91,15 @@ class Conversation:
             return None
         return row
 
-    def snapshot(self):
+    def snapshot(self, *, with_ids=False):
         with self._lock:
-            return {'events': deepcopy(list(self.events)), 'trimmed': self.trimmed}
+            events = [dict(row, id=self._row_ids[id(row)]) for row in self.events] if with_ids else list(self.events)
+            return {'events': deepcopy(events), 'trimmed': self.trimmed}
 
     def clear(self):
         with self._lock:
             self.events.clear()
             self._open.clear()
+            self._row_ids.clear()
             self.chars = 0
             self.trimmed = False

@@ -77,7 +77,8 @@ PROVIDERS: dict[str, Provider] = {
     "codex": Provider(key="codex", label="ChatGPT · Codex", kind="cli", cli_cmd="codex",
                       multimodal=True),
     "grok": Provider(key="grok", label="Grok · xAI", kind="cli", cli_cmd="grok"),
-    "gemini": Provider(key="gemini", label="Gemini · Google", kind="cli", cli_cmd="gemini"),
+    "gemini": Provider(key="gemini", label="Gemini CLI · enterprise/API legacy", kind="cli", cli_cmd="gemini"),
+    "antigravity": Provider(key="antigravity", label="Gemini · Antigravity", kind="cli", cli_cmd="agy"),
 }
 
 

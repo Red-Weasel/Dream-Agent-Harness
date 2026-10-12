@@ -7,6 +7,7 @@ import contextlib
 import copy
 import html as _html
 import json
+import os
 import select
 import shutil
 import signal
@@ -20,11 +21,17 @@ from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.filters import Always, Condition, has_focus
+from prompt_toolkit.enums import DEFAULT_BUFFER
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style
+from .activity import file_targets
 from rich.text import Text
+from rich.console import Group
 
 import re
 
@@ -32,6 +39,8 @@ from .. import config
 from ..core import effort as effort_mod
 from ..core import checkpoints, instructions, policy
 from ..core.engine import Engine
+from ..core.linked_sessions import LinkedMessages, LinkedPrompt, TurnCapture, activate as _activate_link, deactivate as _deactivate_link
+from ..core.invocations import InvokedPrompt
 from ..core.backends.base import Event
 from ..tools.widgets import CARD_TOOL_NAMES, end_requested, reset_end
 from ..core.friction import FrictionMeter
@@ -39,21 +48,31 @@ from ..memory import longterm
 from ..memory.store import slugify
 from ..telemetry import GpuSampler, InferenceMeter
 from . import monitor as monitor_mod
+from .status import minimal_status
 from .mindmap import MindMap
 from .plan import PlanTracker
 from .council import CouncilControls, CouncilRequest
+from .terminal_commands import TerminalCompleter, model_options
+from .turn_input import TurnInput
 from .render import (
     _BLUE,
     _CYAN,
     _VIOLET,
+    PROMPT_FRAME,
     Renderer,
+    brand_rule,
     build_footer,
-    pt_gradient_rule,
+    framed_rule,
     summarize_tool_input,
 )
 
 # Slugs a recall tool-result reports (e.g. "(slug: user-loves-fast-local-inference, …)").
 _RECALL_SLUG_RE = re.compile(r"slug:\s*([a-z0-9][a-z0-9-]*)")
+
+# CSI-u Shift+Enter carries no CR/LF, so approval prompts cannot submit it.
+# PTK 3.0 has no ShiftEnter key; F24 is ignored by its other prompt bindings.
+_SHIFT_ENTER_SEQUENCE = "\x1b[13;2u"
+ANSI_SEQUENCES[_SHIFT_ENTER_SEQUENCE] = Keys.F24
 
 # /review on the reviewer role's own backend (DREAM-145): the isolated reviewer's system prompt (the review prompt
 # itself carries the diff and the format) and how long one review may take. The session's own engine, used when no
@@ -64,7 +83,7 @@ _REVIEWER_SYSTEM = ("You are an independent code reviewer consulted by another A
 _REVIEW_TIMEOUT_S = 600.0
 
 # /review severity → color. critical/high wear the renderer's alarm colors; the
-# rest stay in the brand's violet→cyan orbit so a low finding doesn't shout.
+# rest stay in the terminal's warm palette so a low finding doesn't shout.
 _SEVERITY_COLOR = {
     "critical": "bold red",
     "high": "yellow",
@@ -153,7 +172,11 @@ def _plan_excerpt(path: Path) -> list[str]:
 
 
 # The prompt line, dressed in the wordmark's violet end of the gradient.
-PROMPT = HTML('<style fg="#a78bfa"><b>you</b></style> <style fg="#8b5cf6">›</style> ')
+PROMPT = HTML('<style fg="#edbd62"><b>you</b></style> <style fg="#ee8b42">›</style> ')
+
+
+class _Typed(str):
+    """A line typed at this terminal's prompt, told apart from a GUI prompt (a plain str too)."""
 
 
 def _own_cancel() -> bool:
@@ -175,14 +198,14 @@ Commands:
   /red-team <dir> [min] scoped local exercise; /red-team off restores the workspace
   /loop <goal>          work autonomously toward a goal until done / needs you
   /runs                 list durable autonomous runs
-  /loop-resume <id> [note] resume a run; reconcile uncertain actions in the note
+  /loop-resume <id> [note] resume; use --reconcile ID="report" for uncertain actions
   /recall <query>       search long-term memory
   /remember <t> :: <b>  save a semantic memory (title :: body)
   /memory [kind]        list memories (kind: semantic|procedural)
   /sessions             list recent sessions
   /tasks [verb]         open work: list · done <id> · add <title> · all
   /agents               list available sub-agents
-  /model [name]         show or switch model
+  /model [name]         choose or switch model (Escape cancels)
   /effort [level]       reasoning effort: med|high|xhigh|max|ultra
   /toolcalls [n|off]    tool-call budget per prompt (off = unlimited)
   /maxtokens [n]        output-token ceiling for the rest of this session (takes effect now; --save keeps it)
@@ -193,13 +216,16 @@ Commands:
   /mcp                  external MCP servers connected this session, and their tools
   /plugins              plugins under plugins/: what loaded, what failed
   /verbose [on|off]     show full tool output live (bare = toggle)
+  /changes              files changed by successful tracked tools this session
   /errors               show this session's errors in full
   /instructions [...]   standing preferences: <text> | edit | clear
-  /thoughts on|off      reasoning: persistent (on) or ephemeral (off, default)
+  /thoughts on|off      reasoning: persistent (on, default) or ephemeral (off)
+  /optimizer [on|off|skip] prompt optimizer (Ctrl+O); skip = next message as typed (Ctrl+])
   /mind                 print the memory map (kinds, links, what's lit)
-  /monitor [on|off]     GPU + inference-speed pane on the right (bare = toggle)
+  /monitor [on|off]     GPU + inference telemetry (Ctrl+T shows details; bare = toggle)
   /plan                 print the current task plan
-  /council <q>          ask configured advisors (choose them in Council)
+  /council <q>          ask this terminal's configured Council advisors
+  /login [provider]     sign in to claude · codex · grok · agy (Gemini) in a separate window (bare = list)
   /critique [cli] [note] ask claude|codex|gemini|grok to critique the latest render vs its reference
   /rewind [id]          list file checkpoints · roll one back (asks first)
   /review [--staged]    code-review the diff (or /review <base ref>)
@@ -241,13 +267,17 @@ class App(CouncilControls):
         gui: bool | None = None,
     ):
         self.renderer = Renderer()
+        self.renderer.workspace_getter = lambda: getattr(self, "workspace", None)  # a call shows its path inside the workspace
         # Dream Studio: a second VIEW of this session, in a browser pane. Off
         # unless asked for, and additive by construction — the bus drops events
         # rather than making the terminal wait on a browser (see gui/bus.py).
         self.gui_enabled = config.GUI if gui is None else gui
         self.studio: Any = None
-        self._gui_prompts: asyncio.Queue[str | QueuedPrompt] = asyncio.Queue(maxsize=32)
-        self._deferred_gui_prompt: str | QueuedPrompt | None = None
+        self._linked_messages = (LinkedMessages(os.environ['DREAM_DEEPSLEEP_NODE_ID'])
+                                 if os.environ.get('DREAM_DEEPSLEEP_NODE_ID') else None)
+        self._linked_capture = None
+        self._gui_prompts: asyncio.Queue[str | QueuedPrompt | LinkedPrompt] = asyncio.Queue(maxsize=32)
+        self._deferred_gui_prompt: str | QueuedPrompt | LinkedPrompt | None = None
         self._council_pending: CouncilRequest | None = None
         self._accepting_input = False
         from ..gui.bus import EventBus
@@ -274,10 +304,14 @@ class App(CouncilControls):
         # (the desktop close dialog asks it); None = ask at shutdown.
         self._exit_consolidate: bool | None = None
         self.workspace = Path(workspace).expanduser().resolve() if workspace else config.ROOT
+        # DREAM-259: opening a terminal workspace initializes canonical instructions,
+        # even before the first model connection. Keep warnings for terminal and Studio.
+        from ..core.project_bootstrap import initialize
+        self.project_instruction_warnings = initialize(self.workspace)
         # This workspace's .dream/settings.json is the session's project settings file (DREAM-146).
         from ..core import settings as runtime_settings
         runtime_settings.set_workspace(self.workspace)
-        self.mode = "accept-edits"  # shift+tab cycles ask → accept-edits → auto → plan
+        self.mode = "accept-edits"  # the public default: a shell command asks first; shift+tab cycles ask → accept-edits → auto → plan
         self.engine: Engine | None = None
         self._perm_lock = asyncio.Lock()  # one permission prompt at a time
         self._always_allow: set[str] = set()  # tools approved for the session
@@ -293,6 +327,8 @@ class App(CouncilControls):
         self.activity_counts: dict[str, int] = {"created": 0, "edited": 0, "deleted": 0}
         self.activity: dict[str, list[str]] = {"created": [], "edited": [], "deleted": []}
         self.tool_count = 0
+        self.changed_files: set[str] = set()
+        self._pending_changed_files: dict[Any, set[str]] = {}
         self._recent_files: list[tuple[str, str]] = []  # (marker, name)
         # File activity classified at tool_use, keyed by tool id, committed to the
         # footer only when the tool_result comes back successful (not declined/errored).
@@ -312,7 +348,25 @@ class App(CouncilControls):
         self.meter = InferenceMeter()  # TTFT / tokens-per-second, fed every event
         self.show_monitor = config.MONITOR  # the right-side GPU/speed pane
         self.gpu: GpuSampler | None = None  # built in start() — discovery must not block boot
-        self.show_tasks = True  # ctrl+t toggles the full tasks panel vs. its one-liner
+        self.show_tasks = False  # Ctrl+T expands optional tasks and telemetry.
+        self.read_twice = False  # Read x2 for what is typed here; a DeepSleep tile's chip sets it (2026-10-10)
+        # The prompt optimizer (the owner, 2026-10-11, as their Claude Code mod): off for a new session (the
+        # owner, same day: confusing to anyone who does not know it is there) unless DREAM_PROMPT_OPTIMIZER=1;
+        # the buttons on the prompt box's line (Ctrl+O, Ctrl+]) and /optimizer turn it on or off or send the
+        # next message as typed.
+        self.prompt_optimizer = os.environ.get("DREAM_PROMPT_OPTIMIZER", "0") == "1"
+        self.optimizer_skip_once = False
+        self._as_typed_once = False   # Edit on a rewrite: what comes back from the box goes as typed
+        self._prefill = ""            # text the next prompt box starts with
+        # The prompt box while a turn works (the owner, 2026-10-11, as in Claude Code): Enter sends what was typed
+        # into the running turn when it can take it, else it waits and goes as the next prompt.
+        self.turn_input = TurnInput(self._typed_during_turn)
+        self.turn_input.on_change = self.renderer.refresh_live
+        self.turn_input.keys = {"\x0f": self._toggle_optimizer, "\x1d": self._toggle_skip_once}  # Ctrl+O, Ctrl+]
+        self.renderer.turn_input = self.turn_input
+        self._typed_queue: list[str] = []
+        self._typed_steered: list[tuple[Any, str, str]] = []   # (inbox, receipt id, text)
+        self._typed_tasks: set[asyncio.Task] = set()
         self._turn_t0 = time.monotonic()  # start of the current turn, for the footer clock
         config.ensure_dirs()
         kb = KeyBindings()
@@ -322,13 +376,44 @@ class App(CouncilControls):
             self.mode = policy.next_mode(self.mode)
             event.app.invalidate()
 
-        @kb.add("c-t")  # Ctrl+T toggles the full tasks panel vs. its one-liner
+        @kb.add("c-t")  # Ctrl+T expands or hides detailed tasks and telemetry
         def _toggle_tasks(event) -> None:
             self.show_tasks = not self.show_tasks
             event.app.invalidate()
 
+        @kb.add("c-o")  # Ctrl+O (the [ Optimizer ] button) turns the prompt optimizer on or off
+        def _optimizer_key(event) -> None:
+            self._toggle_optimizer()
+            event.app.invalidate()
+
+        @kb.add("c-]", eager=True)  # Ctrl+] (the [ Skip next ] button): the next message goes as typed; eager: emacs
+        # mode reads Ctrl+] as the start of a two-key character search and would swallow it
+        def _skip_key(event) -> None:
+            self._toggle_skip_once()
+            event.app.invalidate()
+
+        @kb.add("enter", filter=has_focus(DEFAULT_BUFFER))
+        def _submit_input(event) -> None:
+            event.current_buffer.validate_and_handle()
+
+        @kb.add("escape", "enter", filter=has_focus(DEFAULT_BUFFER))
+        def _insert_newline(event) -> None:
+            event.current_buffer.insert_text("\n")
+
+        @kb.add(Keys.F24, filter=has_focus(DEFAULT_BUFFER))
+        def _shift_enter(event) -> None:
+            # Physical F24 remains ignored; only our modified-Enter sequence edits.
+            if event.data == _SHIFT_ENTER_SEQUENCE:
+                _insert_newline(event)
+
         self.session = PromptSession(
+            multiline=True,
             history=FileHistory(str(config.VAR_DIR / "history")),
+            completer=TerminalCompleter(lambda: self.provider, lambda: self.engine.model),
+            complete_while_typing=Condition(lambda: bool(getattr(self, "session", None))
+                                          and self.session.default_buffer.text.startswith("/")),
+            reserve_space_for_menu=5,
+            complete_in_thread=True,
             bottom_toolbar=self._toolbar,
             key_bindings=kb,
             # noreverse: the panel sits on the terminal's own background, so it
@@ -337,22 +422,38 @@ class App(CouncilControls):
             # The monitor pane keeps ticking while idle at the prompt.
             refresh_interval=1.0,
         )
+        # Keep status immediately below input; completion space is only reserved
+        # for slash commands, not as a permanent empty block in every prompt.
+        self.session.layout.current_window.dont_extend_height = Always()
+        self.session.app.after_render += self._report_prompt_region
+
+    @staticmethod
+    def _report_prompt_region(app) -> None:
+        """Let managed xterm resize transient input without reflowing old drafts.
+
+        The offset is prompt_toolkit's rendered caret row relative to the input
+        origin. Emitting after its output flush lets xterm mark that exact origin.
+        Ordinary terminals ignore this private OSC; it never contains draft text.
+        """
+        state = "done" if app.is_done else str(app.renderer._cursor_pos.y)
+        app.output.write_raw(f"\x1b]777;dream-prompt;{state}\x07")
+        app.output.flush()
 
     # --- status bar ----------------------------------------------------------
 
     _MODE_COLOR = {  # prompt_toolkit (toolbar) colors
-        "ask": "ansicyan",
+        "ask": "#f1a76a",
         "accept-edits": "ansigreen",
         "auto": "ansiyellow",
-        "plan": "ansimagenta",
+        "plan": "#f5dfb6",
     }
     _MODE_RICH = {  # rich (live footer) twins
-        "ask": "#22d3ee",
+        "ask": "#f1a76a",
         "accept-edits": "#34d399",
         "auto": "#fbbf24",
-        "plan": "#a78bfa",
+        "plan": "#f5dfb6",
     }
-    _MUTED = "#6f6890"  # quiet violet-gray for toolbar hints and separators
+    _MUTED = "#a89a87"  # quiet warm gray for toolbar hints and separators
 
     def _status_data(self) -> dict:
         """One source of truth for the status panel — rendered two ways: as the
@@ -361,7 +462,7 @@ class App(CouncilControls):
         ws = str(self.workspace).replace(str(Path.home()), "~")
 
         ctx_part = ""
-        if eng.last_context_tokens:
+        if eng.last_context_tokens is not None:
             win = getattr(eng.backend, "n_ctx", None) or (
                 config.CONTEXT_WINDOW if self.provider_kind == "anthropic" else None
             )
@@ -395,11 +496,14 @@ class App(CouncilControls):
             "mode_color": self._MODE_RICH[self.mode],
             "ws": ws,
             "effort": _effort_label(eng.effort) if eng.effort else None,
+            "effort_short": eng.effort,
             "created": a["created"],
             "edited": a["edited"],
             "deleted": a["deleted"],
             "tools": self.tool_count,
+            "files_changed": len(self.changed_files),
             "tokens": tokens,
+            "context": ctx_part.removeprefix(" · ") or "ctx --",
             "recent": recent,
             "mind": mind_t,
             "mind_plain": mind_t.plain,
@@ -460,13 +564,25 @@ class App(CouncilControls):
             return HTML(" Dream ")
 
     def _build_toolbar(self) -> HTML:
-        """The brand gradient rule, mode + workspace, the color-coded activity
-        tallies, recent files — and the monitor pane on the right when the
-        terminal is wide enough."""
+        """Minimal status by default; Ctrl+T expands bounded activity/telemetry."""
         d = self._status_data()
         color = self._MODE_COLOR[self.mode]
         width = shutil.get_terminal_size().columns
-        rule = pt_gradient_rule(width)
+        def pt(row: Text) -> str:
+            # Keep Rich's semantic spans when moving the same status to the
+            # idle prompt; flattening to .plain loses effort/repo/context colors.
+            fragments = []
+            for segment in row.render(self.renderer.console):
+                style = segment.style
+                foreground = style.color.get_truecolor().hex if style and style.color else None
+                fragments.append((segment.text, foreground, bool(style and style.bold)))
+            return self._pt_line(*fragments)[0]
+
+        if not self.show_tasks:
+            rendered = [pt(row) for row in minimal_status(d, width)]
+            # The prompt box's bottom line, atop the status rows (its top line is renderer.sep()).
+            return HTML(pt(framed_rule(width, self._optimizer_label())) + "\n" + "\n".join(rendered))
+        rule = pt(framed_rule(width, self._optimizer_label(), 0.55))
         left: list[tuple[str, int]] = []
         line1: list[tuple] = [
             (" ", None),
@@ -488,12 +604,12 @@ class App(CouncilControls):
             # Zero tallies stay muted; color arrives with the first count.
             line2.append((f"{label} {count}", tcolor if count else self._MUTED))
         line2.append((" │ ", self._MUTED))
-        line2.append((d["tokens"], "#a78bfa"))
+        line2.append((d["tokens"], "#edbd62"))
         left.append(self._pt_line(*line2))
         left.append(self._pt_line((f" {d['recent']}", self._MUTED)))
         # Cockpit strips (plain twins of the rich footer): plan · mind · friction.
         if d.get("plan_plain"):
-            left.append(self._pt_line((f" {d['plan_plain']}", "#a78bfa")))
+            left.append(self._pt_line((f" {d['plan_plain']}", "#edbd62")))
         if d.get("mind_plain"):
             left.append(self._pt_line((f" {d['mind_plain']}", self._MUTED)))
         if d.get("friction_spark") or d.get("friction_label"):
@@ -509,6 +625,7 @@ class App(CouncilControls):
             if mon_pt and d.get("monitor_compact"):
                 lines.append(self._pt_line((f" {d['monitor_compact']}", self._MUTED))[0])
             body = "\n".join(lines)
+        body = "\n".join(monitor_mod.fit_pt(line, width)[0] for line in body.split("\n"))
         return HTML(rule + "\n" + body)
 
     def _footer(self):
@@ -519,10 +636,68 @@ class App(CouncilControls):
             d = self._status_data()
             d["gerund"] = self.renderer.gerund
             d["elapsed"] = time.monotonic() - self._turn_t0
-            return build_footer(d, self.renderer.console.width)
+            width = self.renderer.console.width
+            if not self.show_tasks:
+                # The same prompt box while a turn works, so idle and working keep one geometry.
+                return Group(*self._turn_box(width), framed_rule(width, self._optimizer_label()),
+                             *minimal_status(d, width, ascii_only=True))
+            return Group(*self._turn_box(width), build_footer(d, width))
         except Exception as e:
             self._note_status_error(e)
             return Text(f" ✻ {self.renderer.gerund}…", style="dim")
+
+    def _toggle_optimizer(self) -> None:
+        self.prompt_optimizer = not self.prompt_optimizer
+
+    def _toggle_skip_once(self) -> None:
+        if self.prompt_optimizer:
+            self.optimizer_skip_once = not self.optimizer_skip_once
+
+    def _optimizer_label(self) -> Text:
+        """The prompt optimizer's two buttons on the prompt box's bottom line (the owner, 2026-10-11, as in their
+        Claude Code mod). A DeepSleep tile makes them clickable (deepsleep.js); a click sends Ctrl+O or Ctrl+]."""
+        on = Text("[ Optimizer: on ]" if self.prompt_optimizer else "[ Optimizer: off ]",
+                  style="bold #edbd62" if self.prompt_optimizer else "#a89a87")
+        if self.prompt_optimizer:
+            on.append("  ")
+            on.append("[ Skip next: on ]" if self.optimizer_skip_once else "[ Skip next: off ]",
+                      style="bold #edbd62" if self.optimizer_skip_once else "#a89a87")
+        return on
+
+    def _turn_box(self, width: int) -> list[Text]:
+        """The prompt box while a turn works: what waits for the turn's end, the top line and what is being typed.
+        The bottom line is the footer's labelled one."""
+        rows = []
+        for text in self._typed_queue[:3]:
+            row = Text("  queued › ", style="dim")
+            row.append(" ".join(text.split()), style="#a89a87")
+            row.truncate(width, overflow="crop")
+            rows.append(row)
+        if len(self._typed_queue) > 3:
+            rows.append(Text(f"  +{len(self._typed_queue) - 3} more queued", style="dim"))
+        rows.append(brand_rule(width, PROMPT_FRAME))
+        # Each typed line on its own row, as at the prompt between turns (Shift+Enter, 2026-10-11); the last six show.
+        lines = self.turn_input.text.split("\n")
+        hidden = max(0, len(lines) - 6)
+        room = max(1, width - 7)
+        for index, part in enumerate(lines[hidden:]):
+            row = Text()
+            if index == 0:
+                row.append("you", style=f"bold {_VIOLET}")
+                row.append(" › ", style="#ee8b42")
+            else:
+                row.append("      ")
+            if index == 0 and hidden:
+                row.append(f"({hidden} more above) ", style="dim")
+            last = index == len(lines) - hidden - 1
+            row.append(part if len(part) <= room else (".." + part[-(room - 2):] if last else part[:room]))
+            if last:
+                row.append(" ", style="reverse")
+                if not self.turn_input.text:
+                    row.append(" type here: Enter sends it to the agent now", style="dim")
+            row.truncate(width, overflow="crop")
+            rows.append(row)
+        return rows
 
     # --- interrupts ----------------------------------------------------------
 
@@ -619,15 +794,21 @@ class App(CouncilControls):
         self.renderer.force_echo_on()  # the Live footer leaves echo suppressed
         stop = threading.Event()
         task = asyncio.ensure_future(asyncio.to_thread(self._read_line, prompt, stop))
+        answer = None
         try:
             with self._sigint_cancels(task):
-                return await task
+                answer = await task
+                return answer
         except asyncio.CancelledError:
             if not _own_cancel():
                 raise
             return None
         finally:
             stop.set()
+            if answer is None:
+                # No Enter was echoed: leave the question's row, or the footer is redrawn beside the question.
+                sys.stdout.write("\n")
+                sys.stdout.flush()
 
     # --- permissions ---------------------------------------------------------
 
@@ -708,6 +889,8 @@ class App(CouncilControls):
     def _loop_workspace(self):
         """The active autonomous loop's scratch directory, if one is running."""
         loop = getattr(self, "_active_loop", None)
+        if loop is not None and hasattr(loop, 'active_loop'):
+            loop = loop.active_loop
         return getattr(loop, "workspace", None) if loop else None
 
     async def _decide_permission(self, tool_name: str, tool_input: dict, why: list[str] | None = None) -> bool:
@@ -741,13 +924,13 @@ class App(CouncilControls):
                 self.renderer.system("Shell authorization changed during the sandbox check; retry in the current session and scope.")
                 return refuse("shell authorization changed during the sandbox check; retry in the current session and scope")
             engine.execution_capability = refreshed
+        # No shell sandbox (2026-10-11): decide as run_bash itself does, without the sandbox probe's evidence -- with it,
+        # Ask and Accept edits ran read-only commands unasked (`cat ~/.ssh/...` included) on the host.
         decision, reason = policy.decide(tool_name, tool_input, self.mode, self.workspace,
-                                       execution_scope=getattr(engine, "execution_scope", None),
-                                       execution_capability=getattr(engine, "execution_capability", None) if native_shell else None)
+                                       execution_scope=getattr(engine, "execution_scope", None))
         capability = getattr(engine, "execution_capability", None)
-        uncontained = native_shell and capability is not None and not capability.available
-        if uncontained and decision != "deny":
-            decision, reason = "ask", "outside workspace protection unavailable: run this exact command with host access"
+        # Dream has no shell sandbox (the owner, 2026-10-11): a native shell command always runs on the host.
+        uncontained = native_shell
         if decision == "allow":
             return True
         if decision == "deny":
@@ -770,7 +953,7 @@ class App(CouncilControls):
                 return True
         key = self._always_key(tool_name, tool_input)
         # Native shell grants are explicit, exact-command and executor-scoped.
-        # Keep host grants separate: a sandbox approval can never fall back to host.
+        # (No shell sandbox: every grant here is a host grant, for this exact command in this session.)
         captured = (engine, self.mode, self.workspace, scope,
                     getattr(engine, 'workspace', None), capability)
         def unchanged():
@@ -787,17 +970,13 @@ class App(CouncilControls):
                                and scope.workspace == self.workspace
                                and getattr(engine, 'workspace', None) == self.workspace
                                and not scope.red_team and not effect)
-        remember_sandbox = bool(remember_native and capability is not None and capability.enforces(scope))
         remember_host = remember_native and host_option
-        native_key = f'{id(engine)}\x00{self.workspace}\x00{scope!r}\x00{key}'
-        sandbox_key, host_key = 'sandbox\x00' + native_key, 'host\x00' + native_key
+        host_key = 'host\x00' + f'{id(engine)}\x00{self.workspace}\x00{scope!r}\x00{key}'
         # Serialize prompts so concurrent sub-agent requests don't race on stdin.
         async with self._perm_lock:
             if native_shell and not unchanged():
                 self.renderer.system('Shell authorization changed while waiting; retry in the current session and scope.')
                 return refuse('shell authorization changed while the prompt was waiting; retry in the current session and scope')
-            if remember_sandbox and sandbox_key in self._always_allow:
-                return True
             if remember_host and host_key in self._always_allow:
                 engine.approve_command(str(tool_input.get('command') or ''), uncontained=True)
                 return True
@@ -807,10 +986,9 @@ class App(CouncilControls):
             if reason:
                 desc += f"\n{'⚠ ' if boundary else 'Approval reason: '}{reason}"
             if native_shell:
-                desc += ("\nSandbox execution keeps workspace protection. Outside-sandbox execution "
-                         "uses your normal host access. A once choice does not remember approval. "
-                         "Always choices remember only this exact command in this workspace for this session, "
-                         "not other commands or future sessions.")
+                desc += ("\nDream has no shell sandbox: the command runs on this computer with your normal access. "
+                         "A once choice does not remember approval. An always choice remembers only this exact "
+                         "command in this workspace for this session, not other commands or future sessions.")
             if tool_name in {"computer_action", f"mcp__{config.MCP_SERVER_NAME}__computer_action"}:
                 desc += ("\nAn always choice remembers only this target as it is now (this page origin, or this window and "
                          "its owner) for this session; another window, another origin or a changed window asks again.")
@@ -819,33 +997,19 @@ class App(CouncilControls):
             self.renderer.live_pause()
             try:
                 self.renderer.permission_request(tool_name, desc)
-                choices = (
-                    "  run? [y]in sandbox once / [h]outside sandbox once / [n]o: " if host_option and not uncontained else
-                    "  run? [y]outside sandbox once / [n]o: " if uncontained else
-                    "  allow? [y]es / [n]o: " if boundary
-                    else "  allow? [y]es / [n]o / [a]lways this session: "
-                )
+                choices = ("  allow? [y]es / [n]o: " if boundary
+                           else "  allow? [y]es / [n]o / [a]lways this session: ")
                 if native_shell:
-                    choices = ('  run? [y]outside sandbox once / [n]o' if uncontained else
-                               '  run? [y]in sandbox once / [n]o')
-                    if host_option and not uncontained:
-                        choices += ' / [h]outside sandbox once'
-                    extras = (' / [a]always in sandbox this session' if remember_sandbox else '')
-                    extras += ' / [ha]always outside sandbox this session' if remember_host else ''
-                    choices = choices.rstrip(': ') + extras + ': '
+                    choices = ('  run? [y]es once / [n]o' + (' / [a]lways this exact command this session' if remember_host
+                                                             else '') + ': ')
                 studio = getattr(self, "studio", None)
                 from contextlib import nullcontext
                 timing = getattr(engine, "turn_timing", None)
                 with timing.phase("approval_wait") if timing else nullcontext():
                     if studio is not None and studio.client_count:
-                        yes_label = ("Run outside sandbox once" if uncontained else "Run in sandbox once") if native_shell else "Allow once"
-                        buttons = {"y": yes_label, "n": "Deny"}
-                        if host_option and not uncontained:
-                            buttons["h"] = "Run outside sandbox once"
-                        if remember_sandbox:
-                            buttons['a'] = 'Always allow in sandbox (session)'
+                        buttons = {"y": "Run once" if native_shell else "Allow once", "n": "Deny"}
                         if remember_host:
-                            buttons['ha'] = 'Always allow outside sandbox (session)'
+                            buttons['a'] = 'Always allow this command (session)'
                         if not native_shell and not boundary:
                             buttons["a"] = "Allow this session"
                         ans = await studio.request_permission(tool_name, tool_input, desc, buttons)
@@ -859,15 +1023,9 @@ class App(CouncilControls):
                 self.renderer.system('Shell authorization changed during approval; retry in the current session and scope.')
                 return refuse('shell authorization changed during approval; retry in the current session and scope')
             ans = ans.strip().lower()
-            if ans in ('a', 'always') and remember_sandbox:
-                self._always_allow.add(sandbox_key)
-                return True
-            if ans == 'ha' and remember_host:
+            if ans in ('a', 'always', 'ha') and remember_host:
                 engine.approve_command(str(tool_input.get('command') or ''), uncontained=True)
                 self._always_allow.add(host_key)
-                return True
-            if ans in ("h", "host") and host_option:
-                engine.approve_command(str(tool_input.get("command") or ""), uncontained=True)
                 return True
             if ans in ("a", "always") and not native_shell and not boundary:
                 self._always_allow.add(key)
@@ -901,6 +1059,8 @@ class App(CouncilControls):
         self.activity_counts = {"created": 0, "edited": 0, "deleted": 0}
         self.activity = {"created": [], "edited": [], "deleted": []}
         self.tool_count = 0
+        self.changed_files: set[str] = set()
+        self._pending_changed_files: dict[Any, set[str]] = {}
         self._recent_files = []
         self._pending_activity = {}
         self.session_errors = []  # /errors must not carry a prior session's failures
@@ -911,6 +1071,9 @@ class App(CouncilControls):
         self.meter = InferenceMeter()
 
     async def start(self) -> None:
+        for warning in getattr(self, "project_instruction_warnings", ()):
+            self.renderer.system(warning)
+            self.session_errors.append(("project instructions", warning))
         from ..core.settings import apply_saved_output
         apply_saved_output()    # a saved output.max_tokens (/maxtokens --save), unless DREAM_MAX_TOKENS is set
         self.engine = self._boot_engine()
@@ -936,6 +1099,10 @@ class App(CouncilControls):
         from ..core import moe, settings as runtime_settings
         from ..core.backends.openai_compat import OpenAICompatBackend
         from ..core.profiles import printable
+        # Studio starts after the engine, so replay initialization warnings to its bus.
+        # The terminal already saw these before the model connection.
+        for warning in getattr(self, "project_instruction_warnings", ()):
+            self.bus.publish(Event("system", warning))
         notes = []
         if not isinstance(getattr(self.engine, "backend", None), OpenAICompatBackend):
             notes += runtime_settings.role_notes(self.engine.provider.key)
@@ -982,14 +1149,59 @@ class App(CouncilControls):
         self.renderer.welcome(rows, notes)
 
     async def run_autonomous(self, goal: str, max_iterations: int | None = None, *,
-                             resume_run_id: str | None = None, resume_note: str | None = None) -> None:
+                             resume_run_id: str | None = None, resume_note: str | None = None,
+                             reconciled_actions: dict[str, str] | None = None) -> None:
         """Headless: boot, drive the autonomous loop toward a goal, consolidate, exit."""
         await self.start()
         try:
-            options = {"resume_run_id": resume_run_id, "resume_note": resume_note} if resume_run_id else {}
+            options = {"resume_run_id": resume_run_id, "resume_note": resume_note, "reconciled_actions": reconciled_actions} if resume_run_id else {}
             await self._loop(goal, max_iterations, **options)
         finally:
             await self._shutdown()
+
+    async def run_phase_schedule(self, plan, **resume_options) -> None:
+        """Headless operator-selected schedule; startup never generates its plan."""
+        try:
+            await self.start()
+            from ..core.phase_runner import PhaseRunner
+            runner = PhaseRunner(self.engine, plan.phases, goal=plan.goal, project=plan.project,
+                limits=plan.limits, state_dir=config.LOOP_DIR / 'schedules', on_event=self._loop_sink)
+            self._active_loop = runner
+            self._turn_t0 = time.monotonic()
+            self._turn_label = f"schedule: {_first_line(plan.goal)}"
+            self.meter.turn_start()
+            self.renderer.live_begin(self._footer)
+            self.renderer.working()
+            try:
+                result = await self._run_turn(runner.run(**resume_options))
+            finally:
+                self._active_loop = None
+                self.renderer.live_end()
+                self.meter.turn_end()
+                self._pending_activity.clear()
+                self._pending_changed_files.clear()
+                await self._seal_checkpoint()
+            if self.interrupted:
+                schedule_id = getattr(getattr(runner, '_journal', None), 'run_id', None)
+                self.renderer.system(f"Schedule interrupted: {schedule_id or 'not created'}. Inspect its saved state before explicit resume.")
+                print("DREAM_SCHEDULE_RESULT_JSON: " + json.dumps({
+                    'status': 'stopped', 'schedule_id': schedule_id,
+                    'completed_phases': None, 'current_run_id': None,
+                    'scope': 'caller interruption; inspect recorded schedule state'}, sort_keys=True), flush=True)
+                return
+            self.renderer.end_line()
+            self.renderer.rule(f"schedule {result.status} · {result.completed_phases} checked phases")
+            if result.message:
+                self.renderer.info(result.message)
+            self.renderer.system(f"schedule: {result.schedule_id} · resume with the same --phase-plan")
+            print("DREAM_SCHEDULE_RESULT_JSON: " + json.dumps({
+                'status': result.status, 'schedule_id': result.schedule_id,
+                'completed_phases': result.completed_phases, 'current_run_id': result.current_run_id,
+                'scope': 'checked phase records; endurance remains unqualified'}, sort_keys=True), flush=True)
+        finally:
+            # Checkpointed headless execution does not authorize another model
+            # pass or an interactive prompt after its result or startup failure.
+            await self._shutdown(allow_consolidation=False)
 
     async def run(self) -> None:
         await self.start()
@@ -1010,6 +1222,13 @@ class App(CouncilControls):
                         if isinstance(incoming, CouncilRequest):
                             await self._execute_council_control(incoming)
                             continue
+                        if isinstance(incoming, LinkedPrompt):
+                            from ..core import turn_origin
+
+                            # Another session's message, framed by Dream: never logged as the owner's words.
+                            with turn_origin.generated(turn_origin.LINKED):
+                                await self._ask_linked(incoming)
+                            continue
                         workflow = incoming if isinstance(incoming, QueuedPrompt) else None
                         line = (incoming.text if workflow else incoming).strip()
                         if not line:
@@ -1024,7 +1243,12 @@ class App(CouncilControls):
                                 self.bus.publish(Event("turn_end", {}))
                             continue
                         self.renderer.sep()  # divider below the prompt, above the response
-                        if workflow is None:
+                        if isinstance(incoming, InvokedPrompt):
+                            from ..core import turn_origin
+
+                            with turn_origin.generated(incoming.origin):
+                                await self._ask(line)
+                        elif workflow is None:
                             await self._ask(line)
                         else:
                             from ..core import turn_origin
@@ -1103,6 +1327,7 @@ class App(CouncilControls):
             act = policy.classify_file_activity(
                 data.get("name"), data.get("input") or {}, self.workspace
             )
+            self._pending_changed_files[data.get("id")] = file_targets(data.get("name"), data.get("input") or {}, self.workspace)
             if act:
                 self._pending_activity[data.get("id")] = act
             self.renderer.tool_use(data.get("name"), data.get("input") or {})
@@ -1114,6 +1339,9 @@ class App(CouncilControls):
             if short in CARD_TOOL_NAMES and not is_error:
                 # A card's text form is the terminal's rendering of it, whole.
                 self.renderer.card(short, str(data.get("content") or ""))
+            paths = self._pending_changed_files.pop(data.get("id"), set())
+            if not is_error:
+                self.changed_files.update(paths)
             act = self._pending_activity.pop(data.get("id"), None)
             if act and not is_error:  # the write/edit/delete actually landed
                 kind_, name_ = act
@@ -1448,12 +1676,69 @@ class App(CouncilControls):
             style = {"unavailable": "red", "unparseable": "yellow"}.get(res.status, "dim")
             c.print(Text(f"  {res.detail}", style=style))
 
-    def _queue_gui_prompt(self, prompt: str | QueuedPrompt) -> None:
+    def _queue_gui_prompt(self, prompt: str | QueuedPrompt | LinkedPrompt) -> None:
         if getattr(self, '_council_pending', None) is not None:
             raise ValueError('Wait for the Council action to finish before sending a message.')
         if self._gui_prompts.qsize() + (self._deferred_gui_prompt is not None) + self._pending_steering_count() >= 32:
             raise ValueError("Studio input queue is full. Wait for queued work to finish.")
         self._gui_prompts.put_nowait(prompt)
+
+    async def linked_accept(self, payload: dict) -> dict:
+        messages = getattr(self, '_linked_messages', None)
+        if messages is None or self.engine is None:
+            raise ValueError('This session does not accept linked messages.')
+        return messages.accept(payload, self._queue_gui_prompt)
+
+    def linked_receipts(self) -> list[dict]:
+        messages = getattr(self, '_linked_messages', None)
+        return messages.receipts() if messages is not None else []
+
+    def linked_agents(self) -> list[dict]:
+        bus = getattr(self, 'bus', None)
+        if bus is None:
+            return []
+        rows = {}
+        for event in bus.conversation.snapshot()['events']:
+            data = event.get('data')
+            if event.get('kind') != 'agent_activity' or not isinstance(data, dict):
+                continue
+            identifier = data.get('run_id')
+            if not isinstance(identifier, str) or not identifier:
+                continue
+            row = rows.setdefault(identifier, {'id': identifier[:100], 'state': 'unknown'})
+            for source, target in (('agent', 'name'), ('model', 'model'), ('status', 'state')):
+                if isinstance(data.get(source), str):
+                    row[target] = data[source][:200]
+            if len(rows) > 32:
+                del rows[next(iter(rows))]
+        return list(rows.values())
+
+    async def _ask_linked(self, prompt: LinkedPrompt) -> bool:
+        messages = self._linked_messages
+        envelope = messages.start(prompt.identifier)
+        token = _activate_link(envelope)
+        capture = self._linked_capture = TurnCapture()
+        try:
+            completed = await self._ask(prompt.text)
+            if self.interrupted:
+                messages.finish(prompt.identifier, 'interrupted', capture.result, 'The linked turn was interrupted.')
+            elif completed is True and capture.saw_result and not capture.failed:
+                messages.finish(prompt.identifier, 'completed', capture.result)
+            else:
+                messages.finish(prompt.identifier, 'failed', capture.result,
+                                capture.error or 'The turn ended without a successful final result.')
+            return completed is True and not self.interrupted and capture.saw_result and not capture.failed
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            messages.finish(prompt.identifier, 'interrupted', capture.result, 'The linked turn was interrupted.')
+            raise
+        except Exception:
+            messages.finish(prompt.identifier, 'failed', capture.result, 'The linked turn failed. Inspect the session transcript.')
+            raise
+        finally:
+            if capture.truncated:
+                messages._receipts[prompt.identifier]['result_truncated'] = True
+            self._linked_capture = None
+            _deactivate_link(token)
 
     def _pending_steering_count(self) -> int:
         return sum(1 for identifier, (_, source) in getattr(self, '_steer_receipts', {}).items()
@@ -1478,11 +1763,12 @@ class App(CouncilControls):
         previous = receipts.get(identifier)
         if previous:
             old_text, source = previous
-            if old_text != prompt:
+            if old_text != prompt or getattr(old_text, 'origin', None) != getattr(prompt, 'origin', None):
                 raise ValueError('Steering receipt ID already belongs to different text.')
             if hasattr(source, 'receipts') and target != {'session_id': source.session, 'turn': source.turn}:
                 raise ValueError('Steering target changed. The original receipt remains saved.')
-            receipt = await source.submit(prompt, identifier) if hasattr(source, 'receipts') else source
+            receipt = await source.submit(prompt, identifier, origin=prompt.origin if isinstance(prompt, InvokedPrompt)
+                                          else None) if hasattr(source, 'receipts') else source
             return {**receipt, 'duplicate': True}
         if len(receipts) >= 256:
             raise ValueError('This session has 256 steering receipts. Use Queue/Send or start a new session.')
@@ -1502,7 +1788,8 @@ class App(CouncilControls):
             # Register before awaiting: retries share the same inbox and ID.
             receipts[identifier] = (prompt, inbox)
             try:
-                return await inbox.submit(prompt, identifier)
+                return await inbox.submit(prompt, identifier, origin=prompt.origin if isinstance(prompt, InvokedPrompt)
+                                          else None)
             except BaseException:
                 if identifier not in inbox.receipts:
                     receipts.pop(identifier, None)
@@ -1561,6 +1848,9 @@ class App(CouncilControls):
                else self.engine.ask)
         async with contextlib.aclosing(ask(prompt)) as events:
             async for ev in events:
+                capture = getattr(self, '_linked_capture', None)
+                if capture is not None:
+                    capture.observe(ev)
                 self._render_event(ev)
                 if ev.kind == 'error':
                     failed = True
@@ -1595,6 +1885,48 @@ class App(CouncilControls):
         return saw_result and not failed
 
     async def _ask(self, prompt: str, *, workflow: QueuedPrompt | None = None) -> bool:
+        messages = getattr(self, '_linked_messages', None)
+        if messages is not None and workflow is None and getattr(self, '_linked_capture', None) is None:
+            import uuid
+            identifier = uuid.uuid4().hex
+            # This receipt describes owner input without reframing it as an
+            # external request. The actual model prompt remains unchanged.
+            bounded = prompt.encode('utf-8', errors='replace')[:65536].decode('utf-8', errors='ignore')[:32768]
+            messages.accept({'id': identifier, 'source': 'owner', 'target': messages.node_id,
+                             'prompt': bounded, 'root_id': identifier, 'visited': [], 'hops': 0}, lambda _: None)
+            return await self._ask_linked(LinkedPrompt(identifier, prompt))
+        return await self._ask_turn(prompt, workflow=workflow)
+
+    async def _follow_local_model(self) -> bool:
+        """The sidebar's Unload model / Load model (2026-10-10) change the local model under open sessions: before a
+        turn, a local session takes the model now served. False: no local model is loaded, so the turn is not sent."""
+        from ..core.backends.openai_compat import OpenAICompatBackend
+        backend = getattr(getattr(self, 'engine', None), 'backend', None)
+        if not isinstance(backend, OpenAICompatBackend) or backend.provider.key != 'machx':
+            return True
+        from ..local import machx
+        served = await asyncio.to_thread(machx.served_model_id)
+        if not served:
+            self.renderer.error('No local model is loaded. Use Load model in the sidebar, then send this again.')
+            return False
+        old = self.engine.model
+        if served == old or old in await backend._served_models():
+            return True
+        try:
+            await self.engine.set_model(served)
+            backend.n_ctx = await backend._probe_n_ctx()     # the new model's window, as a new connection reads it
+            backend._refresh_task_schema()
+        except Exception as exc:
+            self.renderer.error(f'The local model is now {served}, and this session could not switch to it ({exc}). '
+                                'Open a new terminal to use it.')
+            return False
+        self.model = self.engine.model
+        self.renderer.system(f'local model changed: {old} → {served}')
+        return True
+
+    async def _ask_turn(self, prompt: str, *, workflow: QueuedPrompt | None = None) -> bool:
+        if not await self._follow_local_model():
+            return False
         self._project_turn_generation = getattr(self, '_project_turn_generation', 0) + 1
         if workflow is not None:
             from ..workflows import WorkflowService
@@ -1642,6 +1974,7 @@ class App(CouncilControls):
             self.renderer.live_end()
             self.meter.turn_end()  # the pane must stop claiming "decoding"
             self._pending_activity.clear()  # tool_uses with no result never landed
+            self._pending_changed_files.clear()
             self.friction.turn_boundary()  # archive this turn's peak, decay the score
             self.mindmap.age_turn()  # lit memories fade one step
             await self._seal_checkpoint()
@@ -1651,7 +1984,7 @@ class App(CouncilControls):
         return completed is True and not self.interrupted
 
     async def _loop(self, goal: str, max_iterations: int | None = None, *, resume_run_id: str | None = None,
-                    resume_note: str | None = None) -> None:
+                    resume_note: str | None = None, reconciled_actions: dict[str, str] | None = None) -> None:
         from ..core.loop import AutonomousLoop
 
         goal = await self._project_prompt(goal)
@@ -1665,12 +1998,13 @@ class App(CouncilControls):
         self.renderer.live_begin(self._footer)  # footer stays pinned across iterations
         self.renderer.working()
         try:
-            operation = loop.run(goal, resume_run_id=resume_run_id, resume_note=resume_note) if resume_run_id else loop.run(goal)
+            operation = loop.run(goal, resume_run_id=resume_run_id, resume_note=resume_note, reconciled_actions=reconciled_actions) if resume_run_id else loop.run(goal)
             result = await self._run_turn(operation)
         finally:
             self.renderer.live_end()
             self.meter.turn_end()
             self._pending_activity.clear()
+            self._pending_changed_files.clear()
             await self._seal_checkpoint()
         if self.interrupted:
             self.renderer.system("loop interrupted.")
@@ -1727,6 +2061,13 @@ class App(CouncilControls):
         except Exception:
             self.gpu = None
 
+    def _studio_drawer_snapshot(self) -> dict[str, Any]:
+        """Confirmed session accounting, not a filesystem scan or a Git diff."""
+        return {'changes': {'available': True,
+                            'items': [{'path': path} for path in sorted(self.changed_files)[:100]],
+                            'total': len(self.changed_files),
+                            'reason': 'Successful tracked file tools only; shell, recursive folder and external edits are not counted.'}}
+
     def _studio_session_info(self) -> dict[str, Any]:
         inbox = getattr(self.engine, '_steering_inbox', None)
         lanes = getattr(getattr(self.engine, 'backend', None), 'lanes_status', None)   # DREAM-191
@@ -1763,6 +2104,9 @@ class App(CouncilControls):
                 port=config.GUI_PORT,
                 on_prompt=self._queue_gui_prompt,
                 on_steer=self._steer_gui_prompt,
+                on_link_message=self.linked_accept,
+                on_link_receipts=self.linked_receipts,
+                on_link_agents=self.linked_agents,
                 on_optimize_prompt=self._queue_prompt_optimizer,
                 on_workflow=self._queue_workflow,
                 telemetry=self._telemetry_snapshot,
@@ -1772,8 +2116,9 @@ class App(CouncilControls):
                 learning=self._learning_status,
                 on_control=self._runtime_control,
                 follow_model_view=follow_default(),   # the pane follows the model's view (DREAM-104)
-                sleepwalk=True,                       # Sleepwalk schedules fire while Dream is open (DREAM-158)
+                sleepwalk=not bool(os.environ.get('DREAM_DEEPSLEEP_NODE_ID')),
                 artifacts=self.artifacts,             # the content route and the follow-up note (DREAM-233)
+                session_drawer=self._studio_drawer_snapshot,
             )
             url = await self.studio.start()
             set_studio(self.studio)
@@ -1805,6 +2150,13 @@ class App(CouncilControls):
                 self.mode = policy.next_mode(self.mode)
             return {"mode": self.mode, "modes": list(policy.MODES),
                     "labels": policy.MODE_LABEL}
+        if action == 'read_twice':
+            self.read_twice = not self.read_twice
+            return {'read_twice': self.read_twice}
+        if action == 'tile_status':
+            # A DeepSleep tile's Chat-tab row (2026-10-10): this terminal's mode, Read x2 and context, in one call.
+            return {'mode': self.mode, 'modes': list(policy.MODES), 'labels': policy.MODE_LABEL,
+                    'read_twice': self.read_twice, 'context': self._status_data().get('context') or ''}
         if action == 'council_status':
             return self._council_status()
         if action == 'project_open':
@@ -2079,8 +2431,14 @@ class App(CouncilControls):
         source_session = payload.get('session_id')
         restored = (await asyncio.to_thread(library.restored_context, project['id'], source_session)
                     if source_session is not None else None)
+        from ..core.project_bootstrap import initialize
+        instruction_warnings = await asyncio.to_thread(initialize, workspace)
+        for warning in instruction_warnings:
+            self.renderer.system(warning)
+            self.bus.publish(Event("system", warning))
         old = self.engine
         old_workspace = self.workspace
+        old_instruction_warnings = getattr(self, "project_instruction_warnings", [])
         previous = await asyncio.to_thread(library.find_workspace, old_workspace)
         if previous:
             await asyncio.to_thread(library.associate, previous['id'], old.session_id)
@@ -2092,6 +2450,7 @@ class App(CouncilControls):
             await old.stop(consolidate=False)
             self._reset_session_accounting()
             self.workspace = workspace
+            self.project_instruction_warnings = instruction_warnings
             candidate = self._boot_engine()
             candidate.effort = old.effort
             await asyncio.to_thread(library.associate, project['id'], candidate.session_id)
@@ -2106,6 +2465,7 @@ class App(CouncilControls):
                 except BaseException as cleanup_error:
                     exc.add_note(f'Project connection cleanup failed: {cleanup_error}')
             self.workspace = old_workspace
+            self.project_instruction_warnings = old_instruction_warnings
             self._project_open_error = ('Project opening did not complete. The prior connection may be closed. '
                                         'Open a project again before sending work; no prompt was replayed.')
             raise
@@ -2119,6 +2479,8 @@ class App(CouncilControls):
             studio.reset_project_view()
         self.bus.conversation.clear()
         self.bus.publish(Event('history', {'events': [], 'trimmed': False}))
+        for warning in instruction_warnings:
+            self.bus.publish(Event("system", warning))
         message = ('Saved conversation context is ready for your next message. This is a new agent session; '
                    'no tools were replayed.' if restored else 'Project opened in a new chat. Send a message to begin.')
         self.renderer.system(message)
@@ -2143,7 +2505,7 @@ class App(CouncilControls):
             out["inference"] = None
         return out
 
-    async def _next_input(self) -> str | QueuedPrompt | CouncilRequest:
+    async def _next_input(self) -> str | QueuedPrompt | LinkedPrompt | CouncilRequest:
         """The next prompt, from whichever pane produces one first.
 
         With no GUI this is exactly the old call, so the terminal path is
@@ -2151,38 +2513,174 @@ class App(CouncilControls):
         which does mean an unsent line being typed in the terminal is discarded,
         the one visible cost of driving one session from two places.
         """
+        held = self._take_typed()
+        if held is not None:
+            return held
         if self._deferred_gui_prompt is not None:
             line, self._deferred_gui_prompt = self._deferred_gui_prompt, None
             return line
+        draft = getattr(self, "turn_input", None)
+        prefill = "\n".join(filter(None, (getattr(self, "_prefill", ""), draft.text if draft else "")))
+        self._prefill = ""
+        if draft is not None:
+            draft.text = ""
+        start = {"default": prefill} if prefill else {}   # nothing to put back: the prompt call as it always was
         with patch_stdout():
             if self.studio is None:
-                line = await self.session.prompt_async(PROMPT)
-                self.bus.publish(Event("user", line))
-                return line
-            typed = asyncio.ensure_future(self.session.prompt_async(PROMPT))
-            from_gui = asyncio.ensure_future(self._gui_prompts.get())
-            done, pending = await asyncio.wait(
-                {typed, from_gui}, return_when=asyncio.FIRST_COMPLETED
-            )
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            # Prefer terminal input when both arrive together; keep the GUI
-            # message in the queue instead of consuming and silently losing it.
-            winner = typed if typed in done else from_gui
-            if typed in done and from_gui in done:
-                self._deferred_gui_prompt = from_gui.result()
-            if winner is from_gui:
-                line = winner.result()
-                if isinstance(line, CouncilRequest):
+                line = await self.session.prompt_async(PROMPT, **start)
+            else:
+                line = await self._typed_or_gui(start)
+                if not isinstance(line, _Typed):
+                    self._prefill = prefill   # a GUI prompt came first: the text waits for the next prompt box
                     return line
-                self.renderer.system(f"⟵ studio: {(line.text if isinstance(line, QueuedPrompt) else line)[:80]}")
-                return line
-            line = winner.result()
+        # Outside patch_stdout: the optimizer prints Rich output, which its proxy would show as raw codes.
+        line = await self._optimized(line)
+        if line:
             self.bus.publish(Event("user", line))
-            return line
+        return self._read_twice(line)
 
-    async def _shutdown(self) -> None:
+    async def _typed_or_gui(self, start: dict):
+        """The terminal's prompt and the GUI's queue together: a typed line comes back as _Typed."""
+        typed = asyncio.ensure_future(self.session.prompt_async(PROMPT, **start))
+        from_gui = asyncio.ensure_future(self._gui_prompts.get())
+        done, pending = await asyncio.wait(
+            {typed, from_gui}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        # Prefer terminal input when both arrive together; keep the GUI
+        # message in the queue instead of consuming and silently losing it.
+        winner = typed if typed in done else from_gui
+        if typed in done and from_gui in done:
+            self._deferred_gui_prompt = from_gui.result()
+        if winner is from_gui:
+            line = winner.result()
+            if isinstance(line, CouncilRequest):
+                return line
+            self.renderer.system(f"⟵ studio: {(line.text if isinstance(line, (QueuedPrompt, LinkedPrompt)) else line)[:80]}")
+            return line
+        return _Typed(winner.result())
+
+    def _typed_during_turn(self, text: str) -> None:
+        task = asyncio.ensure_future(self._send_typed(text))
+        self._typed_tasks.add(task)
+        task.add_done_callback(self._typed_tasks.discard)
+
+    async def _send_typed(self, text: str) -> None:
+        """Enter in the prompt box while a turn works (the owner, 2026-10-11, as in Claude Code): into the running
+        turn when it can take a message now (an ordinary turn on a local or OpenAI-compatible model; the model reads
+        it after its current step), else it waits and goes as the next prompt, as a /command always does."""
+        import uuid
+        inbox = getattr(self.engine, "_steering_inbox", None)
+        if (not text.lstrip().startswith("/") and getattr(self, "_ordinary_chat_active", False)
+                and inbox is not None and inbox.open):
+            identifier = uuid.uuid4().hex
+            try:
+                await inbox.submit(text, identifier)
+            except ValueError:
+                pass
+            else:
+                self._typed_steered.append((inbox, identifier, text))
+                self.renderer.typed(text, "sent into this turn: the agent reads it after its current step")
+                return
+        self._typed_queue.append(text)
+        self.renderer.refresh_live()
+
+    def _take_typed(self) -> str | None:
+        """What was typed during the last turn and not taken into it, in order: the next prompt, as in Claude Code.
+        After a stop (Ctrl-C) it goes back into the prompt box instead, to send or change."""
+        if not hasattr(self, "_typed_queue"):
+            return None
+        self._typed_queue[:0] = [text for inbox, identifier, text in self._typed_steered
+                                 if inbox.receipts.get(identifier, {}).get("status") == "retained"]
+        self._typed_steered.clear()
+        if not self._typed_queue:
+            return None
+        if self.interrupted:
+            self._prefill = "\n".join(filter(None, (self._prefill, *self._typed_queue)))
+            self._typed_queue.clear()
+            return None
+        line = self._typed_queue.pop(0)
+        self.renderer.typed(line, "typed during the last turn")
+        self.bus.publish(Event("user", line))
+        return self._read_twice(line)
+
+    async def _optimized(self, line: str) -> str:
+        """The prompt optimizer on what was just typed (the owner, 2026-10-11, as their Claude Code mod): two reads;
+        a rewrite waits for Send or Edit. Off, skipped, a short reply, a command, or clear as typed: as typed.
+        "" means nothing is sent now (Edit, or a stop): the text is back in the prompt box."""
+        from ..prompt_optimizer import is_trivial, review_twice
+        if getattr(self, "_as_typed_once", False):
+            self._as_typed_once = False
+            return line
+        if not getattr(self, "prompt_optimizer", False) or self.engine is None or is_trivial(line):
+            return line
+        if self.optimizer_skip_once:
+            self.optimizer_skip_once = False
+            return line
+        from ..core import settings as runtime_settings
+        from ..core.evaluator import ReviewSettings
+        from ..prompt_optimizer import digest
+        try:
+            role = runtime_settings.role("evaluator") or {}   # the Prompt Optimizer page's drafter, when one is set
+            settings = (ReviewSettings.resolve(self.engine, provider=role.get("provider"), model=role.get("model"),
+                                               timeout=60.0, role=None) if role else
+                        ReviewSettings(provider=self.engine.provider, model=self.engine.model,
+                                       profile=self.engine.profile, timeout=60.0))
+            step = lambda n: n == 1 and self.renderer.system("prompt optimizer: reading your prompt twice (Ctrl+C stops)")
+            found = await self._run_turn(review_twice(line, digest(self._recent_rows()), self.workspace, settings, step))
+        except Exception as exc:
+            why = (f"a read took longer than {settings.timeout:.0f} s" if isinstance(exc, TimeoutError)
+                   else f"{type(exc).__name__}: {exc}")
+            self.renderer.system(f"prompt optimizer could not read it ({why}); sent as typed")
+            return line
+        if self.interrupted:
+            self.renderer.system("prompt optimizer stopped; your prompt is back in the box")
+            self._prefill = line
+            return ""
+        if found is None:
+            return line
+        self.renderer.rewritten_prompt(found["rewritten"], found["problems"])
+        if await self._send_or_edit() == "send":
+            return found["rewritten"]
+        self._prefill, self._as_typed_once = found["rewritten"], True
+        return ""
+
+    async def _send_or_edit(self) -> str:
+        """The rewrite's two buttons, as keys: S or Enter sends it; E or Esc puts it in the prompt box to change."""
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.layout import Layout, Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+        keys = KeyBindings()
+        for key, answer in (("enter", "send"), ("s", "send"), ("S", "send"), ("e", "edit"), ("E", "edit"),
+                            ("escape", "edit"), ("c-c", "edit")):
+            keys.add(key, eager=True)(lambda event, answer=answer: event.app.exit(result=answer))
+        bar = HTML('  <b><style fg="#edbd62">[S] Send</style></b>   <style fg="#f5dfb6">[E] Edit</style>'
+                   '   <style fg="#a89a87">Enter sends · Esc edits</style>')
+        return await Application(layout=Layout(Window(FormattedTextControl(bar), height=1)),
+                                 key_bindings=keys, erase_when_done=True).run_async()
+
+    def _recent_rows(self) -> list[tuple[str, str]]:
+        """This session's recent messages, for the optimizer to tell whether the work has a plan."""
+        rows = []
+        for event in self.bus.conversation.snapshot()["events"]:
+            data = event.get("data")
+            if event.get("kind") == "user":
+                rows.append(("user", data.get("text", "") if isinstance(data, dict) else str(data or "")))
+            elif event.get("kind") == "assistant_done" and isinstance(data, str):
+                rows.append(("assistant", data))
+        return rows[-6:]
+
+    def _read_twice(self, line: str) -> str:
+        """Read x2 for what is typed in this terminal, as the Chat tab does for its box (gui/server.py): the
+        request, then again. A page's prompt comes doubled already; a command stays as typed."""
+        if not self.read_twice or not line.strip() or line.lstrip().startswith("/"):
+            return line
+        from ..gui.server import READ_AGAIN
+        return line + READ_AGAIN + line
+
+    async def _shutdown(self, *, allow_consolidation: bool = True) -> None:
         self._accepting_input = False
         pending = getattr(self, '_council_pending', None)
         if pending is not None and not pending.future.done():
@@ -2208,8 +2706,8 @@ class App(CouncilControls):
         # path threads that flag as True by default, which would silently
         # auto-consolidate. Only DREAM_CONSOLIDATE=1 forces it on; otherwise ask.
         decided = getattr(self, "_exit_consolidate", None)
-        commit = config.CONSOLIDATE_ON_EXIT or decided is True
-        if self.engine and not commit and decided is None:
+        commit = allow_consolidation and (config.CONSOLIDATE_ON_EXIT or decided is True)
+        if allow_consolidation and self.engine and not commit and decided is None:
             ans = await self._read_answer(
                 "  Conversation is saved. Generate a summary and commit this session to long-term memory? "
                 "This optional model pass may take several minutes. [y/N] · ")
@@ -2321,6 +2819,14 @@ class App(CouncilControls):
                 rows = settings.effective(provider=provider, model=model, session=session)
                 c.print(printable(f"resolved for provider {provider}, model {model or '(provider default)'}"),
                         style="dim", markup=False, highlight=False)
+                # The window this session fills and compacts against, as the model server reports it (the owner,
+                # 2026-10-11, read numeric.ctx_window's 200000 below as this session's: it is Claude's fallback only).
+                backend = getattr(self.engine, "backend", None)
+                window = backend._window() if hasattr(backend, "_window") else getattr(backend, "n_ctx", None)
+                if verb == "show" and window:
+                    c.print(f"context window in use: {window:,} tokens, as the model server reports it "
+                            "(numeric.ctx_window below is only Claude's fallback)", style="dim", markup=False,
+                            highlight=False)
                 if verb == "get":
                     if rest not in rows:
                         c.print(f"no setting named {rest or '(none)'}   usage: /settings get <key>", markup=False)
@@ -2363,7 +2869,46 @@ class App(CouncilControls):
         except (ValueError, OSError) as exc:
             c.print(printable(f"settings: {exc}"), style="red", markup=False, highlight=False)
 
+    async def _choose_terminal_model(self) -> str | None:
+        """Choose offline metadata; never probe providers merely to open a menu."""
+        from prompt_toolkit.shortcuts import radiolist_dialog
+        from prompt_toolkit.key_binding import merge_key_bindings
+
+        options = model_options(self.provider, self.engine.model)
+        if not options:
+            self.renderer.console.print(Text(
+                'No model suggestions for this provider. Use /model MODEL_ID to select one.', style='dim'))
+            return None
+        dialog = radiolist_dialog(
+            title='Choose model · ' + self.provider,
+            text='Suggestions are not a check of account access. Escape cancels.\n'
+                 'Use /model MODEL_ID for a custom model.',
+            values=options,
+            default=self.engine.model if any(key == self.engine.model for key, _ in options) else None,
+            ok_text='Use model', cancel_text='Cancel')
+        keys = KeyBindings()
+
+        @keys.add('escape')
+        @keys.add('c-c')
+        def cancel(event):
+            event.app.exit(result=None)
+
+        dialog.key_bindings = merge_key_bindings([dialog.key_bindings, keys])
+        return await dialog.run_async()
+
     async def _command(self, line: str) -> bool:
+        if line.startswith(('/skill ', '/plugin ')):
+            from ..core.invocations import expand_invocation
+            try:
+                prompt = await asyncio.to_thread(expand_invocation, line)
+            except ValueError as exc:
+                self.renderer.error(str(exc))
+                return False
+            from ..core import turn_origin
+
+            with turn_origin.generated(prompt.origin):   # Dream's invocation text around the owner's task
+                await self._ask(prompt)
+            return False
         """Return True to quit."""
         parts = line[1:].split(maxsplit=1)
         if not parts:  # a bare "/" (or "/   ") must not crash the REPL
@@ -2382,6 +2927,12 @@ class App(CouncilControls):
             return True
         if cmd == "help":
             c.print(HELP)
+        elif cmd == "changes":
+            c.print(Text(f"Files changed: {len(self.changed_files)}  |  Tool calls: {self.tool_count}",
+                         style="bold #f5cf70"))
+            c.print(Text("Successful tracked file tools in this session; not a Git diff. Shell, recursive folder and external edits are not counted.", style="dim"))
+            for path in sorted(self.changed_files):
+                c.print(Text("  " + path, style="#ff9a52"))
         elif cmd == "clear":
             c.clear()
         elif cmd == "status":
@@ -2434,18 +2985,19 @@ class App(CouncilControls):
             for row in await asyncio.to_thread(list_runs):
                 c.print(Text(f"{row['id']} · {row.get('status', 'unknown')} · {row.get('goal', '')}"))
         elif cmd == "loop-resume":
-            run_id, _, note = arg.strip().partition(" ")
-            if not run_id:
-                self.renderer.info("/loop-resume <run-id> [what you verified about interrupted actions]")
+            if not arg.strip():
+                self.renderer.info('/loop-resume <run-id> --reconcile ACTION_ID="verified report" [--note "resume note"]')
             else:
                 from ..core.run_state import RunState
+                from ..core.run_resume import resume_arguments
                 try:
+                    run_id, note, reconciled = resume_arguments(arg)
                     journal = RunState(config.LOOP_DIR, run_id)
                     try:
                         goal = journal.state["goal"]
                     finally:
                         journal.close()
-                    await self._loop(goal, resume_run_id=run_id, resume_note=note or None)
+                    await self._loop(goal, resume_run_id=run_id, resume_note=note, reconciled_actions=reconciled)
                 except (OSError, ValueError, KeyError) as exc:
                     self.renderer.error(str(exc))
         elif cmd == "loop":
@@ -2503,6 +3055,10 @@ class App(CouncilControls):
             for name, a in subagents().items():
                 c.print(f"[green]{name}[/green]: {a.description}")
         elif cmd == "model":
+            if not arg:
+                arg = await self._choose_terminal_model()
+                if not arg:
+                    return
             if arg:
                 try:
                     await self.engine.set_model(arg)
@@ -2510,8 +3066,6 @@ class App(CouncilControls):
                     c.print(f"[green]model → {self.model}[/green]")
                 except Exception as e:
                     c.print(f"[red]could not switch model: {e}[/red]")
-            else:
-                c.print(f"model: {self.engine.model or '(CLI default)'}")
         elif cmd == "effort":
             if not arg:
                 cur = _effort_label(self.engine.effort) if self.engine.effort else "default"
@@ -2656,6 +3210,18 @@ class App(CouncilControls):
                 c.print("usage: /toolcalls <n|off>")
         elif cmd == "instructions":
             await self._instructions(arg)
+        elif cmd == "optimizer":
+            a = arg.lower()
+            if a in ("on", "off"):
+                self.prompt_optimizer = a == "on"
+            elif a == "skip":
+                self._toggle_skip_once()
+            elif not a:
+                self._toggle_optimizer()
+            else:
+                c.print("usage: /optimizer [on|off|skip]")
+            c.print(Text("prompt optimizer " + ("off" if not self.prompt_optimizer else
+                         "on, next message as typed" if self.optimizer_skip_once else "on"), style="green"))
         elif cmd == "thoughts":
             a = arg.lower().strip()
             if a in ("on", "persist", "persistent"):
@@ -2668,12 +3234,21 @@ class App(CouncilControls):
                 c.print("usage: /thoughts on|off")
         elif cmd == "council":
             moe_cfg = getattr(self.engine, "_moe", None)
-            if moe_cfg is None:
-                c.print("[dim]Choose advisors using Council in Studio, or start a Dream MoE session in the terminal picker.[/dim]")
+            if moe_cfg is None or not moe_cfg.advisors:
+                c.print("[dim]No Council advisors are configured for this terminal. No request was sent. "
+                        "/council asks configured advisors; it does not message connected DeepSleep terminals. "
+                        "To contact the terminals already on your board, use the Message Board.[/dim]")
             elif not arg:
                 c.print("usage: /council <question>")
             else:
                 await self._run_turn(self._consult_council(arg))
+        elif cmd == "login":
+            # DREAM-246: no model turn and nothing run in this terminal. In the desktop window this asks for the
+            # separate sign-in window (the same request the Council Sign in button makes); elsewhere it prints the
+            # provider's fixed command to run in a terminal of the owner's own.
+            from ..core import provider_login
+            for text in provider_login.slash_lines(arg, getattr(self, "studio", None)):
+                c.print(text, markup=False, highlight=False)
         elif cmd == "critique":
             from . import critique_cmd
             await critique_cmd.command(self, arg)
@@ -2696,7 +3271,7 @@ class App(CouncilControls):
                 await asyncio.to_thread(gpu.stop)  # joins a thread — not on the loop
             state = "on" if self.show_monitor else "off"
             c.print(f"[cyan]monitor {state}[/cyan] "
-                    f"[dim]— GPU + inference speed pane on the right[/dim]")
+                    f"[dim]— Ctrl+T shows or hides detailed terminal status[/dim]")
         elif cmd == "plan":
             if self.plan.has_tasks():
                 c.print(self.plan.tree())

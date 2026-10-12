@@ -1,0 +1,24 @@
+#dream-deepsleep .ds-session-drawer{position:fixed;z-index:10000;display:flex;flex-direction:column;box-sizing:border-box;overflow:hidden;background:#15120e;color:#f2ede3;border:1px solid #51412b;border-radius:7px;box-shadow:0 8px 20px #0006;font:13px/1.45 system-ui,sans-serif}
+#dream-deepsleep .ds-session-head{display:grid;grid-template-columns:1fr auto;align-items:center;gap:2px 10px;padding:11px 12px 5px;border:0;background:transparent;position:static;min-height:0}
+#dream-deepsleep .ds-session-brand{color:#bfb39f;font-size:11px;grid-column:1}
+#dream-deepsleep .ds-session-head h2{color:#f2d38e;font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0;grid-column:1}
+#dream-deepsleep .ds-session-head button{grid-column:2;grid-row:1/3;font-size:18px;padding:0 6px;background:transparent;border-color:transparent;color:#e9aa62}
+#dream-deepsleep .ds-session-title,#dream-deepsleep .ds-session-status{margin:0;padding:0 12px 6px;font-size:12px;color:#bfb39f;overflow-wrap:anywhere}
+#dream-deepsleep .ds-session-title{color:#efc088}
+#dream-deepsleep .ds-session-body{min-height:0;overflow:auto;padding:0 12px 10px;scrollbar-color:#6c5437 #15120e}
+#dream-deepsleep .ds-session-section{border-top:1px solid #30271c;padding:7px 0}
+#dream-deepsleep .ds-session-section>summary{cursor:pointer;font-weight:500;color:#e5cfaa}
+#dream-deepsleep .ds-session-note{font-size:12px;color:#bfb39f;margin:7px 0;overflow-wrap:anywhere}
+#dream-deepsleep .ds-session-item{border-bottom:1px solid #30271c;padding:6px 0}
+#dream-deepsleep .ds-session-item summary{cursor:pointer;overflow-wrap:anywhere;color:#f2ede3}
+#dream-deepsleep .ds-session-item-status{font-size:11px;color:#e6c177;margin-left:7px}
+#dream-deepsleep .ds-session-item pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,monospace;color:#c7b99f;margin:8px 0}
+#dream-deepsleep .ds-session-section>button{font-size:11px;color:#e9aa62;background:transparent;border-color:transparent;padding:4px 0;margin-top:4px}
+#dream-deepsleep .ds-session-drawer summary:focus-visible{outline:1px solid #e9aa62;outline-offset:2px}
+
+#dream-deepsleep .ds-session-icon{display:inline-block;width:18px;color:#d8a15e}
+#dream-deepsleep .ds-session-item-name{overflow-wrap:anywhere}
+#dream-deepsleep .ds-session-section[data-stale=true]{opacity:.65}
+#dream-deepsleep .ds-session-about{margin-top:6px;font-size:11px;color:#bfb39f}
+#dream-deepsleep .ds-session-about>summary{cursor:pointer;color:#bfb39f}
+#dream-deepsleep .ds-session-about>p{margin:6px 0 0;overflow-wrap:anywhere}

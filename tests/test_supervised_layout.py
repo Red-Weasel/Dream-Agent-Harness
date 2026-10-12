@@ -469,7 +469,7 @@ def test_supervise_builds_the_ie_supervise_command_on_dreams_front(monkeypatch, 
     assert proc.pid == 4242
     [(command, keep_hot, kwargs)] = spawned
     assert keep_hot is True and kwargs["cwd"] == machx.MACHX_DIR and kwargs["start_new_session"] is True
-    assert kwargs["grace_s"] == machx.SUPERVISOR_STOP_S == 600.0       # the guard's SIGKILL waits for its shutdown
+    assert kwargs["grace_s"] == machx.SUPERVISOR_STOP_S == 600.0       # the guard waits this long for its shutdown
     assert command[:2] == ["bash", "-lc"]
     assert command[-1].endswith(f"source scripts/env.sh && exec ./build/src/ie supervise --config {layout} "
                                 "--host 127.0.0.1 --port 11470")
@@ -480,8 +480,10 @@ def test_supervise_builds_the_ie_supervise_command_on_dreams_front(monkeypatch, 
 
 
 def test_the_engine_guard_gives_a_supervisor_its_own_shutdown_time(tmp_path, monkeypatch):
-    """Gate finding 4: if Dream dies, the guard's SIGKILL 10 s after SIGTERM would orphan children still loading.
-    A supervisor's watchdog is started with SUPERVISOR_STOP_S; a plain engine keeps the default grace."""
+    """Gate finding 4: if Dream dies, a guard that gave up 10 s after SIGTERM would misreport a supervisor whose
+    children are still stopping (and, before DREAM-253, SIGKILLed it, orphaning them). A supervisor's watchdog is
+    started with SUPERVISOR_STOP_S; a plain engine keeps the default grace. Neither is ever SIGKILLed.
+    (The `proc.kill()` below is this test's own cleanup of its `sleep` stand-ins, not the product's.)"""
     import dream.local.engine_guard as guard
     monkeypatch.delenv(guard.GRACE_ENV, raising=False)
     log = tmp_path / "machx.log"

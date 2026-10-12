@@ -433,3 +433,528 @@ async def test_same_named_project_folders_stay_apart_and_a_number_title_is_text(
     items = {i["name"]: i for i in (await client.get("/api/memory")).json()["items"] if i["scope"] == "global"}
     assert items["site-a"]["project"] != items["site-b"]["project"]
     assert items["numbered"]["title"] == "2026"
+
+
+# --- DREAM-257: effective context ---------------------------------------------------------------------------------
+
+@pytest.fixture
+def context_server(tmp_path, monkeypatch):
+    """A Studio server whose session can change under it, and an empty journal of its own."""
+    from dream.core import context_inspection
+    monkeypatch.setattr(context_inspection, "JOURNAL", context_inspection.Journal(max_records=2))
+    for name in (context_inspection.ENV_TOKENIZER, context_inspection.ENV_TOKENIZER_MODEL, "DREAM_CONTEXT_INSPECTION"):
+        monkeypatch.delenv(name, raising=False)
+    session = {"session_id": "sess-A", "workspace": str(tmp_path), "model": "fixture"}
+    srv = StudioServer(EventBus(), on_prompt=lambda p: None, session=lambda: session)
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://127.0.0.1",
+                               headers={"X-Dream-Token": srv.token})
+    return client, srv, session
+
+
+def _sent_request(session_id, text="PROMPT-MARKER the request text"):
+    """One recorded attempt, as the transport records it; its request id."""
+    from dream.core import context_inspection
+    image = "data:image/png;base64," + "A" * 2000
+    payload = {"model": "fixture-model", "tools": [], "messages": [
+        {"role": "system", "content": "You are a fixture."},
+        {"role": "user", "content": [{"type": "text", "text": text},
+                                     {"type": "image_url", "image_url": {"url": image}}]},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {
+            "name": "run_bash", "arguments": '{"command": "echo ARG-SECRET-VALUE"}'}}]}]}
+    before = {row["request_id"] for row in context_inspection.JOURNAL.list(session_id)}
+    handle = context_inspection.capture(payload, {"recipient": "lead", "origin": "lead_turn"},
+                                        session_id=session_id, private_id="standalone-backend", transport="post")
+    handle.response(200)
+    handle.usage({"prompt_tokens": 21, "completion_tokens": 3})
+    after = [row["request_id"] for row in context_inspection.JOURNAL.list(session_id)]
+    return next((request_id for request_id in after if request_id not in before), handle._id)
+
+
+async def test_an_empty_context_says_what_is_not_observed_and_is_never_cached(context_server):
+    client, srv, session = context_server
+    response = await client.get("/api/lucid/context")
+    data = response.json()
+    assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+    assert data["records"] == [] and data["session_id"] == "sess-A"
+    assert "SDK or CLI is not observed" in data["empty_note"] and "send a new request" in data["empty_note"]
+    assert data["coverage"]["native_sdk_or_cli"] == "not_observed" and data["harness"].startswith("dream-context-")
+    # what this is, and what it is not: a bounded preview journal, with the package's version beside the inspector's
+    import dream
+    assert data["journal"]["kind"] == "bounded_preview_journal" and "not a copy of the request" in data["journal"]["note"]
+    assert data["package"]["version"] == dream.__version__ and dream.__version__ not in data["harness"]
+    assert "uncommitted" in data["package"]["note"]
+    joined = " ".join(data["not_counted"])
+    assert all(word in joined for word in ("reasoning_content", "tool call", "multipart", "template"))
+    assert data["limits"]["bytes_per_record"] <= data["limits"]["bytes_per_session"]
+    assert data["limits"]["components_per_record"] > 0
+    session.pop("session_id")                         # a server with no session id answers the same, with nothing
+    assert (await client.get("/api/lucid/context")).json()["records"] == []
+
+
+async def test_the_context_routes_need_the_header_token_and_this_pages_origin(context_server):
+    client, srv, session = context_server
+    request_id = _sent_request("sess-A")
+    async with httpx.AsyncClient(transport=client._transport, base_url="http://127.0.0.1") as anonymous:
+        for path in ("/api/lucid/context", f"/api/lucid/context/{request_id}"):
+            refused = await anonymous.get(path)
+            assert refused.status_code == 401 and refused.headers["cache-control"] == "no-store"
+            assert (await anonymous.get(path, params={"token": srv.token})).status_code == 401    # never from a URL
+            assert (await anonymous.get(path, headers={"X-Dream-Token": "wrong"})).status_code == 401
+    for path in ("/api/lucid/context", f"/api/lucid/context/{request_id}"):
+        # another page's origin, an opaque one, and every fetch a browser says is not this page's own
+        for headers in ({"origin": "https://unrelated.example"}, {"origin": "null"},
+                        {"origin": "http://127.0.0.1:1"}, {"origin": "http://127.0.0.1.unrelated.example"},
+                        {"sec-fetch-site": "cross-site"}, {"sec-fetch-site": "same-site"},
+                        {"origin": "http://127.0.0.1", "sec-fetch-site": "cross-site"}):
+            crossed = await client.get(path, headers=headers)
+            assert crossed.status_code == 403 and "PROMPT-MARKER" not in crossed.text
+            assert crossed.headers["cache-control"] == "no-store" and "records" not in crossed.text
+        for headers in ({"origin": "http://127.0.0.1"}, {"origin": "http://127.0.0.1", "sec-fetch-site": "same-origin"},
+                        {"sec-fetch-site": "none"}):
+            assert (await client.get(path, headers=headers)).status_code == 200
+        # reading only: any other method is refused here, and that refusal is not cacheable either
+        for method in ("POST", "PUT", "DELETE"):
+            refused = await client.request(method, path, json={})
+            assert refused.status_code == 405 and refused.headers["cache-control"] == "no-store"
+            assert "PROMPT-MARKER" not in refused.text
+
+
+async def test_options_and_trace_on_the_context_routes_are_refused_by_the_route_itself_and_never_cached(
+        context_server):
+    """Final review (low priority): OPTIONS and TRACE were answered by the framework's own 405, without no-store.
+
+    Two layers refuse here, and they promise different things. The context route answers every method that
+    reaches it (405, no-store, Allow: GET; 401 without the token; 403 for another page's origin). The server's
+    boundary sits in front of the route: it lets the read methods (GET/HEAD/OPTIONS) through, and refuses a
+    foreign-Origin TRACE or PATCH itself, before the route is reached, with a 403 and an error-only body. That
+    boundary answer carries no journal data, but it has never promised a Cache-Control header, so none is
+    required of it here (and none is forbidden: the boundary may add no-store later).
+    """
+    client, srv, session = context_server
+    request_id = _sent_request("sess-A")
+    journal_data = ("PROMPT-MARKER", "ARG-SECRET-VALUE", "You are a fixture.")
+    for path in ("/api/lucid/context", f"/api/lucid/context/{request_id}"):
+        for method in ("OPTIONS", "TRACE", "PATCH"):
+            # this page's own request reaches the route, which refuses it as read-only and not cacheable
+            refused = await client.request(method, path)
+            assert refused.status_code == 405 and refused.headers["cache-control"] == "no-store"
+            assert refused.headers["allow"] == "GET"
+            assert refused.json() == {"error": "Context inspection is read-only."}
+            assert "PROMPT-MARKER" not in refused.text and "records" not in refused.text
+            # another page's origin is 403 whichever layer answers, and never with anything from the journal
+            crossed = await client.request(method, path, headers={"origin": "https://unrelated.example"})
+            assert crossed.status_code == 403
+            assert all(marker not in crossed.text for marker in journal_data)
+            if method == "OPTIONS":
+                # a read method for the boundary, so the route's own origin check answers: no-store, as for a read
+                assert crossed.headers["cache-control"] == "no-store" and "records" not in crossed.text
+            else:
+                # the boundary refuses first: an error-only body with a reason, and no record, list or preview
+                body = crossed.json()
+                assert isinstance(body, dict) and set(body) == {"error"}
+                assert isinstance(body["error"], str) and body["error"]
+        # the route's token check comes first, as for a read: no token is 401 and no-store
+        async with httpx.AsyncClient(transport=client._transport, base_url="http://127.0.0.1") as anonymous:
+            for method in ("OPTIONS", "TRACE"):
+                unknown = await anonymous.request(method, path)
+                assert unknown.status_code == 401 and unknown.headers["cache-control"] == "no-store"
+        assert (await client.get(path)).status_code == 200           # reading is as it was
+
+
+async def test_a_failure_inside_the_context_routes_is_a_fixed_no_store_answer(context_server, monkeypatch):
+    from dream.gui import lucid_routes
+    client, srv, session = context_server
+    _sent_request("sess-A")
+
+    def broken(session_id, request_id=None):
+        raise RuntimeError("could not read /home/owner/.secret PROMPT-MARKER")
+    monkeypatch.setattr(lucid_routes, "context_view", broken)
+    failed = await client.get("/api/lucid/context")
+    assert failed.status_code == 500 and failed.headers["cache-control"] == "no-store"
+    assert failed.json() == {"error": "Context inspection is unavailable."}
+
+
+async def test_the_list_has_no_prompt_text_and_the_detail_is_bounded_with_no_image_or_argument(context_server):
+    client, srv, session = context_server
+    request_id = _sent_request("sess-A")
+    listed = await client.get("/api/lucid/context")
+    (row,) = listed.json()["records"]
+    assert (row["request_id"], row["recipient"], row["model"], row["attempt"], row["status"]) == (
+        request_id, "lead", "fixture-model", 1, "response_received")
+    assert row["usage"]["prompt_tokens"] == 21 and row["tokenizer_reason"] == "tokenizer_not_configured"
+    assert "PROMPT-MARKER" not in listed.text and "components" not in row and "preview" not in str(row)
+    detail = await client.get(f"/api/lucid/context/{request_id}", params={"path": "/etc/passwd"})
+    record = detail.json()["record"]
+    assert detail.status_code == 200 and detail.headers["cache-control"] == "no-store"
+    assert detail.json()["session_id"] == "sess-A" and record["request_id"] == request_id
+    system, user, part, reply, call = record["components"]
+    assert (system["source"], system["preview"], system["tokens"]) == ("unknown", "You are a fixture.", None)
+    assert (user["content_form"], user["images"], user["tokens_reason"]) == (
+        "multipart", 1, "multipart_text_counted_per_part")
+    assert part["preview"].startswith("PROMPT-MARKER") and len(part["sha256"]) == 64
+    # the call's arguments are in the model's context: their own entry, sized and hashed, never shown, never zero
+    assert (reply["tokens"], reply["tokens_reason"]) == (None, "component_has_no_text")
+    assert (call["kind"], call["name"], call["preview"], call["preview_reason"]) == (
+        "tool_call", "run_bash", "", "arguments_not_shown")
+    assert call["bytes"] == len('{"command": "echo ARG-SECRET-VALUE"}') and call["tokens"] is None
+    assert call["tokens_reason"] == "tokenizer_not_configured"
+    assert record["tools"]["tokens_reason"] == "request_has_no_tools" and record["package_version"]
+    assert detail.json()["journal"]["kind"] == "bounded_preview_journal"
+    for forbidden in ("A" * 64, "base64,", "ARG-SECRET-VALUE", "root:"):
+        assert forbidden not in detail.text
+    assert not [key for key in record if key.startswith("_")]
+
+
+async def test_another_sessions_a_standalone_backends_and_an_evicted_record_are_all_404(context_server):
+    client, srv, session = context_server
+    mine = _sent_request("sess-A")
+    theirs = _sent_request("sess-B", "OTHER-SESSION-TEXT")
+    standalone = _sent_request(None, "STANDALONE-TEXT")          # no session bound: kept under a private identity
+    assert [row["request_id"] for row in (await client.get("/api/lucid/context")).json()["records"]] == [mine]
+    for request_id in (theirs, standalone, "0" * 32, "not-an-id", "standalone-backend"):
+        missing = await client.get(f"/api/lucid/context/{request_id}")
+        assert missing.status_code == 404 and missing.headers["cache-control"] == "no-store"
+        assert "OTHER-SESSION-TEXT" not in missing.text and "STANDALONE-TEXT" not in missing.text
+    # an id is looked up in memory, never used as a path
+    assert (await client.get("/api/lucid/context/..%2F..%2Fetc%2Fpasswd")).status_code in (400, 404)
+    session["session_id"] = "sess-B"                               # the server now shows the other session
+    assert (await client.get(f"/api/lucid/context/{theirs}")).status_code == 200
+    assert (await client.get(f"/api/lucid/context/{mine}")).status_code == 404
+    session["session_id"] = "standalone-backend"                   # a private identity is not a session to read
+    assert (await client.get("/api/lucid/context")).json()["records"] == []
+    assert (await client.get(f"/api/lucid/context/{standalone}")).status_code == 404
+    session["session_id"] = "sess-A"                               # two more requests: the journal here keeps two
+    newer = [_sent_request("sess-A"), _sent_request("sess-A")]
+    assert (await client.get(f"/api/lucid/context/{mine}")).status_code == 404
+    listed = [row["request_id"] for row in (await client.get("/api/lucid/context")).json()["records"]]
+    assert listed == newer[::-1]
+
+
+@pytest.mark.parametrize("width", [1400, 390])
+async def test_the_effective_context_panel_reads_on_refresh_only_and_shows_everything_as_text(page_server, width):
+    import asyncio
+    import json as _json
+    import re
+    from playwright.async_api import async_playwright, expect
+    srv, root, ws = page_server
+    first, second = "a" * 32, "b" * 32
+    unsafe = '<img src=x onerror="window.__xss=1">'
+
+    def row(request_id, attempt):
+        return {"request_id": request_id, "group_id": "c" * 32, "attempt": attempt, "created_at": 1790000000.0,
+                "transport": "stream", "provider": "fixture", "turn": 1, "recipient": unsafe, "origin": "lead_turn",
+                "model": '"><script>window.__xss=1</script>', "worker_id": None, "agent": None, "window": None,
+                "window_basis": "not_known", "status": "response_received", "phase": "body", "http_status": 200,
+                "error_type": None, "body": "done_seen"}
+
+    def record(request_id):
+        return {**row(request_id, 2 if request_id == first else 1),
+                "usage": {"observed": True, "observations": 1, "reason": None, "prompt_tokens": 1234,
+                          "prompt_tokens_reason": None, "cached_tokens": None, "cached_tokens_reason": "not_reported",
+                          "completion_tokens": 7, "completion_tokens_reason": None},
+                "tokenizer": {"method": None, "reason": "tokenizer_not_configured", "digest": None,
+                              "bound_model": None},
+                "request": {"messages": 2, "tools": 0, "images": 0, "bytes": 400, "components_omitted": 0},
+                "components": [{"kind": "system_section", "message_index": 0, "role": "system", "source": unsafe,
+                                "detail": {"file": "DREAM.md"}, "start": 0, "end": 40, "sha256": "d" * 64,
+                                "bytes": 40, "chars": 40, "tokens": None, "tokens_reason": "tokenizer_not_configured",
+                                "preview": "<script>window.__xss=2</script> SECTION-PREVIEW " + request_id[:4],
+                                "preview_truncated": True, "preview_omitted": False}]}
+
+    calls, state = [], {"fail": False, "hold": None}
+
+    async def context(route):
+        url = route.request.url
+        calls.append(url)
+        if state["hold"] is not None:
+            await state["hold"].wait()
+        if state["fail"]:
+            await route.fulfill(status=500, content_type="application/json",
+                                body=_json.dumps({"error": "Context inspection is unavailable."}))
+        elif url.endswith("/api/lucid/context"):
+            await route.fulfill(status=200, content_type="application/json", body=_json.dumps({
+                "session_id": "sess-A", "records": [row(first, 2), row(second, 1)], "empty_note": None,
+                "coverage": {"note": "COVERAGE-NOTE"}, "caveats": ["CAVEAT-ONE"]}))
+        else:
+            await route.fulfill(status=200, content_type="application/json", body=_json.dumps({
+                "session_id": "sess-A", "record": record(url.rsplit("/", 1)[1]), "caveats": ["CAVEAT-ONE"]}))
+
+    url = await srv.start()
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(args=["--disable-gpu"])
+            page = await browser.new_page(viewport={"width": width, "height": 900})
+            page.set_default_timeout(5000)
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            await page.route(re.compile(r"/api/lucid/context(/[0-9a-f]{32})?$"), context)
+            await page.goto(url.replace("/#", "/?companion=1#"))
+            await page.locator("#dream-nav-memory").click()
+            lucid = page.locator("#dream-memory-page")
+            panel = lucid.locator(".lucid-context")
+            await expect(panel.locator("h2")).to_have_text("Effective context")
+            # below the two columns, before the response styles
+            order = await page.evaluate("[...document.querySelector('.lucid-board').children].map(n =>"
+                                        " n.classList.contains('lucid-column') ? 'column' :"
+                                        " n.classList.contains('lucid-context') ? 'context' :"
+                                        " n.querySelector('.lucid-style-grid') ? 'styles' : 'other')")
+            assert order == ["column", "column", "context", "styles"]
+            await expect(lucid.locator(".lucid-file")).to_have_count(7)
+            await page.wait_for_timeout(400)
+            assert calls == []                                    # nothing is read until the owner asks
+            await panel.locator(".lucid-context-refresh").click()
+            await expect(panel.locator("select option")).to_have_count(2)
+            await expect(panel.locator("select option").first).to_contain_text("<img src=x")
+            await expect(panel.locator("select option").first).to_contain_text("attempt 2")
+            await expect(panel).to_contain_text("Prompt tokens the server reported for this attempt: 1,234")
+            await expect(panel).to_contain_text("unknown (the server did not report it)")
+            await expect(panel).to_contain_text("no local tokenizer is configured")
+            await expect(panel).to_contain_text("SECTION-PREVIEW aaaa")
+            await expect(panel).to_contain_text("d" * 64)
+            await expect(panel).to_contain_text("truncated and redacted")
+            await expect(panel).to_contain_text("CAVEAT-ONE")
+            await expect(panel.locator("[role=status]")).to_contain_text("COVERAGE-NOTE")
+            # every string from the server is text: nothing became an element and nothing ran
+            await expect(panel.locator("img, script, iframe")).to_have_count(0)
+            assert await page.evaluate("window.__xss === undefined")
+            assert not await page.evaluate(
+                "document.documentElement.scrollWidth > document.documentElement.clientWidth")
+            assert len(calls) == 2 and calls[1].endswith(first)
+            await panel.locator("select").select_option(second)
+            await expect(panel).to_contain_text("SECTION-PREVIEW bbbb")
+            assert len(calls) == 3 and calls[2].endswith(second)
+            await page.wait_for_timeout(400)
+            assert len(calls) == 3                                # and it does not poll afterwards
+            # an error is shown in the panel and the board stays
+            state["fail"] = True
+            await panel.locator(".lucid-context-refresh").click()
+            await expect(panel.locator("[role=status]")).to_contain_text("Context inspection is unavailable.")
+            await expect(panel.locator("[role=status]")).to_have_attribute("data-error", "true")
+            await expect(lucid.locator(".lucid-column")).to_have_count(2)
+            await expect(lucid.locator(".library-status")).not_to_contain_text("unavailable")
+            state["fail"] = False
+            # an answer that arrives after the owner opened an editor is dropped: the editor stays
+            state["hold"] = asyncio.Event()
+            await panel.locator(".lucid-context-refresh").click()
+            await lucid.locator(".lucid-file[data-key='global/instructions']").click()
+            editor = lucid.locator(".lucid-editor textarea")
+            await editor.fill("KEEP THIS")
+            state["hold"].set()
+            await page.wait_for_timeout(400)
+            await expect(editor).to_have_value("KEEP THIS")
+            await expect(lucid.locator(".lucid-context")).to_have_count(0)
+            assert errors == []
+            # an answer for a session that has since changed is dropped too
+            async def accept(dialog):
+                await dialog.accept()
+            page.on("dialog", accept)
+            await lucid.locator(".lucid-editor button", has_text="Back to Lucid Control").click()
+            await expect(panel.locator("h2")).to_have_text("Effective context")
+            state["hold"] = asyncio.Event()
+            await panel.locator(".lucid-context-refresh").click()
+            await expect(panel.locator("[role=status]")).to_contain_text("Reading")
+            await page.evaluate("window.dispatchEvent(new CustomEvent('dream:session'))")
+            state["hold"].set()
+            await page.wait_for_timeout(400)
+            await expect(lucid.locator(".lucid-context select")).to_have_count(0)
+            await expect(lucid.locator(".lucid-context details")).to_have_count(0)
+            await browser.close()
+    finally:
+        await srv.stop()
+
+
+async def test_the_effective_context_panel_never_shows_one_sessions_context_under_another(page_server):
+    """Review findings 6 and 11: the server's session identity is compared with the one this page was showing when
+    the request began; a session change is an epoch (A -> B -> A is still a change), clears what is shown at once and
+    drops a late answer whether it succeeded or failed; and an open editor is never replaced."""
+    import asyncio
+    import json as _json
+    import re
+    from playwright.async_api import async_playwright, expect
+    srv, root, ws = page_server
+    first, second = "a" * 32, "b" * 32
+    state = {"session": "sess-A", "hold": None, "fail": False, "held": []}
+    calls = []
+
+    def row(request_id):
+        return {"request_id": request_id, "group_id": "c" * 32, "attempt": 1, "created_at": 1790000000.0,
+                "transport": "post", "provider": "fixture", "turn": 1, "recipient": "lead", "origin": "lead_turn",
+                "model": "fixture-model", "worker_id": None, "agent": None, "window": None, "window_basis": "not_known",
+                "status": "response_received", "phase": "body", "http_status": 200, "error_type": None,
+                "body": "json_object", "package_version": "9.9.9-fixture", "harness": "fixture-inspector/2"}
+
+    def record(request_id, session):
+        text = {"sha256": "d" * 64, "bytes": 40, "chars": 40, "tokens": None,
+                "tokens_reason": "tokenizer_not_configured"}
+        return {**row(request_id), "reduced": ["previews_dropped"], "work": {"skipped": {"work_budget_exhausted": 2}},
+                "usage": {"observed": False, "observations": 0, "reason": "no_usage_reported_by_this_attempt",
+                          "prompt_tokens": None, "cached_tokens": None, "completion_tokens": None},
+                "tokenizer": {"method": None, "reason": "tokenizer_not_configured", "digest": None,
+                              "bound_model": None, "engine_exact": False},
+                "request": {"messages": 9, "tools": 1, "images": 0, "bytes": 400, "complete": True,
+                            "messages_omitted": 4, "messages_not_digested": 0},
+                "tools": {"count": 1, "sha256": "e" * 64, "bytes": 90, "tokens": None,
+                          "tokens_reason": "tokenizer_not_configured", "tokens_scope": "tools_array_json_text_only",
+                          "listed_omitted": 0, "listed": [{
+                              "index": 0, "name": "<b>run_bash</b>", "sha256": "f" * 64, "bytes": 90, "tokens": 17,
+                              "tokens_reason": None, "tokens_scope": "schema_json_text_only",
+                              "parameters": ["command"], "parameters_omitted": 0,
+                              "preview": "SCHEMA-PREVIEW <script>window.__xss=3</script>",
+                              "preview_truncated": False}]},
+                "components": [
+                    {"kind": "message", "message_index": 3, "role": "assistant", "source": "conversation",
+                     "content_form": "none", "images": 0, "other_parts": 0, "tool_call_count": 1,
+                     "reasoning_chars": 120, "tokens_scope": "content_text_only", "sha256": None, "bytes": None,
+                     "chars": None, "tokens": None, "tokens_reason": "component_has_no_text",
+                     "message_sha256": "9" * 64, "preview": "", "preview_truncated": False,
+                     "preview_omitted": True, "preview_reason": "no_text"},
+                    {"kind": "tool_call", "message_index": 3, "role": "assistant", "source": "conversation",
+                     "call_index": 0, "name": "run_bash", "representation": "function_arguments_string_as_sent",
+                     "tokens_scope": "arguments_text_only", **text, "tokens": 4321, "tokens_reason": None,
+                     "preview": "", "preview_truncated": True, "preview_omitted": True,
+                     "preview_reason": "arguments_not_shown"},
+                    {"kind": "message", "message_index": 4, "role": "user", "source": "conversation",
+                     "content_form": "text", "images": 0, "other_parts": 0, "tool_call_count": 0,
+                     "reasoning_chars": 0, "tokens_scope": "content_text_only", **text,
+                     "preview": "PREVIEW-OF-" + session + "-" + request_id[:4], "preview_truncated": False,
+                     "preview_omitted": False, "preview_reason": None}]}
+
+    async def context(route):
+        url = route.request.url
+        calls.append(url)
+        session = state["session"]                   # the session the server is showing as the request arrives
+        if state["hold"] is not None:
+            state["held"].append(url)
+            await state["hold"].wait()
+        if state["fail"]:
+            await route.fulfill(status=500, content_type="application/json",
+                                body=_json.dumps({"error": "LATE-ERROR-TEXT"}))
+        elif url.endswith("/api/lucid/context"):
+            await route.fulfill(status=200, content_type="application/json", body=_json.dumps({
+                "session_id": session, "records": [row(first), row(second)], "empty_note": None,
+                "coverage": {"note": "COVERAGE-NOTE"}, "caveats": [], "not_counted": ["NOT-COUNTED-ONE"]}))
+        else:
+            await route.fulfill(status=200, content_type="application/json", body=_json.dumps({
+                "session_id": session, "record": record(url.rsplit("/", 1)[1], session), "caveats": [],
+                "not_counted": ["NOT-COUNTED-ONE"]}))
+
+    url = await srv.start()
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(args=["--disable-gpu"])
+            page = await browser.new_page(viewport={"width": 1400, "height": 900})
+            page.set_default_timeout(5000)
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            await page.route(re.compile(r"/api/lucid/context(/[0-9a-f]{32})?$"), context)
+            await page.goto(url.replace("/#", "/?companion=1#"))
+            await page.locator("#dream-nav-memory").click()
+            lucid = page.locator("#dream-memory-page")
+            panel = lucid.locator(".lucid-context")
+            status = panel.locator("[role=status]")
+            await expect(panel).to_contain_text("bounded preview journal")
+            await expect(panel).to_contain_text("not a copy of the request")
+
+            async def client_session(session_id, announce=True):
+                await page.evaluate(
+                    "([id, announce]) => { window.DREAM_SESSION = {...(window.DREAM_SESSION || {}), session_id: id};"
+                    " if (announce) window.dispatchEvent(new CustomEvent('dream:session')); }",
+                    [session_id, announce])
+
+            await client_session("sess-A")
+            # 1. the server already shows B, and this page has not heard: B's list is not shown under A
+            state["session"] = "sess-B"
+            await panel.locator(".lucid-context-refresh").click()
+            await expect(status).to_contain_text("session changed")
+            await expect(status).to_have_attribute("data-error", "true")
+            await expect(panel.locator("select")).to_have_count(0)
+            await expect(panel.locator("details")).to_have_count(0)
+            await expect(panel).not_to_contain_text("PREVIEW-OF-")
+            # 2. both agree on A: the list and a detail show, with the schema and argument counts and their labels
+            state["session"] = "sess-A"
+            await panel.locator(".lucid-context-refresh").click()
+            await expect(panel).to_contain_text("PREVIEW-OF-sess-A-aaaa")
+            await expect(panel).to_contain_text("tool call · run_bash · arguments")
+            await expect(panel).to_contain_text("of the call's arguments text alone")
+            await expect(panel).to_contain_text("4,321")
+            await expect(panel).to_contain_text("Arguments are never shown here")
+            await expect(panel).to_contain_text("120 characters of reasoning_content (not counted)")
+            await expect(panel).to_contain_text("tool schemas · 1")
+            await expect(panel).to_contain_text("<b>run_bash</b>")
+            await expect(panel).to_contain_text("canonical JSON text")
+            await expect(panel).to_contain_text("SCHEMA-PREVIEW")
+            await expect(panel).to_contain_text("NOT-COUNTED-ONE")
+            await expect(panel).to_contain_text("9.9.9-fixture")
+            await expect(panel).to_contain_text("hashed and sized only, not token-counted")
+            await expect(panel).to_contain_text("previews dropped")
+            await expect(panel).not_to_contain_text("counted but not listed")
+            await expect(panel.locator("b, script, img")).to_have_count(0)
+            assert await page.evaluate("window.__xss === undefined")
+            # 3. a detail picked while the server moved to B without telling this page: B's record is not shown
+            state["session"] = "sess-B"
+            await panel.locator("select").select_option(second)
+            await expect(status).to_contain_text("session changed")
+            await expect(panel).not_to_contain_text("PREVIEW-OF-")
+            await expect(panel.locator("select")).to_have_count(0)
+            # 4. out-of-order details: the earlier choice answers last and is dropped
+            state["session"] = "sess-A"
+            await panel.locator(".lucid-context-refresh").click()
+            await expect(panel).to_contain_text("PREVIEW-OF-sess-A-aaaa")
+            gate = asyncio.Event()
+
+            async def staged(route):
+                if route.request.url.endswith(second):
+                    await gate.wait()
+                await context(route)
+            await page.unroute(re.compile(r"/api/lucid/context(/[0-9a-f]{32})?$"))
+            await page.route(re.compile(r"/api/lucid/context(/[0-9a-f]{32})?$"), staged)
+            await panel.locator("select").select_option(second)
+            await expect(panel).not_to_contain_text("PREVIEW-OF-sess-A-aaaa")      # the old preview went at once
+            await panel.locator("select").select_option(first)
+            await expect(panel).to_contain_text("PREVIEW-OF-sess-A-aaaa")
+            gate.set()
+            await page.wait_for_timeout(400)
+            await expect(panel).to_contain_text("PREVIEW-OF-sess-A-aaaa")
+            await expect(panel).not_to_contain_text("PREVIEW-OF-sess-A-bbbb")
+            await page.unroute(re.compile(r"/api/lucid/context(/[0-9a-f]{32})?$"))
+            await page.route(re.compile(r"/api/lucid/context(/[0-9a-f]{32})?$"), context)
+            # 5. A -> B -> A while a list is in flight: the ids match again, the epoch does not; cleared at once
+            state["hold"] = asyncio.Event()
+            await panel.locator(".lucid-context-refresh").click()
+            await expect(status).to_contain_text("Reading")
+            await client_session("sess-B")
+            await expect(panel.locator("select")).to_have_count(0)
+            await expect(panel.locator("details")).to_have_count(0)
+            await expect(status).to_contain_text("Not read yet")
+            await client_session("sess-A")
+            state["hold"].set()
+            await page.wait_for_timeout(400)
+            await expect(panel.locator("select")).to_have_count(0)
+            await expect(panel).not_to_contain_text("PREVIEW-OF-")
+            await expect(status).to_contain_text("Not read yet")
+            # 6. a new session in the same workspace, and a late FAILURE: the stale error is dropped too
+            state["hold"], state["fail"] = asyncio.Event(), True
+            await panel.locator(".lucid-context-refresh").click()
+            await expect(status).to_contain_text("Reading")
+            await client_session("sess-C")
+            state["hold"].set()
+            await page.wait_for_timeout(400)
+            await expect(status).not_to_contain_text("LATE-ERROR-TEXT")
+            await expect(status).to_have_attribute("data-error", "false")
+            state["hold"], state["fail"] = None, False
+            # 7. an editor with unsaved text is never replaced by a late answer or by a session change
+            state["session"] = "sess-C"
+            state["hold"] = asyncio.Event()
+            await panel.locator(".lucid-context-refresh").click()
+            await lucid.locator(".lucid-file[data-key='global/instructions']").click()
+            editor = lucid.locator(".lucid-editor textarea")
+            await editor.fill("UNSAVED TEXT")
+            await client_session("sess-D")
+            state["hold"].set()
+            await page.wait_for_timeout(400)
+            await expect(editor).to_have_value("UNSAVED TEXT")
+            await expect(lucid.locator(".lucid-context")).to_have_count(0)
+            assert errors == []
+            await browser.close()
+    finally:
+        await srv.stop()

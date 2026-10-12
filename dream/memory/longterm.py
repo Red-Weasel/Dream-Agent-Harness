@@ -28,8 +28,12 @@ memory, and nothing else. It is an index, never content.
 from __future__ import annotations
 
 import os
+import json
+import hashlib
 import re
 import tempfile
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -106,6 +110,10 @@ def _one_line(v: Any) -> str:
 
 def _render(mem: dict[str, Any]) -> str:
     name = slugify(str(mem.get("name") or mem.get("slug") or ""))
+    from .curation import lifecycle_json
+    if mem.get("lifecycle_error"):
+        raise ValueError("repair lifecycle metadata before rewriting this memory")
+    lifecycle = lifecycle_json(mem.get("lifecycle"))
     fm = [
         "---",
         f"name: {name}",
@@ -120,6 +128,8 @@ def _render(mem: dict[str, Any]) -> str:
         f"salience: {mem.get('salience', 1.0)}",
         f"created_at: {mem.get('created_at', '')}",
         f"updated_at: {mem.get('updated_at', '')}",
+        *([f"source_session: {_one_line(mem['source_session'])}"] if mem.get('source_session') else []),
+        *([f"lifecycle: {lifecycle}"] if lifecycle != '{}' else []),
         *([f"project: {owner}"] if (owner := valid_owner(mem.get("project"))) else []),
         "---",
         "",
@@ -221,7 +231,8 @@ def write_markdown(mem: dict[str, Any], *, index: bool = True) -> Path:
         # bypassed it must not write a file the index will never see.
         raise ValueError(f"{p.name} is a reserved file, not a memory name — use "
                          f"{config.free_memory_name(p.stem)!r}")
-    _atomic_write(p, _render(mem))
+    with memory_edit_lock():
+        _atomic_write(p, _render(mem))
     if index:
         write_index()
     return p
@@ -361,7 +372,14 @@ def read_file(path: Path, *, allow_reserved: bool = False) -> dict[str, Any] | N
     A reserved stem is not a memory in the flat tree; the migration reads one
     from the old directories with ``allow_reserved`` and suffixes it."""
     try:
-        fm, body = parse_markdown(path.read_text(encoding="utf-8", errors="replace"))
+        raw_text = path.read_text(encoding="utf-8", errors="replace")
+        lines = raw_text.removeprefix("\ufeff").splitlines()
+        if (lines and lines[0].strip() == "---"
+                and not any(line.strip() == "---" for line in lines[1:])):
+            # A partially saved header is not legacy body-only text. Keep the
+            # prior indexed fact quarantined until the authoritative file repairs.
+            return None
+        fm, body = parse_markdown(raw_text)
     except OSError:
         return None
     # The file's identity is its stem, always: a `name:` line that disagrees is
@@ -382,7 +400,21 @@ def read_file(path: Path, *, allow_reserved: bool = False) -> dict[str, Any] | N
         salience = float(fm.get("salience", "1.0"))
     except ValueError:
         salience = 1.0
+    from .curation import lifecycle_json
+    lifecycle_error = ""
+    try:
+        lifecycle = lifecycle_json(fm.get("lifecycle"))
+        header_lines = raw_text.removeprefix("\ufeff").splitlines()
+        if header_lines and header_lines[0].strip() == "---":
+            end = next((i for i in range(1, len(header_lines)) if header_lines[i].strip() == "---"), 0)
+            if sum(ln.partition(':')[0].strip() == 'lifecycle' for ln in header_lines[1:end]) > 1:
+                raise ValueError("duplicate lifecycle metadata field")
+    except ValueError as exc:
+        lifecycle, lifecycle_error = "{}", str(exc)
     return {
+        "lifecycle": lifecycle, "lifecycle_error": lifecycle_error,
+        "source_session": fm.get("source_session") or None,
+        "source_session_present": "source_session" in fm,
         "name": name, "slug": name, "kind": kind, "mem_type": mem_type,
         "title": fm.get("title") or path.stem.replace("-", " ").title(),
         "description": fm.get("description", ""), "body": body,
@@ -409,7 +441,12 @@ def _indexed() -> list[tuple[dict[str, Any], str]]:
 def _index_line(mem: dict[str, Any], fname: str) -> str:
     hook = describe(mem)
     title = str(mem["title"]).replace("[", "\\[").replace("]", "\\]")
-    return f"- [{title}]({fname})" + (f" — {hook}" if hook else "")
+    line = f"- [{title}]({fname})" + (f" — {hook}" if hook else "")
+    if mem.get("lifecycle_error"):
+        line += " [lifecycle metadata error; excluded from active recall]"
+    elif mem.get("lifecycle") not in (None, "", "{}"):
+        line += " [lifecycle: " + mem["lifecycle"] + "]"
+    return line
 
 
 def _owner_label(owner: str) -> str:
@@ -525,7 +562,17 @@ def _same(row: dict[str, Any], mem: dict[str, Any]) -> bool:
         return False
     if (mem.get("project") or "") != (row.get("project") or ""):
         return False  # the file names the project; a hand edit of that line moves it
-    return not mem["created_at"] or mem["created_at"] == row.get("created_at", "")
+    for key in ("lifecycle", "lifecycle_error"):
+        if mem.get(key, "{}" if key == "lifecycle" else "") != row.get(key, "{}" if key == "lifecycle" else ""):
+            return False
+    if mem.get("source_session_present") and not row.get("source_from_file"):
+        return False
+    if mem.get("source_session") != row.get("source_session"):
+        return False  # the authoritative file can explicitly remove provenance
+    for key in ("created_at", "updated_at"):
+        if mem.get(key) and mem[key] != row.get(key):
+            return False
+    return True
 
 
 def boot_log(line: str) -> None:
@@ -567,15 +614,41 @@ def sync(store: MemoryStore) -> dict[str, int]:
     is shaped like a key and otherwise leaves the memory hidden; either way it is named
     in the boot log, and it never stops the boot.
     """
+    # Same file-lock -> store-lock order as persisted upserts and lifecycle CAS.
+    # Hold across file reads, row reconciliation and index publication so an old
+    # snapshot cannot overwrite an intervening explicit invalidation.
+    with memory_edit_lock():
+        return _sync_locked(store)
+
+
+def _sync_locked(store: MemoryStore) -> dict[str, int]:
     counts = {"moved": migrate_layout(), "imported": 0, "updated": 0, "dropped": 0}
     seen: set[str] = set()
     known = None
-    for f in memory_files():
+    files = memory_file_map()
+    shadowed = len(memory_files()) - len(files)
+    if shadowed:
+        counts["shadowed"] = shadowed  # duplicate file identities retained on disk
+    for f in files.values():
+        # Unreadable/partial files remain recoverable; never drop an existing row
+        # merely because parsing failed during this pass.
+        seen.add(slugify(f.stem))
         mem = read_file(f)
         if mem is None:
+            counts["unreadable"] = counts.get("unreadable", 0) + 1
+            with store._lock, store._conn:
+                store._conn.execute("UPDATE memories SET lifecycle_error=? WHERE slug=?",
+                                    ("unreadable authoritative file; repair then sync", slugify(f.stem)))
             continue
-        seen.add(mem["name"])
+        if mem.get("lifecycle_error"):
+            counts["quarantined"] = counts.get("quarantined", 0) + 1
+            boot_log(f"{f.name}: {mem['lifecycle_error']}; excluded from active recall, file retained")
         row = store.get_memory(mem["name"])
+        if row and not mem["source_session_present"] and not row.get("source_from_file"):
+            # Old files never contained this field; their SQLite-only provenance
+            # still supplies evidence for project migration. Once a source field
+            # is observed/authored in a file, later removal authoritatively clears.
+            mem["source_session"] = row.get("source_session")
         heal = False
         if mem["project_line"] is None:
             if row is not None and row.get("project"):
@@ -593,13 +666,20 @@ def sync(store: MemoryStore) -> dict[str, int]:
                     mem_type=mem["mem_type"] or default_type(mem["kind"], mem["title"], mem["body"]),
                     # Files win, the project line too (DREAM-108): never the session's
                     # project, which would claim every legacy file for this workspace.
-                    project=mem.get("project") or "", reassign=True,
+                    project=mem.get("project") or "", reassign=True, embed=False,
+                    lifecycle=mem["lifecycle"], lifecycle_error=mem["lifecycle_error"],
+                    source_session=mem.get("source_session"),
+                    source_from_file=mem["source_session_present"],
+                    created_at=mem.get("created_at") or None,
+                    updated_at=mem.get("updated_at") or None,
                 )
                 # The creation time is what time-scoped recall filters on; the file's
                 # value is the true one.
                 if mem["created_at"]:
                     store.set_created_at(mem["name"], mem["created_at"])
-            except Exception:
+            except Exception as exc:
+                counts["failed"] = counts.get("failed", 0) + 1
+                boot_log(f"{f.name}: index refresh failed: {exc}; file retained for retry")
                 continue
             counts["updated" if row is not None else "imported"] += 1
         if heal:
@@ -693,3 +773,117 @@ def import_markdown(store: MemoryStore) -> int:
     not have. Kept because the engine and the tests have always called this."""
     counts = sync(store)
     return counts["imported"] + counts["moved"]
+
+
+_EDIT_LOCK = threading.RLock()
+_EDIT_LOCAL = threading.local()
+
+
+@contextmanager
+def memory_edit_lock():
+    """Serialize cooperating memory writes across threads, stores and processes."""
+    import fcntl
+    with _EDIT_LOCK:
+        if getattr(_EDIT_LOCAL, "depth", 0):
+            _EDIT_LOCAL.depth += 1
+            try:
+                yield
+            finally:
+                _EDIT_LOCAL.depth -= 1
+            return
+        config.MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+        fd = os.open(config.MEMORY_DIR / '.lifecycle.lock',
+                     os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            _EDIT_LOCAL.depth = 1
+            yield
+        finally:
+            _EDIT_LOCAL.depth = 0
+            os.close(fd)
+
+
+class MemoryVersionError(ValueError):
+    """The authoritative file changed since the caller inspected it."""
+
+
+def update_lifecycle(store: MemoryStore, slug: str, lifecycle: dict, *,
+                     expected_version: str, scope: tuple[str, ...]) -> dict:
+    """Explicit lifecycle edit, serialized with other lifecycle edits by a file lock.
+
+    expected_version is SHA256 of the exact file bytes, not second-resolution
+    updated_at. Only the lifecycle line changes; custom metadata/body are retained.
+    External editors do not participate in the advisory lock: a final digest
+    check detects observed edits, but cannot make arbitrary editors transactional.
+    On a post-replace index/durability error, inspect the file then sync to recover.
+    """
+    from .curation import lifecycle_json, active_status, MAX_MEMORY_BYTES
+
+    encoded = lifecycle_json(lifecycle)
+    if not isinstance(expected_version, str) or not re.fullmatch(r'[0-9a-f]{64}', expected_version):
+        raise ValueError('expected_version must be a SHA256 file digest')
+    if not isinstance(scope, tuple) or not scope or any(not valid_owner(p) for p in scope):
+        raise ValueError('an explicit authorized scope is required')
+    if slugify(slug) != slug:
+        raise ValueError('an exact memory slug is required')
+    files = memory_file_map()
+    path = files.get(slug)
+    if path is None or path.is_symlink():
+        raise ValueError('an existing regular memory file is required')
+    with memory_edit_lock():
+        with store._lock:
+            if path.stat().st_size > MAX_MEMORY_BYTES:
+                raise ValueError('memory exceeds bounded lifecycle edit size')
+            original = path.read_bytes()
+            if hashlib.sha256(original).hexdigest() != expected_version:
+                raise MemoryVersionError('memory changed; inspect it and retry with its current version')
+            mem = read_file(path)
+            if mem is None or mem.get('project') not in scope:
+                raise ValueError('memory is outside the authorized scope')
+            indexed = store.get_memory(slug)
+            if indexed and not mem["source_session_present"] and not indexed.get("source_from_file"):
+                mem["source_session"] = indexed.get("source_session")
+            target_slug = json.loads(encoded).get('superseded_by')
+            if target_slug:
+                target_path = files.get(target_slug)
+                if target_path and (target_path.is_symlink() or target_path.stat().st_size > MAX_MEMORY_BYTES):
+                    raise ValueError('supersession target must be a bounded regular file')
+                target = read_file(target_path) if target_path else None
+                if (target_slug == slug or not target or target.get('project') != mem['project']
+                        or active_status(target) != 'eligible'):
+                    raise ValueError('supersession requires a different valid memory in the same scope')
+                # No cycles: a target already explicitly superseded is ambiguous.
+                if json.loads(target['lifecycle']).get('superseded_by'):
+                    raise ValueError('supersession target is already superseded')
+            text = original.decode('utf-8')
+            bom = '\ufeff' if text.startswith('\ufeff') else ''
+            lines = text[len(bom):].splitlines(keepends=True)
+            end = next((i for i in range(1,len(lines)) if lines[i].strip() == '---'), None) if lines and lines[0].strip() == '---' else None
+            if end is None:
+                new = f'---\nlifecycle: {encoded}\n---\n' + text
+            else:
+                newline = '\r\n' if lines[0].endswith('\r\n') else '\n'
+                header = [ln for ln in lines[1:end] if ln.partition(':')[0].strip() != 'lifecycle']
+                new = bom + lines[0] + ''.join(header) + f'lifecycle: {encoded}{newline}' + ''.join(lines[end:])
+            if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != expected_version:
+                raise MemoryVersionError('memory changed during lifecycle update')
+            durability_error = None
+            try:
+                _atomic_write(path, new)
+            except MemoryDurabilityError as exc:
+                durability_error = exc
+            try:
+                row = store.upsert_memory(
+                    kind=mem['kind'], title=mem['title'], body=mem['body'], slug=slug,
+                    tags=mem['tags'], salience=mem['salience'], description=mem['description'],
+                    mem_type=mem['mem_type'], project=mem['project'], embed=False,
+                    source_session=mem.get('source_session'), source_from_file=mem['source_session_present'],
+                    created_at=mem.get('created_at') or None,
+                    updated_at=mem.get('updated_at') or None, lifecycle=encoded,
+                )
+            except Exception as exc:
+                from .store import MemoryIndexError
+                raise MemoryIndexError('lifecycle saved to file; index failed; inspect file then sync') from exc
+            if durability_error:
+                raise durability_error
+            return row

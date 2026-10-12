@@ -55,6 +55,7 @@ WORKER_FILES = 8                                 # files in one task
 READ_LINES = 200                                 # lines in one read_file call: its result stays under the tool-result cap
 HEAD_LINES = 100                                 # the top of a long file its first task reads: docstring and imports
 READ_GAP = 30                                    # symbols this close are read in one call, the lines between them too
+WORKER_TOOLS = ('read_file', 'write_file', 'run_bash')   # what a brief has its worker call: the role must have them
 DEFAULT_IGNORE = ('.ua/\n.understand-anything/\n.dream/\n.remember/\n*.lock\n*.pyc\n*.so\n*.dll\n*.bin\n*.sqlite*\n'
                   '*.wasm\n')
 DREAM_EXCLUDES = ['.dream/**', '.remember/**']   # Dream's own state: excluded from every scan
@@ -316,7 +317,24 @@ def plan_tasks():
         tasks += [{'id': '%d-%d' % (i, k), 'batch': i, 'units': g,
                    'file': '.ua/intermediate/batch-%d%s.json' % (i, '' if len(groups) == 1 else '-part-%d' % k)}
                   for k, g in enumerate(groups, 1)]
+    for t in tasks:                                     # DREAM-252: what its `task` call declares; Dream checks both
+        t['contract'] = {'required_tools': list(WORKER_TOOLS),
+                         'outputs': [{'path': t['file'], 'format': 'json', 'required_keys': ['nodes', 'edges']}]}
     return tasks
+
+
+def contract_lines(todo):
+    """The two contract fields every worker `task` call carries, and each id's file: two lines, the fields with what
+    Dream's check says, then the files. Dream refuses a role without the tools before it starts, and fails a call
+    whose file is missing, untouched, not valid JSON, or not a JSON object that has the top-level keys "nodes" and
+    "edges". That is all Dream's check says: the file changed after the task was sent -- not that this worker wrote
+    it -- and key presence, not that the two are lists and nothing about the nodes and edges in them: task_problems
+    (glue tasks / check) checks those."""
+    return ('every call also carries two fields Dream checks: required_tools %s and outputs [{"path": "<its file>", '
+            '"format": "json", "required_keys": ["nodes", "edges"]}] '
+            '(Dream\'s check: the file changed since the task was sent and is a JSON object with both keys present '
+            '-- not who wrote it, not the graph\'s shape; glue tasks checks the shape.)\nfiles (id=path): %s' % (
+                json.dumps(list(WORKER_TOOLS)), ' '.join('%s=%s' % (t['id'], t['file']) for t, _ in todo)))
 
 
 def planned(tid=None):
@@ -377,8 +395,10 @@ def tasks():
             total, len({t['batch'] for t in plan['tasks']}), len({u['path'] for t in plan['tasks'] for u in t['units']})))
         print('next: send ALL %d now in ONE reply that holds only `task` calls -- one per id, nothing before or between '
               'them -- each with subagent_type "coder" and this prompt, <id> replaced:\n  %s\nids: %s' % (len(todo), PROMPT, ids))
+        print(contract_lines(todo))
         print('Do not send a few and wait: Dream runs as many workers as it has lanes and queues the rest. When every '
-              'call has returned, rerun glue tasks: it names what is missing.')
+              'call has returned, rerun glue tasks: it names what is missing. A call Dream returns as failed (its file '
+              'missing, unchanged or invalid) is not sent again by Dream: glue tasks decides.')
         print('(No `task` tool in this session: do each task yourself -- glue brief <id>, its steps 1 to 3 -- then rerun '
               'glue tasks.)')
         return 0
@@ -386,7 +406,8 @@ def tasks():
         ['%s (%s)' % (t['id'], 'no file' if p[0].startswith('no ') else flat(p[0], 90)) for t, p in todo])))
     if plan['round'] == 2:
         print('next: send these %d once more in ONE reply that holds only `task` calls, subagent_type "coder", the same '
-              'prompt:\n  %s\nids: %s\nWhen every call has returned, rerun glue tasks.' % (len(todo), PROMPT, ids))
+              'prompt:\n  %s\nids: %s\n%s\nWhen every call has returned, rerun glue tasks.' % (
+                  len(todo), PROMPT, ids, contract_lines(todo)))
     else:
         print('next: these were sent twice. Do each yourself: run glue brief <id> (python3 .ua/tmp/ua_glue.py brief %s) and '
               'do its steps 1 to 3; then rerun glue tasks.\nids: %s' % (todo[0][0]['id'], ids))

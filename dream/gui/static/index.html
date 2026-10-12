@@ -137,6 +137,7 @@ main{flex:1;min-width:380px;overflow-y:auto;padding:22px 20px 8px;scroll-behavio
   border-bottom:1px dashed var(--line);margin:0 0 10px}
 .sys.error{color:var(--err);border-color:#3b1d21}
 .sys.dream-note{color:var(--violet)}   /* a note Dream wrote itself (steeringNotice), never shown as the owner's */
+.sys.login-receipt{white-space:pre-wrap}   /* the session's answer to /login (DREAM-246): plain text, its list keeps its lines */
 
 /* composer */
 footer{flex:0 0 auto;position:relative;background:var(--bg2);border-top:1px solid var(--line);padding:12px 20px 14px}
@@ -1341,6 +1342,21 @@ async function submit(delivery = 'queue'){
   if(['/handoff', '/fresh'].includes(typed.toLowerCase()) && !fileIds.length && delivery === 'queue'){
     input.value = ''; grow(); freshStart(); return;   // the control's route, never a message to the model
   }
+  if(!mention && LOGIN_COMMAND.test(typed)){
+    // DREAM-246: a sign-in request, not a message. It never touches the working state, the steering draft or the
+    // "Try again" record: the turn that is running (or ending) keeps the state its own events give it.
+    sending = true; draftAttachments.render();
+    // The request is time-limited (loginCommand), so `sending` always comes back. The box is cleared only for an
+    // answer that was read as a sign-in answer, and only if it still holds what was sent: an unknown outcome keeps
+    // the draft, and a newer draft typed while waiting is never overwritten. Nothing here reports a sent message.
+    const typedInput = input.value;
+    let asked = false;
+    try{ asked = await loginCommand(typed, fileIds, (message, error) => sysline(message, error ? 'error' : 'login-receipt')); }
+    finally{ sending = false; }
+    if(asked && input.value === typedInput){ input.value = ''; grow(); }
+    draftAttachments.render(); draftAttachments.save();
+    return;
+  }
   if(!draftAttachments.ready()){ sysline('Finish uploading, retry, or remove failed attachments before sending.', 'error'); return; }
   sending = true; draftAttachments.render();
   const savedInput = input.value, savedMention = mention;
@@ -1377,6 +1393,75 @@ async function postPrompt(text, attachments = [], delivery = 'queue', steering, 
     if($('studio-error')) $('studio-error').hidden = true;
     return true;
   }catch(e){ sysline('Could not reach Dream. Reconnect and send your message again.','error'); busy(wasWorking); return false; }
+}
+/* ---------- /login from a prompt box (DREAM-246) ------------------------- */
+// `/login <provider>` asks the session for the provider's own sign-in in a separate window. The session answers it
+// itself (no model, no queue, no steering), with {ok, command:'login', result}. Both prompt boxes (this one and the
+// Nested view's) send it through here. `show(message, isError)` puts plain text on the page; nothing the session
+// returns is rendered as HTML. No answer here says an account is signed in: the session never checks that.
+const LOGIN_COMMAND = /^\/login(?:\s|$)/i;
+const LOGIN_FINE = ['help', 'queued', 'launched', 'closed', 'manual'];
+function loginText(value){ return String(value).slice(0, 2000); }
+// Every sign-in request from a prompt box is time-limited: the box is never left waiting on a session that does
+// not answer. A request that was sent and not answered in a way this page can read has an unknown outcome: it may
+// have reached the session. The page says so, sends nothing again by itself, and leaves trying again to the person.
+const LOGIN_WAIT_MS = 15000;
+const LOGIN_ASK_UNKNOWN = ' It is not known whether a sign-in window was asked for. Look for one before trying again.';
+const LOGIN_OPEN_UNKNOWN = 'Dream could not be asked what the desktop window did, so it is not known whether a sign-in window opened. Look for one before trying again.';
+// One POST with a deadline over the whole exchange (the answer's body included). It rejects when Dream could not be
+// reached or the deadline passed (an AbortError); `data` is null when the answer was not a readable JSON object.
+async function loginFetch(url, payload){
+  const abort = new AbortController(), timer = setTimeout(() => abort.abort(), LOGIN_WAIT_MS);
+  try{
+    const response = await fetch(url, {method:'POST', cache:'no-store', signal:abort.signal,
+      headers:{'Content-Type':'application/json','X-Dream-Token':TOKEN}, body: JSON.stringify(payload)});
+    let data = null;
+    try{ data = await response.json(); }catch(e){ if(abort.signal.aborted) throw e; }
+    return {response, data: data && typeof data === 'object' ? data : null};
+  } finally { clearTimeout(timer); }
+}
+// True only when the session answered this as a sign-in request. It changes no working state, turn, steering draft
+// or history, and never reports a sent message: an answer that is not a sign-in answer is an unknown outcome.
+async function loginCommand(text, attachments, show){
+  let response, data;
+  try{ ({response, data} = await loginFetch('/api/prompt', {prompt:text, attachments})); }
+  catch(e){
+    show((e && e.name === 'AbortError' ? 'Dream did not answer in time.' : 'Could not reach Dream.') + LOGIN_ASK_UNKNOWN, true);
+    return false;
+  }
+  if(!response.ok){
+    // A refusal the session wrote itself says what happened. An error with no readable reason does not.
+    if(data && typeof data.error === 'string' && data.error) show(loginText(data.error), true);
+    else show(`Dream answered with an error it did not explain (HTTP ${response.status}).` + LOGIN_ASK_UNKNOWN, true);
+    return false;
+  }
+  const result = data && data.ok === true && data.command === 'login' ? data.result : null;
+  if(!result || typeof result.message !== 'string'){
+    // The request was accepted by something, but not answered as a sign-in request: it may have asked for a window,
+    // or been taken as an ordinary message. Neither is claimed.
+    show("The session's answer could not be read as a sign-in answer. It is not known whether a sign-in window was asked for, or whether this was taken as an ordinary message. Look for a sign-in window and check the conversation before trying again.", true);
+    return false;
+  }
+  show(loginText(result.message), !LOGIN_FINE.includes(result.status));
+  if(result.status === 'queued' && typeof result.id === 'string') loginFollow(result.id, show);
+  return true;
+}
+// What the desktop window then did with the request (opened, not installed, another one open, no answer): asked of
+// the session once a second until it is known. The wait in the session ends after 20 s, so this ends too. It only
+// asks about the request already made; it never makes another. If the answer cannot be had, it says the outcome is
+// unknown instead of leaving "Opening…" as the last word.
+async function loginFollow(id, show){
+  for(let tries = 0; tries < 30; tries++){
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    let request = null;
+    try{
+      const {response, data} = await loginFetch('/api/control', {action:'provider_login_status', id});
+      request = response.ok && data && data.ok === true && data.result ? data.result.request : null;
+    }catch(e){ /* reported below */ }
+    if(!request || typeof request.message !== 'string') break;
+    if(request.status !== 'queued'){ show(loginText(request.message), !LOGIN_FINE.includes(request.status)); return; }
+  }
+  show(LOGIN_OPEN_UNKNOWN, true);
 }
 send.onclick = () => submit();
 $('steer').onclick = () => submit('steer');
@@ -1968,7 +2053,9 @@ let autoOpen = true; try{ autoOpen = localStorage.getItem('dream.artifactAutoOpe
 input.addEventListener('input', () => { lastTyped = Date.now(); });
 input.addEventListener('keydown', () => { lastTyped = Date.now(); });
 // The Nested view too (DREAM-243): there the panel is the right-hand pane's Preview (nested-pane.js lays it out).
-function chatPanelMode(){ return COMPANION && ['chat', 'nested'].includes(document.documentElement.dataset.dreamView); }
+function chatPanelMode(){ const view = document.documentElement.dataset.dreamView;
+  // DeepSleep too while its Preview is open (deepsleep-preview.js, 2026-10-10): what Dream shows lands beside the terminals.
+  return COMPANION && (['chat', 'nested'].includes(view) || (view === 'deepsleep' && document.documentElement.classList.contains('ds-preview'))); }
 // Where a `studio` show lands (DREAM-235): true = the panel beside the chat (the Chat view with room for it, or the
 // panel already showing there); false = the Artifacts tab's viewer, as the Studio tab before it; null = nowhere yet
 // -- the model's own view while the panel is closed and the never-steal rules say not now (its next reload asks again).
@@ -2991,6 +3078,18 @@ function artifactFromWrite(input){
 <script src="/assets/sleepwalk.js"></script>
 <link rel="stylesheet" href="/assets/nested.css">
 <script src="/assets/nested.js"></script>
+<link rel="stylesheet" href="/assets/command-menu.css">
+<script src="/assets/command-menu.js"></script>
+<link rel="stylesheet" href="/assets/vendor/xterm.css">
+<script src="/assets/vendor/xterm.js"></script>
+<script src="/assets/vendor/addon-fit.js"></script>
+<link rel="stylesheet" href="/assets/deepsleep.css">
+<link rel="stylesheet" href="/assets/deepsleep-drawer.css">
+<script src="/assets/deepsleep-drawer.js"></script>
+<script src="/assets/deepsleep-activity.js"></script>
+<script src="/assets/deepsleep-flow.js"></script>
+<script src="/assets/deepsleep.js"></script>
+<script src="/assets/deepsleep-toolbar.js"></script>
 <script src="/assets/nested-drawer.js"></script>
 <script src="/assets/nested-layout.js"></script>
 <script src="/assets/nested-customize.js"></script>
@@ -3007,6 +3106,8 @@ function artifactFromWrite(input){
 <script src="/assets/artifacts.js"></script>
 <link rel="stylesheet" href="/assets/chat-nested.css">
 <script src="/assets/chat-nested.js"></script>
+<link rel="stylesheet" href="/assets/deepsleep-preview.css">
+<script src="/assets/deepsleep-preview.js"></script>
 <script>
 // All frame constants, listeners, and companion controls must exist before a
 // socket can deliver hello followed immediately by the retained Studio show.

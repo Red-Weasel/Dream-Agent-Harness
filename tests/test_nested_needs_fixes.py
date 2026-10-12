@@ -7,6 +7,7 @@ panel without leaving the Nested view. Scripted events, a scripted /api/permissi
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 from playwright.async_api import expect
@@ -677,3 +678,98 @@ async def test_the_plan_stays_in_the_columns_scroll_box(studio):
         await expect(page.locator('#nd-plan')).to_be_visible()
         assert await s.page.evaluate(inside)
         assert s.errors == []
+
+
+# --- the owner, 2026-10-04: [feedback] ---
+
+async def test_a_failed_workers_row_keeps_its_buttons_and_scroll_while_the_turn_streams(studio):
+    """Every stream event re-rendered the Needs-you stack with innerHTML: while the orchestrator wrote, the Retry and
+    Show all buttons were replaced many times a second (a click's press and release landed on different elements and
+    did nothing) and an opened report jumped back to its top. The stack is rewritten only when its content changes."""
+    async with studio() as s:
+        page = await open_nested(s)
+        s.srv.bus.publish(Event('turn_start', {}))
+        lanes(s, 3, {'r-1': 'completed', 'r-2': 'failed', 'r-3': 'interrupted'})
+        items = page.locator('#nd-stack .nd-ask-fail')
+        await expect(items).to_have_count(2)
+        await page.evaluate("""() => { for(const b of document.querySelectorAll('#nd-stack button')) b.dataset.probe = 'kept';
+            const r = document.getElementById('nd-stack-rest'); r.dataset.probe = 'kept'; }""")
+        for i in range(12):                                                    # the orchestrator keeps writing
+            s.srv.bus.publish(Event('text_delta', f'word {i} '))
+        await expect(page.locator('.nd-orch-scroll')).to_contain_text('word 11')
+        kept = await page.evaluate("""() => [...document.querySelectorAll('#nd-stack button')].map(b => b.dataset.probe || 'replaced')""")
+        assert kept and set(kept) == {'kept'}, kept
+        retry = items.nth(0).get_by_role('button', name='Ask the orchestrator to retry writer', exact=True)
+        await retry.click()                                                    # and it still works
+        await expect(items.nth(0)).to_contain_text('Retry asked')
+
+
+# DREAM-255: the two things the owner could not do, done as the owner does them. A worker's report long enough to be
+# cut on its row and, once opened, to overflow the box that holds the items after the first.
+REPORT = '\n'.join(f'Line {i}: the step failed.' for i in range(1, 37))        # 36 lines, under the 1000 kept
+
+
+def two_long_failures(s):
+    from test_nested_view import _activity
+    s.srv.bus.publish(Event('turn_start', {}))
+    lanes(s, 3, {'r-1': 'completed'})
+    s.srv.bus.publish(_activity('r-2', 'writer', 'status', status='failed', text=REPORT))
+    s.srv.bus.publish(_activity('r-3', 'writer', 'status', status='interrupted', text=REPORT))
+
+
+async def keep_writing(s, page, tag):
+    for i in range(12):
+        s.srv.bus.publish(Event('text_delta', f'{tag} {i} '))
+    await expect(page.locator('#nd-convo')).to_contain_text(f'{tag} 11')
+    await s.page.wait_for_timeout(200)                                          # every render of them has run
+
+
+async def test_an_opened_report_stays_where_it_was_scrolled_while_the_turn_streams(studio):
+    async with studio() as s:                                                  # 1600 x 1000: the rest box is at most 30vh
+        page = await open_nested(s)
+        two_long_failures(s)
+        items = page.locator('#nd-stack .nd-ask-fail')
+        await expect(items).to_have_count(2)
+        await items.nth(1).get_by_role('button', name='Show all', exact=True).click()   # the one in the rest box
+        await expect(items.nth(1).get_by_role('button', name='Show less', exact=True)).to_have_attribute('aria-expanded', 'true')
+        await s.page.wait_for_timeout(300)                                      # the render's own scroll to the toggle is over
+        rest = page.locator('#nd-stack-rest')
+        room = await rest.evaluate('r => r.scrollHeight - r.clientHeight')
+        assert room > 60, room                                                 # the opened report overflows its box
+        await rest.evaluate('(r, y) => { r.scrollTop = y; r.dataset.probe = "kept"; }', 40)
+        before = await rest.evaluate('r => r.scrollTop')
+        assert before > 0, before
+        await keep_writing(s, page, 'word')
+        assert await rest.evaluate('r => r.scrollTop') == before               # not sent back to its top
+        assert await rest.evaluate('r => r.dataset.probe') == 'kept'
+        assert s.errors == []
+
+
+async def test_a_press_and_release_around_a_stream_render_still_click_show_all_and_retry(studio):
+    """A click is a press and a release on the same element: the orchestrator writes between the two (renders of the
+    column), and the release still lands on the button that took the press."""
+    async with studio() as s:
+        page = await open_nested(s)
+        two_long_failures(s)
+        first = page.locator('#nd-stack .nd-ask-fail').first
+        await expect(first).to_be_visible()
+
+        async def slow_click(button, tag):
+            await button.scroll_into_view_if_needed()
+            await button.evaluate('b => { b.dataset.probe = "pressed"; }')
+            box = await button.bounding_box()
+            await s.page.mouse.move(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
+            await s.page.mouse.down()
+            await keep_writing(s, page, tag)                                   # renders between press and release
+            assert await button.evaluate('b => b.isConnected && b.dataset.probe') == 'pressed'   # the same node
+            await s.page.mouse.up()
+
+        # Retry first, while the row is one line (the opened report is taller than the column's room)
+        await slow_click(first.get_by_role('button', name='Ask the orchestrator to retry writer', exact=True), 'one')
+        await expect(first).to_contain_text('Retry asked')
+        assert len(s.steers) == 1
+        await s.page.wait_for_timeout(300)                                      # the row is laid out again, with its note
+        await slow_click(first.get_by_role('button', name='Show all', exact=True), 'two')
+        await expect(first.get_by_role('button', name='Show less', exact=True)).to_have_attribute('aria-expanded', 'true')
+        await expect(first.locator('.nd-ask-reason')).to_have_class(re.compile(r'\bnd-whole\b'))
+        assert len(s.steers) == 1 and s.errors == []

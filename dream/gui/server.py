@@ -40,6 +40,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from ..core import sandbox_net
 from ..core.backends.base import Event
 from .bus import EventBus
+from ..core.provider_login import LOGIN_ACTIONS, LoginRequests, prompt_command, prompt_result
 from .desktop_bridge import DesktopDiscovery
 from .page_server import PageServer
 
@@ -210,16 +211,22 @@ class StudioServer:
         runtime: Callable[[], dict] | None = None,
         learning: Callable[[], dict] | None = None,
         on_control: Callable[[dict], Any] | None = None,
+        on_link_message: Callable[[dict], Any] | None = None,
+        on_link_receipts: Callable[[], Any] | None = None,
+        on_link_agents: Callable[[], Any] | None = None,
         on_workflow: Callable[[str, dict], Any] | None = None,
         follow_model_view: bool = True,
         sleepwalk: bool = False,
         artifacts: Any = None,
+        session_drawer: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.bus = bus
         self.port = port
         # The session's artifact registry (gui/artifacts.py, DREAM-233): what a turn built, by id and version,
         # for the content route and the follow-up note. None without one (the pane then shows no cards).
         self.artifacts = artifacts
+        self._session_drawer = session_drawer
+        self._drawer_sources: dict[str, dict] = {}
         self._sleepwalk = None
         self._sleepwalk_on = sleepwalk     # Dream's own session fires Sleepwalk schedules (DREAM-158); tests do not
         self.token = secrets.token_urlsafe(32)
@@ -235,6 +242,15 @@ class StudioServer:
         self._runtime = runtime
         self._learning = learning
         self._on_control = on_control
+        self._on_link_message = on_link_message
+        self._on_link_receipts = on_link_receipts
+        self._on_link_agents = on_link_agents
+        self._deepsleep = None
+        from .terminal_activity import ActivityReader
+        self._terminal_activity = ActivityReader()
+        self._accounts = []
+        self._account_checked = 0.0
+        self._account_lock = asyncio.Lock()
         self._workflow_dispatch = on_workflow
         self._session_source = session if session is not None else {}
         # Questions in flight to the open artifact frame, by id (ask_frame).
@@ -251,6 +267,8 @@ class StudioServer:
         # "Open in browser" (DREAM-111): this workspace, read-only, on its own origin.
         self.pages = PageServer(self._workspace)
         self._discovery = DesktopDiscovery()
+        # Provider sign-in windows asked of the desktop (DREAM-246): ids and provider names in memory, nothing else.
+        self.login = LoginRequests(desktop=self._discovery.path is not None)
         self._ready = False
         self._error: str | None = None
         self._server: Any = None
@@ -292,6 +310,15 @@ class StudioServer:
         routes = [
             Route("/", self._index),
             Route("/api/prompt", self._prompt, methods=["POST"]),
+            Route("/api/commands", self._commands),
+            Route("/api/accounts", self._account_info),
+            Route("/api/link-message", self._link_message, methods=["GET", "POST"]),
+            Route("/api/deepsleep", self._deepsleep_action, methods=["GET", "POST"]),
+            Route("/api/deepsleep/activity", self._deepsleep_activity),
+            Route("/api/conversation", self._conversation_info),
+            Route("/api/deepsleep/bridge", self._deepsleep_bridge, methods=["POST"]),
+            Route("/api/deepsleep/control", self._deepsleep_control, methods=["POST"]),
+            WebSocketRoute("/ws/deepsleep/{node}", self._deepsleep_terminal),
             Route("/api/prompt-optimizer", self._optimize_prompt, methods=["POST"]),
             Route("/api/permission", self._permission_answer, methods=["POST"]),
             Route("/api/session", self._session_info),
@@ -308,12 +335,15 @@ class StudioServer:
             Route("/api/page_link", self._page_link),
             Route("/api/artifact/{aid}", self._artifact),
             Route("/api/artifacts", self._artifact_library),
+            Route("/api/preview-files", self._preview_files),
             Route("/api/open_file", self._open_file, methods=["POST"]),
             Route("/api/assets", self._assets),
             Route("/api/frame_reply", self._frame_reply, methods=["POST"]),
             Route("/api/answer", self._answer, methods=["POST"]),
             Route("/api/tweak", self._tweak, methods=["POST"]),
             Route("/api/upload", self._upload, methods=["POST"]),
+            Route("/api/deepsleep/files", self._deepsleep_files, methods=["POST"]),
+            Route("/api/deepsleep/upload", self._deepsleep_upload, methods=["POST"]),
             Route("/api/download", self._download),
             Route("/api/checkpoints", self._checkpoint_list),
             Route("/api/checkpoints/{cid}/diff", self._checkpoint_diff),
@@ -358,6 +388,295 @@ class StudioServer:
         from .. import extensions
         return JSONResponse(_jsonable(await run_in_threadpool(extensions.status)))
 
+    async def _account_info(self, request):
+        if not self._authorized(request):
+            return JSONResponse({'error': 'unauthorized'}, status_code=401)
+        from ..core.provider_accounts import inspect_accounts
+        async with self._account_lock:
+            if time.monotonic() - self._account_checked > 10:
+                self._accounts = await inspect_accounts()
+                self._account_checked = time.monotonic()
+        accounts = [dict(a) for a in self._accounts]
+        if self._deepsleep:
+            for account in accounts:
+                if account['status'] != 'unknown':
+                    continue
+                proven = any(r['state'] == 'completed' and time.monotonic() - r.get('_completed_at', 0) < 900
+                    and self._deepsleep.nodes.get(r['target'])
+                    and self._deepsleep.nodes[r['target']].provider == account['provider']
+                    for r in self._deepsleep.receipts.values())
+                if proven:
+                    account.update(status='signed_in', detail='A request completed in this provider’s Dream terminal within the last fifteen minutes.')
+                elif any(n.provider == account['provider'] and time.monotonic() - n.tools_used_at < 900
+                         for n in self._deepsleep.nodes.values()):
+                    account.update(status='signed_in', detail='Its terminal in DeepSleep used Dream’s tools within the last fifteen minutes.')
+        return JSONResponse({'accounts': accounts}, headers={'Cache-Control': 'no-store'})
+
+    async def _commands(self, request):
+        if not self._authorized(request):
+            return JSONResponse({'error': 'unauthorized'}, status_code=401)
+        from ..tools.installed_skill_tools import installed
+        from .. import plugins
+        commands = [
+            dict(name='DeepSleep', kind='workspace', description='Open floating agent terminals and connect their sessions.', action='deepsleep'),
+            dict(name='Council', kind='config', description='Choose models, assign work, or request independent review.', action='council'),
+            dict(name='Settings', kind='config', description='Open Dream configuration.', action='settings'),
+            dict(name='Skills', kind='workspace', description='Browse and manage installed skills.', action='navigate', view='skills'),
+            dict(name='Plugins', kind='config', description='Review plugin configuration and capabilities.', action='settings'),
+        ]
+        for provider, label in [('claude', 'Claude'), ('grok', 'Grok'), ('gemini', 'Gemini · Antigravity'), ('codex', 'Codex')]:
+            commands.append(dict(name='login ' + provider, kind='account', description='Open official browser sign-in for ' + label + '.', insert='/login ' + provider))
+        for skill in await run_in_threadpool(installed):
+            commands.append(dict(name=skill.name, kind='skill', description=' '.join(skill.description.split())[:400], insert='/skill ' + json.dumps(skill.name) + ' '))
+        for plugin in plugins.loaded():
+            if plugin.enabled:
+                commands.append(dict(name=plugin.name, kind='plugin', description=' '.join(plugin.description.split())[:400], insert='/plugin ' + json.dumps(plugin.name) + ' '))
+        return JSONResponse({'commands': commands})
+
+    async def _bounded_json(self, request):
+        raw = await request.body()
+        if len(raw) > 100_000:
+            raise ValueError('Request exceeds 100 KiB.')
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError('Request must be an object.')
+        return data
+
+    async def _link_message(self, request):
+        if not self._authorized(request):
+            return JSONResponse({'error': 'unauthorized'}, status_code=401)
+        if self._on_link_message is None or self._on_link_receipts is None:
+            return JSONResponse({'error': 'This is not a linked terminal session.'}, status_code=409)
+        try:
+            if request.method == 'GET':
+                result = {'receipts': self._on_link_receipts(), 'agents': self._on_link_agents() if self._on_link_agents else []}
+            else:
+                result = self._on_link_message(await self._bounded_json(request))
+            if hasattr(result, '__await__'):
+                result = await result
+            return JSONResponse({'ok': True, 'result': result})
+        except (ValueError, TypeError) as exc:
+            return JSONResponse({'error': str(exc)}, status_code=400)
+
+    def _board(self):
+        if os.environ.get('DREAM_DEEPSLEEP_NODE_ID'):
+            raise ValueError('Use the parent DeepSleep workspace to launch terminals.')
+        if self._deepsleep is None:
+            from .deepsleep import DeepSleep
+            self._deepsleep = DeepSleep(self._workspace, lambda: f'http://127.0.0.1:{self.port}')
+        if self._workspace() != self._deepsleep.workspace_path:
+            raise ValueError('DeepSleep belongs to the previous workspace. Close or restart Dream before opening a different project board.')
+        return self._deepsleep
+
+    async def _deepsleep_action(self, request):
+        if not self._authorized(request):
+            return JSONResponse({'error': 'unauthorized'}, status_code=401)
+        try:
+            board = self._board()
+            result = board.snapshot() if request.method == 'GET' else await board.action(await self._bounded_json(request))
+            return JSONResponse(result)
+        except (ValueError, TypeError, OSError) as exc:
+            return JSONResponse({'error': str(exc)}, status_code=400)
+
+    async def _conversation_info(self, request):
+        if not self._authorized(request):
+            return JSONResponse({'error': 'unauthorized'}, status_code=401)
+        from .terminal_activity import project
+        snapshot = self.bus.conversation.snapshot(with_ids=True)
+        metadata = {'session_id': self._session.get('session_id', '')}
+        if self._session_drawer is not None:
+            # This synchronous callback observes the same App session as its bus.
+            # Only explicit records are accepted; never mine user prose for files.
+            supplied = self._session_drawer()
+            if isinstance(supplied, dict):
+                metadata.update({key: supplied[key] for key in ('changes', 'sources') if key in supplied})
+        if self.artifacts is not None:
+            # snapshot() is only this session/workspace, unlike library().earlier.
+            outputs = self.artifacts.snapshot()
+            metadata['outputs'] = {'available': True, 'items': outputs, 'total': len(outputs)}
+        if self._on_link_agents is not None:
+            agents = self._on_link_agents()
+            metadata['agents'] = {'available': True, 'items': agents, 'total': len(agents),
+                                  'trimmed': bool(snapshot.get('trimmed')) or len(agents) >= 32,
+                                  'reason': 'Recent recorded agent summaries; not a process liveness check.'}
+        snapshot['session'] = metadata
+        return JSONResponse(project(snapshot), headers={'Cache-Control': 'no-store'})
+
+    async def _deepsleep_activity(self, request):
+        if not self._authorized(request):
+            return JSONResponse({'error': 'unauthorized'}, status_code=401)
+        from .deepsleep import ident
+        from .terminal_activity import drawer_metadata, project
+        try:
+            board = self._board()
+            node = board.nodes.get(ident(request.query_params.get('node')))
+            if node is None:
+                return JSONResponse({'error': 'No such terminal'}, status_code=404)
+            binding = (node.launch_generation, node.process)
+            result = await self._terminal_activity.get(board, node)
+            if (board.nodes.get(node.id) is node and node.launch_generation == binding[0]
+                    and node.process is binding[1]):
+                sources = self._drawer_source_section(board, node)
+                session = {**result.get('session', {}), 'sources': sources}
+                if result.get('available'):
+                    # Rebudget events after adding parent-owned upload metadata.
+                    result = dict(project({**result, 'session': session}), generation=str(binding[0]))
+                else:
+                    # Even an empty native launch must replace the previous
+                    # generation's source list, rather than leave it stale.
+                    result = dict(result, session=drawer_metadata(session), generation=str(binding[0]))
+            return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+        except (ValueError, TypeError):
+            return JSONResponse({'error': 'Invalid activity request'}, status_code=400)
+
+    def _drawer_source_section(self, board, node, record=None):
+        """Successful Dream uploads for this launch, never evidence of submission."""
+        self._drawer_sources = {key: value for key, value in self._drawer_sources.items()
+                                if board.nodes.get(key) is value['node']
+                                and value['node'].launch_generation == value['generation']}
+        entry = self._drawer_sources.get(node.id)
+        if record is not None:
+            if entry is None:
+                entry = {'node': node, 'generation': node.launch_generation, 'items': [], 'total': 0}
+                self._drawer_sources[node.id] = entry
+            entry['items'].append({key: record[key] for key in ('id', 'name', 'path', 'size')})
+            del entry['items'][:-100]
+            entry['total'] += 1
+        return {'available': True, 'items': list(entry['items']) if entry else [],
+                'total': entry['total'] if entry else 0,
+                'reason': 'Files attached in Dream; adding to draft does not confirm submission or reading.'}
+
+    async def _deepsleep_files(self, request):
+        if not self._authorized(request):
+            return JSONResponse({'error': 'unauthorized'}, status_code=401)
+        from .native_terminals import workspace_files
+        try:
+            board = self._board()
+            data = await self._bounded_json(request)
+            board.node(data.get('node'))
+            if board.workspace_path is None:
+                raise ValueError('Open a workspace before browsing files.')
+            result = await run_in_threadpool(workspace_files, board.workspace_path, data.get('path', ''))
+            return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+        except (ValueError, TypeError, OSError) as exc:
+            return JSONResponse({'error': str(exc)}, status_code=400)
+
+    async def _deepsleep_upload(self, request):
+        """Intake belongs to the pane's pinned project, not a later project switch."""
+        if not self._authorized(request):
+            return JSONResponse({'error': 'unauthorized'}, status_code=401)
+        from .uploads import receive_file, save_file, UploadError
+        try:
+            board = self._board()
+            node = board.node(request.query_params.get('node'))
+            generation = node.launch_generation
+            if board.workspace_path is None:
+                raise ValueError('Open a workspace before attaching files.')
+            name, data = await receive_file(request)
+            if board.nodes.get(node.id) is not node or node.launch_generation != generation:
+                return JSONResponse({'error': 'The terminal changed before the upload was saved.'}, status_code=409)
+            record = await run_in_threadpool(save_file, board.workspace_path, name, data)
+            if board.nodes.get(node.id) is not node or node.launch_generation != generation:
+                return JSONResponse({'error': 'The terminal changed while saving. The file was saved but not attached to the current terminal.'}, status_code=409)
+            self._drawer_source_section(board, node, record)
+            return JSONResponse({'ok': True, **record, 'workspace': str(board.workspace_path)})
+        except UploadError as exc:
+            return JSONResponse({'error': str(exc)}, status_code=exc.status)
+        except (ValueError, TypeError, OSError) as exc:
+            return JSONResponse({'error': str(exc)}, status_code=400)
+
+    async def _deepsleep_control(self, request):
+        """A tile's own controls (2026-10-10): its Dream terminal's mode and Handoff, owner token only."""
+        if not self._authorized(request):
+            return JSONResponse({'error': 'unauthorized'}, status_code=401)
+        try:
+            body = await self._bounded_json(request)
+            result = await self._board().control(body.get('node'), body.get('action'))
+            return JSONResponse({'ok': True, 'result': _jsonable(result)}, headers={'Cache-Control': 'no-store'})
+        except (ValueError, TypeError, AttributeError) as exc:
+            return JSONResponse({'error': str(exc)}, status_code=400)
+
+    async def _deepsleep_bridge(self, request):
+        # A child token grants linked messaging only, never parent tools/control.
+        try:
+            result = await self._board().bridge(request.headers.get('x-dream-token') or '', await self._bounded_json(request))
+            return JSONResponse({'ok': True, 'result': result})
+        except PermissionError:
+            return JSONResponse({'error': 'unauthorized'}, status_code=401)
+        except (ValueError, TypeError) as exc:
+            from .deepsleep import LINK_LIMIT
+            codes = {
+                'Connect a directed link before sending between sessions.': 'link_required',
+                'Connect a directed link before preparing a handoff.': 'link_required',
+                'Terminal session does not exist.': 'unknown_target',
+                'Target session is not ready. Check its terminal or sign in and restart.': 'target_not_ready',
+                'Message id is already bound to different content.': 'id_conflict',
+                'Handoff id is already bound to different content.': 'id_conflict',
+                'Message cycle or hop limit reached; delivery blocked.': 'route_blocked',
+                'No incoming task matches this route.': 'route_unknown',
+                'No message matches this session and identifier.': 'receipt_unknown',
+                'This workspace reached its message limit; open a fresh session.': 'capacity_reached',
+                'This workspace reached its handoff limit; open a fresh session.': 'capacity_reached',
+                LINK_LIMIT: 'link_limit',
+            }
+            return JSONResponse({'error': str(exc), 'code': codes.get(str(exc), 'invalid_request')}, status_code=400)
+
+    async def _deepsleep_terminal(self, ws):
+        await ws.accept()
+        tasks = []
+        node = None
+        queue = asyncio.Queue(maxsize=128)
+        try:
+            hello = await asyncio.wait_for(ws.receive_json(), 5)
+            if not isinstance(hello, dict) or not secrets.compare_digest(str(hello.get('token') or ''), self.token):
+                await ws.close(code=4401)
+                return
+            board = self._board()
+            node = board.node(ws.path_params['node'])
+            node.subscribers.add(queue)
+            initial_state = node.state
+            initial_output = node.output
+            # Authorize input before replaying output that can ask xterm for
+            # cursor/device replies. A socket-open event alone is insufficient.
+            await ws.send_json({'type': 'state', 'state': initial_state})
+            if initial_output:
+                await ws.send_json({'type': 'output', 'data': initial_output})
+            async def send():
+                state = initial_state
+                while True:
+                    if state != node.state:
+                        state = node.state
+                        await ws.send_json({'type': 'state', 'state': state})
+                    try:
+                        await ws.send_json(await asyncio.wait_for(queue.get(), 0.5))
+                    except asyncio.TimeoutError:
+                        pass
+            async def receive():
+                while True:
+                    data = await ws.receive_json()
+                    if not isinstance(data, dict):
+                        raise ValueError('Invalid terminal packet.')
+                    if data.get('type') == 'input':
+                        board.input(node, data.get('data'))
+                    elif data.get('type') == 'resize':
+                        board.resize(node, data.get('cols'), data.get('rows'))
+                    else:
+                        raise ValueError('Unknown terminal packet.')
+            tasks = [asyncio.create_task(send()), asyncio.create_task(receive())]
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        except (ValueError, WebSocketDisconnect, asyncio.TimeoutError):
+            pass
+        finally:
+            if node:
+                node.subscribers.discard(queue)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                await ws.close()
+            except (RuntimeError, WebSocketDisconnect):
+                pass
+
     async def _learning_info(self, request):
         if not self._authorized(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -378,8 +697,6 @@ class StudioServer:
         origin = request.headers.get("origin")
         if origin and origin.rstrip("/") != str(request.base_url).rstrip("/"):
             return JSONResponse({"error": "origin does not match this Studio session"}, status_code=403)
-        if self._on_control is None:
-            return JSONResponse({"error": "Runtime controls are unavailable"}, status_code=503)
         try:
             body = bytearray()
             async for chunk in request.stream():
@@ -389,6 +706,14 @@ class StudioServer:
             payload = json.loads(body)
             if not isinstance(payload, dict):
                 raise ValueError("Expected a control object")
+            action = payload.get("action")
+            if isinstance(action, str) and action in LOGIN_ACTIONS:
+                # DREAM-246: answered here, behind the same token and origin checks, and never handed to the
+                # session: asking for a sign-in window does not wait for a turn and reaches no model or tool.
+                return JSONResponse({"ok": True, "result": self.login.control(payload)},
+                                    headers={"Cache-Control": "no-store"})
+            if self._on_control is None:
+                return JSONResponse({"error": "Runtime controls are unavailable"}, status_code=503)
             result = self._on_control(payload)
             if hasattr(result, "__await__"):
                 result = await result
@@ -529,7 +854,13 @@ class StudioServer:
             # Where "Open in browser" pages live: the desktop hands exactly these to the
             # owner's default browser (DREAM-111). None while that server is not running.
             "page_base": self.pages.base_url,
+            # DREAM-246: the one sign-in window waiting to be opened ({id, provider}) or None.
+            "login_request": self.login.desktop_view(),
         }), headers={"Cache-Control": "no-store"})
+
+    def login_request(self, provider: str) -> dict:
+        """`/login <provider>` in the session: the same request the Council Sign in button makes."""
+        return self.login.request(provider)
 
     async def _page_link(self, request):
         """The "Open in browser" address of a workspace file (DREAM-111): on the page
@@ -599,6 +930,42 @@ class StudioServer:
                     except OSError:
                         pass
         return JSONResponse(_jsonable(listed), headers={"Cache-Control": "no-store"})
+
+    async def _preview_files(self, request):
+        """DeepSleep's Preview (2026-10-10): the workspace's files the preview panel can show (pages, reports, images,
+        media, documents), newest first, for the owner to open beside the terminals. Names and sizes only; a file's
+        bytes come from /api/download. Hidden folders, dependency and build folders and links are not walked."""
+        if not self._authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        ws = self._workspace()
+        if ws is None:
+            return JSONResponse({"files": [], "truncated": False}, headers={"Cache-Control": "no-store"})
+
+        def walk() -> dict[str, Any]:
+            from .artifacts import SKIP_DIRS, kind_of
+            found, seen, limit = [], 0, 500
+            for folder, dirs, names in os.walk(ws):
+                dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS
+                                 and not os.path.islink(os.path.join(folder, d)))
+                for name in names:
+                    seen += 1
+                    path = Path(folder) / name
+                    kind = kind_of(name)
+                    if kind is None or name.startswith(".") or path.is_symlink():
+                        continue
+                    try:
+                        info = path.stat()
+                    except OSError:
+                        continue
+                    found.append({"path": str(path.relative_to(ws)), "type": kind, "bytes": info.st_size,
+                                  "at": info.st_mtime})
+                if seen > 20000:
+                    break
+            found.sort(key=lambda row: row["at"], reverse=True)
+            return {"files": found[:limit], "truncated": len(found) > limit or seen > 20000}
+
+        listed = await run_in_threadpool(walk)
+        return JSONResponse(listed, headers={"Cache-Control": "no-store"})
 
     async def _open_file(self, request):
         """"Open in app" (DREAM-236): a report, an image, a media file or a document of this workspace, handed to
@@ -981,15 +1348,30 @@ class StudioServer:
     async def _prompt(self, request):
         if not self._authorized(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
-        if self._on_prompt is None:
-            return JSONResponse({"error": "Choose a model before sending a message"}, status_code=503)
+        unread = object()
         try:
             body = await request.json()
         except Exception:
+            body = unread
+        if isinstance(body, dict) and prompt_command(body.get("prompt")) is not None:
+            # DREAM-246: `/login <provider>` typed into a prompt box. Answered here, before the model check, the
+            # attachment read and the queue/steer routes, so it works while a turn runs and with no model chosen.
+            return self._login_prompt(request, body)
+        if self._on_prompt is None:
+            return JSONResponse({"error": "Choose a model before sending a message"}, status_code=503)
+        if body is unread:
             return JSONResponse({"error": "bad json"}, status_code=400)
         if not isinstance(body, dict):
             return JSONResponse({"error": "body must be an object"}, status_code=400)
         text = str(body.get("prompt") or "").strip()
+        invocation_origin = None
+        if text.startswith(('/skill ', '/plugin ')):
+            from ..core.invocations import expand_invocation
+            try:
+                text = await run_in_threadpool(expand_invocation, text)
+                invocation_origin = text.origin
+            except ValueError as exc:
+                return JSONResponse({'error': str(exc)}, status_code=400)
         from .uploads import validate_attachments, UploadError
         try:
             ids = body.get("attachments", [])
@@ -1020,6 +1402,10 @@ class StudioServer:
         delivery = body.get('delivery', 'queue')
         if delivery not in ('queue', 'steer'):
             return JSONResponse({'error': 'Unknown prompt delivery mode'}, status_code=400)
+        if invocation_origin is not None:
+            from ..core.invocations import InvokedPrompt
+
+            text = InvokedPrompt(text, invocation_origin)
         try:
             if delivery == 'steer':
                 if self._on_steer is None:
@@ -1036,6 +1422,37 @@ class StudioServer:
         except (ValueError, RuntimeError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         return JSONResponse({"ok": True})
+
+    # The fields either prompt box sends with an ordinary message. A /login command may carry them (they are the
+    # page's normal payload) but uses none of them; any other field is refused, so nothing can ride along.
+    _LOGIN_PROMPT_FIELDS = frozenset({"prompt", "attachments", "delivery", "steering_id", "steering_target",
+                                      "read_twice", "artifact"})
+
+    def _login_prompt(self, request, body: dict) -> JSONResponse:
+        """`/login [provider]` from a prompt box (DREAM-246). The token and the page boundary were checked before
+        this is reached. It asks the same request record the Council Sign in button asks and does nothing else:
+        no on_prompt, no on_steer, no model, no 'user' event, no attachment or artifact is read, and a steering id
+        sent with it is neither used nor recorded. The answer is `{ok, command: 'login', result}`, never a
+        steering receipt. A refusal is a 400 whose text is fixed: what was typed is never repeated back."""
+        headers = {"Cache-Control": "no-store"}
+
+        def refuse(message: str, status: int = 400) -> JSONResponse:
+            return JSONResponse({"error": message, "command": "login"}, status_code=status, headers=headers)
+
+        origin = request.headers.get("origin")
+        if origin and origin.rstrip("/") != str(request.base_url).rstrip("/"):
+            return refuse("origin does not match this Studio session", 403)
+        if not set(body) <= self._LOGIN_PROMPT_FIELDS:
+            return refuse("A /login command takes a provider name and nothing else.")
+        if body.get("delivery", "queue") not in ("queue", "steer"):
+            return refuse("Unknown prompt delivery mode")
+        if body.get("attachments", []) != []:
+            return refuse("A /login command cannot carry attached files. Remove them, then send /login again.")
+        try:
+            result = prompt_result(prompt_command(body["prompt"]) or "", self.login_request)
+        except ValueError as exc:
+            return refuse(str(exc))
+        return JSONResponse({"ok": True, "command": "login", "result": _jsonable(result)}, headers=headers)
 
     async def _accept_prompt(self, text: str, display_text: str | None = None) -> None:
         if self._on_prompt is None:
@@ -1266,6 +1683,9 @@ class StudioServer:
         if self._sleepwalk is not None:
             await self._sleepwalk.stop()
             self._sleepwalk = None
+        if self._deepsleep is not None:
+            await self._deepsleep.stop()
+        await self._terminal_activity.close()
         await self.pages.stop()
         if self._server is not None:
             self._server.should_exit = True

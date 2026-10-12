@@ -2,8 +2,9 @@
 
 2026-09-23: in session 20260923-094144-f5ed (MiMo-V2.6 on MachX, whose engine reports no vision for that architecture)
 the model told the owner only in its final report that it could not see images. Now the session header says whether
-image input is on, the model's Runtime notes say so when it is off, the local model picker shows vision per model, and
-a MachX session takes image input from the engine's own report unless the owner's profile overrides it.
+image input is on, the model's Runtime notes say so when it is off, and a MachX session takes image input from the
+engine's own report unless the owner's profile overrides it. The local model picker no longer shows vision per model:
+since the native model loader it is inspected once a model is chosen (c).
 """
 from dataclasses import replace
 from pathlib import Path
@@ -143,29 +144,23 @@ def test_runtime_notes_name_image_input_only_when_it_is_off():
     assert 'Image input' not in on
 
 
-# ---- (c) the local model picker shows vision per model ------------------------------------------------------------
+# ---- (c) the local model picker claims no vision before a model is chosen -------------------------------------------
+# The native model loader (DREAM-251..285) lists models without asking the engine about any of them: capabilities are
+# inspected once a model is chosen (startup.model_settings), so before that each row says vision is unreported instead
+# of guessing from the file.
 
-def test_the_picker_shows_vision_per_local_model(monkeypatch, tmp_path):
+def test_the_picker_claims_no_vision_before_a_model_is_chosen(monkeypatch, tmp_path):
     from dream.tui import picker
-    seeing, blind, broken = tmp_path / 'seeing.gguf', tmp_path / 'blind', tmp_path / 'broken.gguf'
+    from test_model_presets import gguf
+    seeing = gguf(tmp_path / 'seeing.gguf', {'general.architecture': 'fixture', 'general.name': 'Seeing'})
     monkeypatch.setattr(machx, 'served_model_id', lambda: 'blind')
-    monkeypatch.setattr(machx, 'served_model_path', lambda: blind)
     monkeypatch.setattr(machx, 'available', lambda: True)
-    monkeypatch.setattr(machx, 'list_models_detailed', lambda: [LocalModel('seeing', seeing, 10.0, 'nvme'),
-                                                                 LocalModel('blind', blind, 20.0, 'nvme'),
-                                                                 LocalModel('broken', broken, 5.0, 'usb')])
-
-    def probe(path):
-        if path == broken:
-            raise ValueError('MachX capability check failed')
-        return caps(path == seeing)
-    monkeypatch.setattr(machx, 'capabilities', probe)
+    monkeypatch.setattr(machx, 'list_models_detailed', lambda: [LocalModel('seeing', seeing, 10.0, 'nvme')])
+    monkeypatch.setattr(machx, 'capabilities', lambda *_: pytest.fail('the picker must not ask the engine about a model'))
     monkeypatch.setattr(picker, 'detect_providers', lambda: [])
     rows = {row['id']: row for row in startup.catalog()['choices']}
-    assert rows['running']['vision'] is False and rows['running']['label'].endswith('· text only')
-    assert rows[str(seeing)]['vision'] is True and rows[str(seeing)]['label'].endswith('· sees images')
-    assert rows[str(blind)]['vision'] is False and rows[str(blind)]['label'].endswith('· text only')
-    assert rows[str(broken)]['vision'] is None and rows[str(broken)]['label'].endswith('· vision unreported')
+    assert rows['running']['vision'] is None and rows['running']['label'] == 'blind · already running · vision unreported'
+    assert rows[str(seeing)]['vision'] is None
 
 
 # ---- (a) the session header shows a vision chip -------------------------------------------------------------------

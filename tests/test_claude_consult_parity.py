@@ -115,7 +115,8 @@ async def test_edit_mode_consults_write_the_workspace_but_never_outside_it(mode,
     assert denied.behavior == 'deny' and 'outside workspace' in denied.message
     # What the main path would ask the owner about is refused, since a consult has nobody to ask.
     assert 'cannot ask' in denied.message
-    assert await _verdict(options, config.tool_id('delete_file'), {'paths': [str(tmp_path / 'a.txt')]}) == 'deny'
+    # A delete the owner would be asked about is refused (a code file; an ordinary note goes in auto, 2026-10-11).
+    assert await _verdict(options, config.tool_id('delete_file'), {'paths': [str(tmp_path / 'a.py')]}) == 'deny'
 
 
 async def test_no_mode_runs_as_ask_and_no_session_means_builtins_only(tmp_path):

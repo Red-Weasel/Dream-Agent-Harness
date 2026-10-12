@@ -99,3 +99,119 @@ def wake_ordering(memories: list[dict[str, Any]]) -> list[dict[str, Any]]:
     trails, and unknown sits between — preserving the incoming (salience) order
     within each group. Pure; used by the system prompt's wake context."""
     return sorted(memories, key=lambda m: _WAKE_RANK.get(m.get("facet") or "", 1))
+
+
+# Explicit metadata only: heuristics never decide that one fact invalidates another.
+LIFECYCLE_VERSION = 1
+MAX_ACTIVE_ROWS = 64
+MAX_ACTIVE_BYTES = 262144
+MAX_MEMORY_BYTES = 65536
+
+
+def lifecycle_json(value: Any) -> str:
+    """Validate the versioned file/index contract; absent legacy metadata is eligible.
+
+    Timestamps require an explicit timezone. Unknown versions/keys fail closed
+    and remain visible as metadata errors on file import, never silently reset.
+    """
+    import json
+    from datetime import datetime
+
+    if value is None or value == '':
+        value = {}
+    if isinstance(value, str):
+        if len(value.encode('utf-8')) > 4096:
+            raise ValueError('lifecycle metadata exceeds 4096 bytes')
+        try:
+            value = json.loads(value)
+        except ValueError as exc:
+            raise ValueError('malformed lifecycle JSON') from exc
+    if not isinstance(value, dict):
+        raise ValueError('lifecycle must be an object')
+    if value:
+        if type(value.get('version')) is not int or value['version'] != LIFECYCLE_VERSION:
+            raise ValueError('unsupported lifecycle version')
+        if set(value) - {'version', 'expires_at', 'invalidated_at', 'superseded_by', 'reason'}:
+            raise ValueError('unknown lifecycle field')
+        for key in ('expires_at', 'invalidated_at'):
+            if key in value:
+                try:
+                    dt = datetime.fromisoformat(value[key])
+                    if dt.utcoffset() is None:
+                        raise ValueError('timezone required')
+                except (ValueError, TypeError) as exc:
+                    raise ValueError(f'{key} requires an ISO timestamp with timezone') from exc
+        if 'superseded_by' in value:
+            target = value['superseded_by']
+            if not isinstance(target, str) or not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', target) or len(target) > 80:
+                raise ValueError('superseded_by requires an exact memory slug')
+        if 'reason' in value and (not isinstance(value['reason'], str) or len(value['reason']) > 1024):
+            raise ValueError('lifecycle reason must be a string of at most 1024 characters')
+    text = json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True)
+    if len(text) > 4096:
+        raise ValueError('lifecycle metadata exceeds 4096 bytes')
+    return text
+
+
+def active_status(memory: dict, *, now=None, target=None) -> str:
+    """Return eligible, expired, invalidated, superseded, conflict or metadata_error.
+
+    A dangling/cross-project/self supersession is ambiguous: keep the fact
+    eligible and surface conflict. Explicit invalidation is immediate; its time
+    is provenance, not a scheduler. Expiry takes effect at the inclusive boundary.
+    """
+    import json
+    from datetime import datetime, timezone
+
+    if memory.get('lifecycle_error'):
+        return 'metadata_error'
+    try:
+        lifecycle = json.loads(lifecycle_json(memory.get('lifecycle')))
+    except ValueError:
+        return 'metadata_error'
+    if 'invalidated_at' in lifecycle:
+        return 'invalidated'
+    if 'expires_at' in lifecycle:
+        if datetime.fromisoformat(lifecycle['expires_at']) <= (now or datetime.now(timezone.utc)):
+            return 'expired'
+    if 'superseded_by' in lifecycle:
+        if (target and target.get('slug') != memory.get('slug')
+                and target.get('project') == memory.get('project')
+                and target.get('slug') == lifecycle['superseded_by']
+                and not target.get('lifecycle_error')
+                and active_status(dict(target, lifecycle=json.loads(lifecycle_json(target.get('lifecycle')))), now=now) == 'eligible'):
+            return 'superseded'
+        return 'conflict'
+    return 'eligible'
+
+
+def curate_active(store: Any, *, scope=None, limit: int = MAX_ACTIVE_ROWS,
+                  max_bytes: int = MAX_ACTIVE_BYTES, after_id: int = 0) -> dict:
+    """Bounded advisory inspection, safe on every task/write; no models or file edits.
+
+    Exact duplicates are reported within their own scope, never collapsed.
+    Pass next_after_id on a later call to inspect the next page. Zero means wrap.
+    File ingestion is still explicit sync; this pass does not rewrite user files.
+    """
+    import hashlib
+    import json
+
+    rows = store.active_memory_page(scope=scope if scope is not None else store.default_scope(),
+                                    limit=limit, max_bytes=max_bytes, after_id=after_id)
+    groups: dict[tuple, list[str]] = {}
+    report = {'examined': len(rows), 'bytes': 0, 'eligible': 0, 'expired': 0,
+              'invalidated': 0, 'superseded': 0, 'conflict': 0, 'metadata_error': 0,
+              'duplicates': [], 'next_after_id': rows[-1]['id'] if rows else 0}
+    for row in rows:
+        report['bytes'] += len(json.dumps(row, ensure_ascii=False).encode('utf-8'))
+        try:
+            target_slug = json.loads(lifecycle_json(row.get('lifecycle'))).get('superseded_by')
+        except ValueError:
+            target_slug = None
+        target = store.lifecycle_target(target_slug) if target_slug else None
+        report[active_status(row, target=target)] += 1
+        key = (row.get('project'), row['kind'], hashlib.sha256(
+            (row['title'] + '\0' + row['body']).encode('utf-8')).hexdigest())
+        groups.setdefault(key, []).append(row['slug'])
+    report['duplicates'] = [slugs for slugs in groups.values() if len(slugs) > 1]
+    return report

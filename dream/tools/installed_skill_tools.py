@@ -86,6 +86,22 @@ def index_lines() -> list[str]:
         return []
 
 
+def description_index(max_chars: int | None = None) -> tuple[list[str], int]:
+    """DREAM-258, description mode only: (index lines, how many skills were left out). The same skills
+    index_lines() lists -- enabled, in the session's preset, curated unless a preset is on -- each as its name and
+    a one-or-two-sentence description from the metadata discovery already read (never the SKILL.md body), bounded
+    in characters whatever the preset's size. What is left out stays reachable with skill_find."""
+    from .. import presets
+    from ..core import discovery
+    try:
+        preset = presets.session()
+        skills = [skill for skill in installed() if skill.curated or preset is not None]
+    except (OSError, ValueError):
+        return [], 0
+    lines = [discovery.entry_line(skill.name, skill.description) for skill in skills]
+    return discovery.bounded_lines(lines, discovery.SKILL_INDEX_CHARS if max_chars is None else max_chars)
+
+
 def _by_name(name: str) -> loader.FileSkill | None:
     want = (name or "").strip().lower()
     for s in installed():

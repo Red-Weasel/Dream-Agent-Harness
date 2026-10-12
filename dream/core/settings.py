@@ -72,7 +72,7 @@ MIN_MAX_TOKENS = 256
 #   main (S3 = DREAM-144): model required; provider optional, machx only -- which served model Dream attaches to
 #                          when the local endpoint lists several (machx.served_model_id); not routed at any seam.
 _HTTP = tuple(key for key, spec in PROVIDERS.items() if spec.kind == "openai")
-_CRITICS = tuple(key for key, spec in PROVIDERS.items() if spec.kind in ("anthropic", "cli"))
+_CRITICS = tuple(key for key, spec in PROVIDERS.items() if spec.kind in ("anthropic", "cli") and key != "antigravity")
 _RULES: dict[str, tuple[tuple[str, ...], bool, bool, str]] = {
     "subagents": (_HTTP + ("anthropic",), True, False,
                   "a sub-agent runs on the lead's HTTP endpoint, or on the Claude SDK when the role names anthropic"),

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 from starlette.testclient import TestClient
 
+from dream.core.backends import openai_compat
 from dream.gui.bus import EventBus
 from dream.gui.server import StudioServer
 from dream.tui.app import App
@@ -89,18 +90,37 @@ async def test_a_paused_worker_gets_its_messages_when_resumed_in_the_order_sent(
         'Received your message: "First note."', 'Received your message: "Second note."']
 
 
-async def test_a_message_the_run_ends_before_is_reported_undelivered():
+async def test_a_message_the_run_ends_before_is_reported_undelivered(monkeypatch):
+    # ADR-092 (DREAM-260): a message that arrives while the worker's last reply is being written is not lost. The
+    # reply is kept and the message goes with one more request while a round is left; only a run with no round
+    # left ends before taking it, and then the message is reported undelivered and the result is incomplete.
+    long = "Also compare it with the second source, " * 5
+    events = []
+    client = _Engine([], {"inspect": [_sub_final("the answer"), _sub_final("compared both")]})
+    first = client.gates[("inspect", 0)] = asyncio.Event()
+    b = _researcher_backend(events, client)
+    run = asyncio.ensure_future(b._run_subagent("researcher", "inspect"))
+    run_id = await _until(lambda: client.run_ids.get("inspect"))
+    assert b.worker_control("agent_message", run_id, long)["pending"] == 1
+    first.set()
+    assert await asyncio.wait_for(run, 5) == ("compared both", False)
+    assert _statuses(events) == ["running", "message_received", "completed"]
+    second = client.posted[1][1]["messages"]
+    assert [m["role"] for m in second] == ["system", "user", "assistant", "user"]
+    assert second[-2]["content"] == "the answer" and second[-1]["content"] == FRAME + long
+
+    monkeypatch.setattr(openai_compat, "_SUB_MAX_ROUNDS", 1)          # the last reply is its last round
     events = []
     client = _Engine([], {"inspect": [_sub_final("the answer")]})
     first = client.gates[("inspect", 0)] = asyncio.Event()
     b = _researcher_backend(events, client)
     run = asyncio.ensure_future(b._run_subagent("researcher", "inspect"))
     run_id = await _until(lambda: client.run_ids.get("inspect"))
-    long = "Also compare it with the second source, " * 5
     assert b.worker_control("agent_message", run_id, long)["pending"] == 1
     first.set()
-    assert await asyncio.wait_for(run, 5) == ("the answer", False), "the lead's result is unchanged"
-    assert _statuses(events) == ["running", "message_undelivered", "completed"]
+    assert await asyncio.wait_for(run, 5) == ("(subagent 'researcher' hit the 1-round limit; last note: the answer)",
+                                              True)
+    assert _statuses(events) == ["running", "message_undelivered", "failed"]
     undelivered = next(r for r in _rows(events) if r.get("status") == "message_undelivered")
     preview = " ".join(long.split())[:80] + "…"
     assert undelivered["text"] == f'Not delivered: it ended before its next request ("{preview}").'
@@ -126,7 +146,7 @@ async def test_a_message_after_the_run_ends_is_refused_with_the_reason(tmp_path)
 
 async def test_the_text_must_be_a_message_of_at_most_4000_characters():
     events = []
-    client = _Engine([], {"inspect": [_sub_final("done")]})
+    client = _Engine([], {"inspect": [_sub_final("done"), _sub_final("done, and read the note")]})
     gate = client.gates[("inspect", 0)] = asyncio.Event()
     b = _researcher_backend(events, client)
     run = asyncio.ensure_future(b._run_subagent("researcher", "inspect"))
@@ -140,7 +160,9 @@ async def test_the_text_must_be_a_message_of_at_most_4000_characters():
     assert b.worker_control("agent_message", run_id, "y" * 4000)["pending"] == 1, "the limit itself is accepted"
     gate.set()
     await asyncio.wait_for(run, 5)
-    assert "message_received" not in _statuses(events)
+    # Sent during its last reply, so delivered with one more request (ADR-092): only the accepted one, whole.
+    assert _statuses(events).count("message_received") == 1
+    assert client.posted[1][1]["messages"][-1]["content"] == FRAME + "y" * 4000
 
 
 async def test_a_stopping_worker_and_a_check_inside_the_leads_conversation_refuse_messages():

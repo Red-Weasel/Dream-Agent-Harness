@@ -58,7 +58,10 @@ def default_cli() -> str | None:
     prerequisites only). An unusable settings file raises ValueError; `command` says so and asks no one."""
     role = settings.role("critic")
     if role:
-        return next(cli for cli, key in PROVIDERS.items() if key == role["provider"])
+        cli = next((cli for cli, key in PROVIDERS.items() if key == role["provider"]), None)
+        if cli is None:
+            raise ValueError('Configured critic has no enforced read-only CLI path; choose Claude, Codex, Gemini legacy or Grok')
+        return cli
     available = {row["key"] for row in council_config.provider_choices() if row.get("available")}
     return next((cli for cli, key in PROVIDERS.items() if key in available), None)
 

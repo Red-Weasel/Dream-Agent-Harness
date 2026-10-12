@@ -7,13 +7,19 @@ streamed raw (markup disabled) so the model's brackets and code never get mangle
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
+import unicodedata
+from functools import wraps
+from threading import RLock
 from typing import Any
 
 from rich import box as rbox
+from rich.cells import split_graphemes
 from rich.console import Console, Group
+from rich.live import Live
 from rich.padding import Padding
 from rich.panel import Panel
 from rich.table import Table
@@ -21,12 +27,12 @@ from rich.text import Text
 
 # (config is intentionally not imported here — the renderer is presentation only.)
 
-# Brand palette — the atom logo's violet→cyan orbit, as terminal colors.
-_BRAND_STOPS = ((0x7C, 0x3A, 0xED), (0x8B, 0x5C, 0xF6), (0x60, 0xA5, 0xFA), (0x22, 0xD3, 0xEE))
-_VIOLET = "#a78bfa"
-_PURPLE = "#8b5cf6"
-_BLUE = "#60a5fa"
-_CYAN = "#22d3ee"
+# Warm terminal palette. Legacy names remain for existing renderer consumers.
+_BRAND_STOPS = ((0xBC, 0x56, 0x24), (0xEE, 0x8B, 0x42), (0xED, 0xBD, 0x62), (0xF5, 0xDF, 0xB6))
+_VIOLET = "#edbd62"
+_PURPLE = "#ee8b42"
+_BLUE = "#f5dfb6"
+_CYAN = "#f1a76a"
 
 _WORDMARK = (
     "██████╗ ██████╗ ███████╗ █████╗ ███╗   ███╗",
@@ -60,8 +66,13 @@ def _dim_hex(hex_color: str, f: float = 0.55) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
+# The prompt box's frame (the owner, 2026-10-10: a clearly defined prompt, solid lines above and below it, as in
+# Claude Code): the same gradient rule, brighter than the dim dividers elsewhere.
+PROMPT_FRAME = 0.85
+
+
 def brand_rule(width: int, f: float = 0.55) -> Text:
-    """A full-width ─ rule wearing a muted version of the logo's violet→cyan
+    """A full-width ─ rule wearing a muted version of the terminal's orange→gold
     gradient — the frame line above/below the prompt and atop the status panel."""
     t = Text()
     pos = 0
@@ -73,17 +84,28 @@ def brand_rule(width: int, f: float = 0.55) -> Text:
     return t
 
 
-def pt_gradient_rule(width: int, f: float = 0.55) -> str:
-    """The same gradient rule as prompt_toolkit HTML, for the bottom toolbar."""
-    parts = []
-    pos = 0
-    chunk = max(width // 24, 1)
-    while pos < width:
-        w = min(chunk, width - pos)
-        color = _dim_hex(_brand_color(pos / max(width - 1, 1)), f)
-        parts.append(f'<style fg="{color}">{"─" * w}</style>')
-        pos += w
-    return "".join(parts)
+def framed_rule(width: int, label: Text, f: float = PROMPT_FRAME) -> Text:
+    """The prompt box's bottom line with a label near its right end (the prompt optimizer's buttons)."""
+    rule = brand_rule(width, f)
+    label = Text(" ") + label + Text(" ")
+    if width < label.cell_len + 6:
+        return rule
+    start = width - label.cell_len - 2
+    return rule[:start] + label + rule[start + label.cell_len:]
+
+
+def _frame_char(ch: str) -> str:
+    """A character as the working frame draws it: itself when terminals and Rich agree it takes one cell (lines,
+    dashes, accented letters), else a readable escape. They disagree on wide, emoji-capable, combining, invisible
+    and control characters."""
+    if ch.isascii():
+        return ch
+    code = ord(ch)
+    if (code > 0xFFFF or 0x2600 <= code <= 0x27BF or 0x2B00 <= code <= 0x2BFF
+            or unicodedata.east_asian_width(ch) in ("W", "F")
+            or unicodedata.category(ch)[0] in ("M", "C") or unicodedata.category(ch) in ("Zl", "Zp")):
+        return ch.encode("ascii", "backslashreplace").decode("ascii")
+    return ch
 
 
 def _version() -> str:
@@ -132,7 +154,11 @@ def format_turn_stats(
         dur = data["duration_ms"] / 1000.0
 
     used = stats.get("ctx_used")
-    if used is None and usage:
+    explicit_context = "context_tokens" in data
+    if explicit_context:
+        value = data["context_tokens"]
+        used = value if type(value) is int and value >= 0 else None
+    if not explicit_context and used is None and usage:
         used = (
             (usage.get("input_tokens") or 0)
             + (usage.get("cache_read_input_tokens") or 0)
@@ -148,6 +174,8 @@ def format_turn_stats(
         parts.append(f"ctx {_fmt_k(used)}/{_fmt_k(window)} ({used / window:.0%})")
     elif used:
         parts.append(f"ctx {_fmt_k(used)}")
+    elif explicit_context and used is None:
+        parts.append("ctx --")
     if stats.get("pp_tps"):
         parts.append(f"pp {_fmt_tps(stats['pp_tps'])} t/s")
     if stats.get("gen_tps"):
@@ -155,8 +183,12 @@ def format_turn_stats(
     elif usage.get("output_tokens") and dur:
         # Hosted APIs don't expose the prefill/decode split; show effective rate.
         parts.append(f"gen ~{_fmt_tps(usage['output_tokens'] / dur)} t/s")
-    if data.get("total_cost_usd"):
-        parts.append(f"${data['total_cost_usd']:.2f}")
+    if "total_cost_usd" in data:
+        cost = data["total_cost_usd"]
+        if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0:
+            parts.append(f"est. ${cost:.2f}")
+        else:
+            parts.append("cost not reported")
     if len(parts) == 1 and not dur:
         return None  # nothing worth a line
     return "⏱ " + " · ".join(parts)
@@ -181,6 +213,77 @@ def summarize_tool_input(name: str, tool_input: dict[str, Any]) -> str:
     return f"{short}({first[0]}={_preview(first[1])})"
 
 
+# The transcript's names for the everyday tools; any other tool keeps its own name.
+_TOOL_VERBS = {
+    "write_file": "Write", "read_file": "Read", "str_replace_edit": "Edit", "delete_file": "Delete",
+    "copy_files": "Copy", "list_dir": "List", "grep": "Search", "run_bash": "Bash", "run_script": "Script",
+    "web_search": "Web search", "browse": "Browse",
+}
+_PATH_KEYS = ("file_path", "path", "paths")
+_ARG_KEYS = ("query", "url", "title", "command", "file_path", "path", "paths", "pattern", "text", "slug")
+
+
+def _shown_path(value: Any, workspace: str | None) -> str:
+    """A path as the owner thinks of it: inside the workspace, from the workspace; under home, from ~."""
+    path = str(value)
+    if workspace:
+        root = str(workspace).rstrip("/")
+        if path == root:
+            return "."
+        if path.startswith(root + "/"):
+            return path[len(root) + 1:]
+    home = os.path.expanduser("~")
+    return "~" + path[len(home):] if path.startswith(home + "/") else path
+
+
+def _fit(text: str, limit: int, *, keep_end: bool = False) -> str:
+    """Cut to `limit` cells with one ellipsis: at the end, or in the middle so a path keeps its file name."""
+    if len(text) <= limit:
+        return text
+    if limit <= 1:
+        return "…"[:max(limit, 0)]
+    if not keep_end:
+        return text[: limit - 1] + "…"
+    tail = min(len(text.rsplit("/", 1)[-1]) + 1, limit - 1)
+    tail = max(tail, (limit - 1) * 2 // 3)
+    return text[: limit - 1 - tail] + "…" + text[-tail:]
+
+
+def tool_headline(name: str, tool_input: dict[str, Any], workspace: str | None, limit: int) -> str:
+    """`Write(reports/plan.md)`: one line of at most `limit` cells for a tool call."""
+    short = str(name).replace("mcp__dream__", "")
+    verb = _TOOL_VERBS.get(short, short)
+    key = next((k for k in _ARG_KEYS if k in (tool_input or {})), None)
+    if key is None:
+        if not tool_input:
+            return _fit(verb, limit)
+        key, value = next(iter(tool_input.items()))
+        arg, is_path = f"{key}={_preview(value, 400)}", False
+    else:
+        value = tool_input[key]
+        is_path = key in _PATH_KEYS
+        if is_path:
+            arg = ", ".join(_shown_path(v, workspace) for v in (value if isinstance(value, list) else [value]))
+        else:
+            arg = _preview(value, 400)
+    return f"{verb}({_fit(arg, max(limit - len(verb) - 2, 1), keep_end=is_path)})"
+
+
+def _result_note(short: str, content: Any, verbose: bool) -> str:
+    """What a finished call is worth one line of: its first line, and how much more there was."""
+    text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    if verbose:
+        return _preview(text, 4000)
+    rows = [row.strip() for row in text.splitlines() if row.strip()]
+    if not rows:
+        return "done"
+    if short == "read_file":
+        count = len(text.splitlines())
+        return f"{count} line{'s' if count != 1 else ''}"
+    more = len(rows) - 1
+    return _fit(rows[0], 160) + (f" (+{more} line{'s' if more != 1 else ''})" if more else "")
+
+
 # Whimsical present-participles, Claude-Code style — shown while a tool runs so a
 # repeated call reads as motion, not a broken stutter.
 _GERUNDS = (
@@ -195,6 +298,7 @@ def _gerund(seed: int) -> str:
 
 
 _SEP_STYLE = _dim_hex(_PURPLE, 0.75)
+_ANSWER_BULLET = ("● ", f"bold {_CYAN}")  # opens each of Dream's messages in the transcript
 
 # The monitor pane (tui.monitor) renders into the right column of the footer /
 # toolbar. Constants live HERE so monitor.py can import them without a cycle.
@@ -271,9 +375,147 @@ def build_footer(d: dict[str, Any], width: int) -> Group:
     return Group(*rows)
 
 
+# Markdown an answer line may carry. Text is built span by span, never parsed as Rich markup, so the model's own
+# brackets stay literal; only a complete pair of markers is read as emphasis, code or a link.
+_MD_INLINE = re.compile(
+    r"(?<!\\)(`+)(.+?)\1"
+    r"|(?<![\\*])\*\*(?=\S)(.+?)(?<=\S)\*\*(?!\*)"
+    r"|(?<![\\*\w])\*(?=[^\s*])([^*\n]+?)(?<=[^\s*])\*(?![*\w])"
+    r"|(?<!\\)\[([^\]\n]+)\]\((https?://[^)\s]+)\)"
+)
+_MD_ROW = re.compile(r"\s*\|.*\|\s*$")
+_MD_RULE = re.compile(r"\s*([-*_])(\s*\1){2,}\s*")
+_MD_ITEM = re.compile(r"([ \t]*)([-+*]|[0-9]+[.)])[ \t]+(?:\[([ xX])\][ \t]+)?(?=\S)")
+
+
+def _md_inline(text: str) -> Text:
+    """One line's words with **bold**, *italic*, `code` and [links](url) shown as what they mean."""
+    out = Text()
+    pos = 0
+    for found in _MD_INLINE.finditer(text):
+        out.append(re.sub(r"\\([*_`#|\[\]])", r"\1", text[pos:found.start()]))
+        pos = found.end()
+        if found.group(1):
+            out.append(found.group(2), style=_VIOLET)
+        elif found.group(5) is not None:
+            out.append_text(_md_inline(found.group(5)))
+            if found.group(6) != found.group(5):
+                out.append(f" ({found.group(6)})", style="dim")
+        else:
+            inner = _md_inline(found.group(3) if found.group(3) is not None else found.group(4))
+            inner.stylize("bold" if found.group(3) is not None else "italic")
+            out.append_text(inner)
+    out.append(re.sub(r"\\([*_`#|\[\]])", r"\1", text[pos:]))
+    return out
+
+
+def _highlight_assistant_line(line: Text, start: int = 0) -> None:
+    """Add color spans to the line still being streamed (the live preview); its markers are left as typed."""
+    body = line.plain[start:]
+    if re.match(r"^ {0,3}#{1,6}\s+\S", body) or re.fullmatch(
+        r"\s*\*\*[^*\n]+\*\*:?[ \t]*", body
+    ):
+        line.stylize(f"bold {_PURPLE}", start)
+    marker = re.match(r"[ \t]*([-+*]|[0-9]+[.)])(?=[ \t]+\S)", body)
+    if marker:
+        line.stylize(f"bold {_VIOLET}", start + marker.start(1), start + marker.end(1))
+    # Single-backtick spans only. Incomplete delimiters and fenced code stay
+    # literal; chunk boundaries cannot affect completed-line highlighting.
+    for code in re.finditer(r"(?<![\\`])`[^`\n]+`(?!`)", body):
+        line.stylize(_VIOLET, start + code.start(), start + code.end())
+
+
+def _serialized(method):
+    """Share one lock with Rich's refresh thread, including transcript commits."""
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._render_lock:
+            return method(self, *args, **kwargs)
+    return locked
+
+
+class _ResizeAwareLive(Live):
+    """Account for terminal reflow before Rich erases the previous frame."""
+    def __init__(self, *args, **kwargs):
+        self.frame_width = 0
+        self.frame_cells: list[list[int]] = []
+        super().__init__(*args, **kwargs)
+
+    def process_renderables(self, renderables):
+        with self._lock:
+            width = max(1, self.console.width)
+            if self.frame_width and self.frame_width != width:
+                # Rich remembers physical rows at the old width. A terminal
+                # reflows completed rows before the next refresh on SIGWINCH;
+                # the row containing the cursor is excluded from reflow.
+                height = 1
+                for cells in self.frame_cells[:-1]:
+                    height += 1
+                    column = 0
+                    for cell_width in cells:
+                        if not cell_width:
+                            continue
+                        # A wide glyph wraps intact, leaving an unused cell at
+                        # an odd right edge. Dividing total width misses it.
+                        if column and column + cell_width > width:
+                            height += 1
+                            column = 0
+                        column += cell_width
+                self._live_render._shape = (width, min(height, self.console.height))
+            return super().process_renderables(renderables)
+
+
+class _LiveFrame:
+    """Resolve current state at draw time, including console.print above Live.
+
+    Rich caches renderables between refreshes. Caching a Text snapshot here would
+    repaint a just-committed partial line when console.print moves it to history.
+    """
+    def __init__(self, renderer):
+        self.renderer = renderer
+
+    def __rich_console__(self, console, options):
+        from rich.segment import Segment
+
+        # Terminal Unicode tables (including emoji/ZWJ widths) can disagree
+        # with Rich. Only the disposable frame uses readable ASCII escapes, for
+        # the characters they disagree on (_frame_char; the prompt box's lines
+        # and dashes are drawn, 2026-10-11); _accum and committed answers retain
+        # the original Unicode. Convert the styled segments before the final
+        # wrap/crop and cursor measurement.
+        preview = Text(no_wrap=True, overflow="crop")
+        for segment in console.render(
+            self.renderer._live_parts(), options.update(no_wrap=True, overflow="ignore")
+        ):
+            if not segment.control:
+                escaped = "".join(map(_frame_char, segment.text))
+                preview.append(escaped, style=segment.style)
+        preview.rstrip()
+        # Keep the redraw region inside the viewport even on very small panes.
+        # Cropping must not introduce Rich's non-ASCII ellipsis again.
+        lines = console.render_lines(
+            preview, options.update(no_wrap=True, overflow="crop"), pad=False
+        )
+        lines = lines[:max(1, options.size.height - 1)]
+        live = self.renderer._live
+        if isinstance(live, _ResizeAwareLive):
+            live.frame_width = options.max_width
+            live.frame_cells = [
+                [span[2] for span in split_graphemes(
+                    "".join(segment.text for segment in line if not segment.control)
+                )[0]]
+                for line in lines
+            ]
+        for index, line in enumerate(lines):
+            if index:
+                yield Segment.line()
+            yield from line
+
+
 class Renderer:
     def __init__(self, console: Console | None = None) -> None:
         self.console = console or Console()
+        self._render_lock = RLock()
         self._open: str | None = None  # None | "assistant" | "thinking"
         # Collapsed tool run: consecutive identical calls fold into one line + ×N.
         self._run_sig: str | None = None
@@ -282,6 +524,14 @@ class Renderer:
         self._run_ok = 0
         self._run_err = 0
         self._run_note = ""
+        self._run_err_note = ""
+        self._run_name = ""
+        self._run_input: dict[str, Any] = {}
+        self.workspace_getter = None  # → the session's workspace, so a call shows the path inside it
+        # The answer being printed: inside a ``` fence, the table rows collected so far, bullet not yet shown.
+        self._fence = False
+        self._table: list[str] = []
+        self._bullet_due = False
         self._gerund_seed = 0
         # Live mode: while a turn works, a rich Live pins the status footer to the
         # bottom and the in-progress line renders inside it; completed lines are
@@ -292,13 +542,14 @@ class Renderer:
         self._saved_termios = None  # stdin echo settings saved while the footer is up
         self._verbose = False  # /verbose: show tool output in full, not collapsed
         self._accum: list[tuple[str, str | None]] = []  # the unflushed partial line
-        # Ephemeral thoughts: reasoning streams inside the live region only and
-        # vanishes when the answer lands (ChatGPT/Grok-style), instead of piling into
-        # the transcript. /thoughts on (or DREAM_THOUGHTS_PERSIST=1) restores the
-        # classic persistent 💭 stream.
-        self._thoughts_persistent = os.environ.get("DREAM_THOUGHTS_PERSIST") == "1"
+        # Persistent thoughts by default: reasoning streams into the transcript as 💭.
+        # /thoughts off (or DREAM_THOUGHTS_PERSIST=0) makes it ephemeral: shown inside
+        # the live region only and gone when the answer lands.
+        self._thoughts_persistent = os.environ.get("DREAM_THOUGHTS_PERSIST") != "0"
         self._thought_buf = ""  # accumulated ephemeral reasoning (never flushed)
+        self.turn_input = None  # the prompt box's keys while a turn works (tui.turn_input), taken with the footer
 
+    @_serialized
     def set_thoughts_persistent(self, on: bool) -> None:
         self._thoughts_persistent = on
         if not on:
@@ -306,6 +557,7 @@ class Renderer:
 
     # --- live footer ---------------------------------------------------------
 
+    @_serialized
     def live_begin(self, status_cb) -> bool:
         """Pin a status footer (from status_cb() → renderable) below the feed for
         the duration of a turn. No-op off-terminal; returns whether live is on."""
@@ -316,23 +568,26 @@ class Renderer:
         return True
 
     def _start_live(self) -> None:
-        from rich.live import Live
-
-        self._live = Live(
+        self._live = _ResizeAwareLive(
             get_renderable=self._live_view,
             console=self.console,
             refresh_per_second=8,
             transient=True,
         )
+        # Rich acquires this lock before refreshing and printing its frame.
+        # Writers use the same lock so snapshot, commit and redraw cannot race.
+        self._live._lock = self._render_lock
         self._live.start(refresh=True)
         self._echo_off()
+        if self.turn_input is not None:
+            self.turn_input.attach()
 
     def _echo_off(self) -> None:
         """Suppress stdin echo while the Live footer owns the screen. Without this,
         keys typed mid-turn are echoed by the terminal INTO the region rich is
         repainting — which garbles the display (hitting Enter during a tool run was
-        the trigger). We don't read stdin during a turn, so nothing is lost;
-        live_end() flushes whatever was typed. No-op unless stdin is a real TTY, and
+        the trigger). The prompt box (turn_input) reads what is typed during a turn;
+        live_end() flushes anything left. No-op unless stdin is a real TTY, and
         every failure is swallowed so terminal twiddling can never break a turn."""
         if self._saved_termios is not None:
             return  # already suppressed (begin → resume with no restore between)
@@ -385,19 +640,30 @@ class Renderer:
             pass
 
     def _live_view(self):
+        return _LiveFrame(self)
+
+    def _live_parts(self):
         parts: list[Any] = []
         accum = self._accum[:]  # snapshot — the refresh thread renders concurrently
+        # The working frame cannot draw an emoji (_frame_char): a persistent thought's 💭 previews as ∴.
+        accum = [(text.replace("💭", "∴"), style) for text, style in accum]
         if accum:
-            t = Text()
-            for s, style in accum:
-                t.append(s, style=style)
+            t = self._accum_text(accum)
+            # One preview row, regardless of a model's newline frequency. Rich
+            # must never own a growing answer-sized region of scrollback.
+            width = max(1, self.console.width - 1)
+            if t.cell_len > width:
+                t = t[-width:]
+            t.truncate(width, overflow="ellipsis")
+            t.no_wrap = True
             parts.append(t)
         # Ephemeral reasoning: the last ~2 lines' worth, dim, above the footer —
         # gone the instant answer text starts.
         thought = self._thought_buf
         if thought.strip():
             tail = " ".join(thought.split())[-200:]
-            parts.append(Text(f"  💭 {tail}", style=f"italic {_dim_hex(_VIOLET, 0.7)}"))
+            parts.append(Text(f"  ∴ {tail}", style=f"italic {_dim_hex(_VIOLET, 0.7)}",
+                              no_wrap=True, overflow="ellipsis"))
         try:
             footer = self._status_cb() if self._status_cb else None
         except Exception:
@@ -406,27 +672,63 @@ class Renderer:
             parts.append(footer)
         return Group(*parts)
 
+    @_serialized
     def live_end(self) -> None:
         self._live_paused = False
         self._thought_buf = ""  # thoughts don't survive the turn
+        if self.turn_input is not None:
+            self.turn_input.detach()
         self._echo_restore(flush=True)  # echo back on FIRST — even if _live is None,
         #                                 so echo can never be left suppressed
         if self._live is None:
             return
-        if self._accum:
-            self._flush_accum()  # partial line joins the transcript before teardown
-        live, self._live = self._live, None
+        self.end_line()  # commit the partial and close the stream before teardown
+        live = self._live
         self._status_cb = None
         live.stop()
+        self._live = None
 
+    @_serialized
     def live_pause(self) -> None:
         """Drop the footer while stdin is needed (permission prompts)."""
         if self._live is not None:
-            live, self._live = self._live, None
+            self.end_line()
+            live = self._live
             live.stop()
+            self._live = None
+            if self.turn_input is not None:
+                self.turn_input.detach()  # the question reads the keys now
             self._echo_restore()  # permission input() must echo the typed y/n
             self._live_paused = True
 
+    @_serialized
+    def refresh_live(self) -> None:
+        """Draw the footer now (a key typed in the prompt box), not at its next tick."""
+        if self._live is not None:
+            self._live.refresh()
+
+    @_serialized
+    def typed(self, text: str, note: str = "") -> None:
+        """A message from the prompt box that prompt_toolkit never drew (typed while a turn worked): into the
+        transcript as the owner's, with what happened to it."""
+        self._flush_tool_run()
+        self.end_line()
+        self._hang(Text("you", style=f"bold {_VIOLET}") + Text(" › ", style=_PURPLE), Text(text))
+        if note:
+            self._hang(Text("  · ", style="dim"), Text(note, style="dim"))
+
+    @_serialized
+    def rewritten_prompt(self, text: str, problems: list[str]) -> None:
+        """The prompt optimizer's rewrite, shown above its Send / Edit choice."""
+        self._flush_tool_run()
+        self.end_line()
+        self._hang(Text("● ", style=f"bold {_VIOLET}"), Text("Rewritten prompt", style=f"bold {_VIOLET}"))
+        if problems:
+            self._hang(Text("  "), Text("Unclear as typed: " + "; ".join(problems), style="dim"))
+        for line in text.splitlines() or [""]:
+            self._hang(Text("  "), _md_inline(line))
+
+    @_serialized
     def live_resume(self) -> None:
         if self._live_paused:
             self._live_paused = False
@@ -434,14 +736,101 @@ class Renderer:
 
     # --- streaming (assistant text + thinking) ------------------------------
 
+    def _accum_text(self, accum: list[tuple[str, str | None]]) -> Text:
+        t = Text()
+        content_start = 0
+        for text, style in accum:
+            t.append(text, style=style)
+            if style is not None:
+                content_start += len(text)
+        if self._open == "assistant":
+            # The styled dream prefix retains its existing brand colors.
+            _highlight_assistant_line(t, content_start)
+        return t
+
+    @_serialized
     def _flush_accum(self) -> None:
         """Print the buffered line into the transcript (above the live region)."""
-        t = Text()
-        for s, style in self._accum:
-            t.append(s, style=style)
+        t = self._accum_text(self._accum)
+        opens = bool(self._accum) and self._accum[0] == _ANSWER_BULLET
         self._accum.clear()
-        self.console.print(t)
+        if self._open != "assistant":
+            self.console.print(t)
+        else:
+            self._answer_line(t.plain[2 if opens else 0:])
 
+    def _emit(self, body: Any, extra: Text | None = None) -> None:
+        """One row of the answer: the bullet on the message's first row, two cells in on the rest."""
+        lead = Text(*_ANSWER_BULLET) if self._bullet_due else Text("  ")
+        self._bullet_due = False
+        if extra is not None:
+            lead.append_text(extra)   # a quote bar or a list marker: wrapped text continues past it
+        self._hang(lead, body)
+
+    def _answer_line(self, raw: str) -> None:
+        """Print one completed line of the answer as what its markdown means."""
+        if re.match(r"\s*(```|~~~)", raw):
+            self._flush_table()
+            self._fence = not self._fence     # the fence itself is not shown
+            return
+        if self._fence:
+            self._emit(Text(raw, style=_dim_hex(_BLUE, 0.85)))  # code: exactly as written
+            return
+        if _MD_ROW.match(raw):
+            self._table.append(raw)           # laid out when the table ends
+            return
+        self._flush_table()
+        if not raw.strip():
+            if not self._bullet_due:
+                self.console.print()
+            return
+        heading = re.match(r" {0,3}#{1,6}\s+(.*?)\s*#*\s*$", raw)
+        strong = re.fullmatch(r"\s*\*\*([^*\n]+)\*\*(:?)[ \t]*", raw)
+        if heading or strong:
+            body = _md_inline(heading.group(1) if heading else strong.group(1) + strong.group(2))
+            body.stylize(f"bold {_PURPLE}")
+            self._emit(body)
+        elif _MD_RULE.fullmatch(raw):
+            self._emit(Text("─" * 24, style="dim"))
+        elif quote := re.match(r"\s*>\s?(.*)", raw):
+            body = _md_inline(quote.group(1))
+            body.stylize("italic")
+            self._emit(body, Text("▎ ", style="dim"))
+        elif item := _MD_ITEM.match(raw):
+            mark = {" ": "☐", None: "•" if item.group(2) in "-+*" else item.group(2)}.get(item.group(3), "☑")
+            extra = Text(item.group(1))
+            extra.append(mark, style=f"bold {_VIOLET}")
+            extra.append(" ")
+            self._emit(_md_inline(raw[item.end():]), extra)
+        else:
+            self._emit(_md_inline(raw))
+
+    def _flush_table(self) -> None:
+        """Lay the buffered `| a | b |` rows out in columns: no pipes, no dashes, the header in bold."""
+        raw_rows, self._table = self._table, []
+        if not raw_rows:
+            return
+        rows = [[cell.strip() for cell in re.split(r"(?<!\\)\|", row.strip().strip("|"))] for row in raw_rows]
+        ruled = [i for i, row in enumerate(rows) if all(re.fullmatch(r":?-+:?", cell) for cell in row)]
+        if len(rows) - len(ruled) < 2 and not ruled:
+            for row in raw_rows:              # one line between pipes is a sentence, not a table
+                self._emit(_md_inline(row.strip()))
+            return
+        marks = rows[ruled[0]] if ruled else []
+        header = rows[0] if ruled and ruled[0] == 1 else None
+        body = [row for i, row in enumerate(rows) if i not in ruled and not (header is not None and i == 0)]
+        table = Table(box=None, show_header=header is not None, header_style=f"bold {_PURPLE}",
+                      padding=(0, 3, 0, 0), pad_edge=False)
+        for index in range(max(len(row) for row in rows)):
+            mark = marks[index] if index < len(marks) else ""
+            table.add_column(_md_inline(header[index]) if header and index < len(header) else "",
+                             justify="right" if mark.endswith(":") and not mark.startswith(":") else "left",
+                             overflow="fold")
+        for row in body:
+            table.add_row(*[_md_inline(cell) for cell in row])
+        self._emit(table)
+
+    @_serialized
     def _push(self, text: str, style: str | None) -> None:
         """Buffer streamed text; each completed line is printed above the footer,
         the trailing partial stays visible inside the live region."""
@@ -468,16 +857,19 @@ class Renderer:
                 prefix.append(s, style=style)
             self.console.print(prefix, end="")
 
+    @_serialized
     def assistant_delta(self, text: str) -> None:
         self._thought_buf = ""  # the answer is landing — ephemeral thoughts vanish
-        self._open_stream(
-            "assistant", [("\ndream ", f"bold {_CYAN}"), ("› ", _BLUE)]
-        )
+        opening = self._open != "assistant"
+        self._open_stream("assistant", [("\n", None), _ANSWER_BULLET])
+        if opening:
+            self._fence, self._table, self._bullet_due = False, [], True
         if self._live is not None:
             self._push(text, None)
         else:
             self.console.print(text, end="", markup=False, highlight=False)
 
+    @_serialized
     def thinking_delta(self, text: str) -> None:
         if self._thoughts_persistent:
             # Classic behavior: the reasoning streams into the transcript.
@@ -493,52 +885,72 @@ class Renderer:
         # Off-terminal (no live region) there's nowhere transient to show it, so drop it.
         if self._live is None:
             return
-        self._thought_buf += text
+        self._thought_buf = (self._thought_buf + text)[-2000:]
         lines = self._thought_buf.splitlines()
         if len(lines) > 8:  # keep the buffer bounded to recent reasoning
             self._thought_buf = "\n".join(lines[-8:])
 
+    @_serialized
     def end_line(self) -> None:
         if self._accum:
             self._flush_accum()
+            self._close_answer()
             self._open = None
             return
+        self._close_answer()
         if self._open is not None and self._live is None:
             self.console.print()
         self._open = None
 
+    def _close_answer(self) -> None:
+        """A message ended: lay out a table it was still collecting, and leave no fence open for the next one."""
+        if self._open == "assistant":
+            self._flush_table()
+        self._fence = self._bullet_due = False
+
     # --- tools ---------------------------------------------------------------
 
+    def _hang(self, prefix: Text, body: Any) -> None:
+        """Print `body` beside `prefix`; a body that wraps continues under itself, not at the margin."""
+        grid = Table.grid(padding=0)
+        grid.add_column(width=prefix.cell_len, no_wrap=True)
+        grid.add_column(overflow="fold")
+        grid.add_row(prefix, body)
+        self.console.print(grid)
+
+    @_serialized
     def _flush_tool_run(self) -> None:
-        """Emit the collapsed line for the current run of identical tool calls.
-        One call → a normal line; many → one line with ×N and a pass/fail tally."""
+        """Emit the block for the current run of identical tool calls: a blank line, the call on one
+        line (×N when it repeated), and one line for what came back."""
         if self._run_sig is None:
             return
         n = self._run_count
-        head = Text("  ⚙ ", style=_BLUE) + Text(self._run_sig, style=_dim_hex(_BLUE, 0.72))
-        if n > 1:
-            head += Text(f"  ×{n}", style=f"bold {_CYAN}")
+        count = f"  ×{n}" if n > 1 else ""
+        try:
+            workspace = self.workspace_getter() if self.workspace_getter else None
+        except Exception:
+            workspace = None
+        label = tool_headline(self._run_name, self._run_input, workspace and str(workspace),
+                              max(self.console.width - 2 - len(count), 8))
+        head = Text("● ", style=_BLUE) + Text(label, style=_dim_hex(_BLUE, 0.72))
+        if count:
+            head += Text(count, style=f"bold {_CYAN}")
+        head.no_wrap, head.overflow = True, "ellipsis"
+        self.console.print()
         self.console.print(head)
         if self._run_ok or self._run_err:
-            if self._run_err and not self._run_ok:
-                line = Text("    ✗ ", style="red") + Text(
-                    f"{self._run_short}: {self._run_note}", style="red"
-                )
-            elif self._run_err:
-                line = Text("    ✓ ", style="green") + Text(
-                    f"{self._run_ok} ok, ", style="dim"
-                ) + Text(f"{self._run_err} failed", style="red")
-            elif n > 1:
-                line = Text("    ✓ ", style="green") + Text(
-                    f"{self._run_ok}× · last: {self._run_note}", style="dim"
-                )
+            elbow = Text("  ⎿  ", style="dim")
+            if self._run_err:
+                tally = f"{self._run_ok} ok · {self._run_err} failed: " if self._run_ok or n > 1 else "✗ "
+                self._hang(elbow, Text(tally + self._run_err_note, style="red"))
             else:
-                line = Text("    ✓ ", style="green") + Text(self._run_note, style="dim")
-            self.console.print(line)
+                note = f"{self._run_ok} ok · last: {self._run_note}" if n > 1 else self._run_note
+                self.console.print(elbow + Text(note, style="dim"), no_wrap=True, overflow="ellipsis")
         self._run_sig = None
         self._run_count = self._run_ok = self._run_err = 0
-        self._run_note = ""
+        self._run_note = self._run_err_note = ""
 
+    @_serialized
     def tool_use(self, name: str, tool_input: dict[str, Any]) -> None:
         self._thought_buf = ""  # reasoning resolved into an action
         sig = summarize_tool_input(name, tool_input)
@@ -549,22 +961,25 @@ class Renderer:
         self.end_line()
         self._run_sig = sig
         self._run_short = name.replace("mcp__dream__", "")
+        self._run_name, self._run_input = name, tool_input
         self._run_count = 1
 
     def set_verbose(self, on: bool) -> None:
         self._verbose = on
 
+    @_serialized
     def tool_result(self, name: str, content: str, is_error: bool) -> None:
         # Attributed to the open run; printed when the run flushes. Errors get a
         # much longer preview than successes (you need to read them), and /verbose
         # opens both up to near-full so nothing important is clipped on screen.
         if is_error:
             self._run_err += 1
-            self._run_note = _preview(content, 4000 if self._verbose else 400)
+            self._run_note = self._run_err_note = _preview(content, 4000 if self._verbose else 400)
         else:
             self._run_ok += 1
-            self._run_note = _preview(content, 4000 if self._verbose else 100)
+            self._run_note = _result_note(self._run_short, content, self._verbose)
 
+    @_serialized
     def card(self, name: str, text: str) -> None:
         """A visual-answer card's text form, whole. The preview line above it is
         one collapsed line; the card is the answer, so it is not clipped."""
@@ -574,6 +989,7 @@ class Renderer:
         self.console.print(Panel(Text(body), title=f"[dim]{name}[/dim]", border_style=_dim_hex(_PURPLE, 0.8),
                                  expand=False, padding=(0, 1)))
 
+    @_serialized
     def working(self) -> None:
         """A one-line 'thinking' cue at the top of a turn — a rotating gerund so a
         working turn reads as motion even before the first token streams. Under a
@@ -592,6 +1008,7 @@ class Renderer:
 
     # --- misc ----------------------------------------------------------------
 
+    @_serialized
     def result(self, data: dict[str, Any]) -> None:
         self._flush_tool_run()
         self.end_line()
@@ -603,49 +1020,61 @@ class Renderer:
                 Text(f"  ⚠ turn ended with an error: {data.get('subtype')}{extra}", style="red")
             )
 
+    @_serialized
     def turn_stats(self, data: dict[str, Any], fallback_window: int | None = None) -> None:
         line = format_turn_stats(data, fallback_window=fallback_window)
         if line:
             self.end_line()
-            self.console.print(Text(f"  {line}", style="dim"))
+            # One line at any width: the reading speed goes first, then whatever is last.
+            parts = line.split(" · ")
+            while len(parts) > 2 and len(" · ".join(parts)) + 2 > self.console.width:
+                parts.pop(next((i for i, part in enumerate(parts) if part.startswith("pp ")), len(parts) - 1))
+            self.console.print()
+            self.console.print(Text("  " + " · ".join(parts), style="dim"), no_wrap=True, overflow="ellipsis")
 
+    @_serialized
     def error(self, msg: str) -> None:
         self._flush_tool_run()
         self.end_line()
-        self.console.print(Text(f"  ⚠ {msg}", style="bold red"))
+        self._hang(Text("  ⚠ ", style="bold red"), Text(str(msg), style="bold red"))
 
+    @_serialized
     def system(self, msg: str) -> None:
         self._flush_tool_run()
         self.end_line()
-        self.console.print(Text(f"  · {msg}", style="dim"))
+        self._hang(Text("  · ", style="dim"), Text(str(msg), style="dim"))
 
+    @_serialized
     def info(self, msg: str) -> None:
         self.console.print(Text(msg, style=_CYAN))
 
+    @_serialized
     def rule(self, label: str = "") -> None:
         self.console.rule(label, style=_dim_hex(_PURPLE, 0.8))
 
+    @_serialized
     def sep(self) -> None:
         """A thin divider between turns — a full-width rule in the brand gradient,
-        rendered locally (costs no model tokens)."""
-        self.console.print(brand_rule(self.console.width))
+        rendered locally (costs no model tokens). It is the prompt box's top line too."""
+        self.console.print(brand_rule(self.console.width, PROMPT_FRAME))
 
     # --- permission prompt ---------------------------------------------------
 
+    @_serialized
     def permission_request(self, name: str, desc: str) -> None:
         self._flush_tool_run()
         self.end_line()
-        self.console.print(
-            Panel(
-                Text(desc, style="bold"),
-                title=f"[yellow]permission — {name}[/yellow]",
-                border_style="yellow",
-                expand=False,
-            )
-        )
+        first, _, rest = str(desc).partition("\n")
+        self.console.print()
+        self._hang(Text("● ", style="yellow"), Text(f"permission — {name}", style="bold yellow"))
+        self._hang(Text("  "), Text(first, style="bold"))
+        for row in rest.splitlines():
+            if row.strip():
+                self._hang(Text("  "), Text(row, style="dim"))
 
     # --- banner --------------------------------------------------------------
 
+    @_serialized
     def show_logo(self) -> None:
         """The Dream wordmark: native ANSI with the brand's violet→cyan
         gradient. No raster art — crisp at any cell size, instant, and rich
@@ -681,6 +1110,7 @@ class Renderer:
         )
         self.console.print(out)
 
+    @_serialized
     def welcome(self, rows: list[tuple[str, str]], notes: list[str] | None = None) -> None:
         """The landing panel: session facts in a rounded box, Claude-Code style."""
         body = Text()

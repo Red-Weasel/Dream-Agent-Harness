@@ -8,7 +8,9 @@ inherited rather than earned:
   refuses the collision outright.
 - defect 2: shell confinement failed OPEN for the awk family. awk's program is a
   plain operand, not a flagged payload, so `awk 'BEGIN{system(...)}'` looked like
-  an ordinary confined command and auto-allowed.
+  an ordinary confined command and auto-allowed. (Since 2026-10-11, the owner's
+  decision, auto runs every shell command without a sandbox; the analysis now
+  marks the boundary in Ask and Accept edits.)
 """
 
 from __future__ import annotations
@@ -98,9 +100,10 @@ def test_provenance_beats_a_later_builtin_rename(tmp_path, monkeypatch):
 # --- defect 2: inline-program interpreters are never provably confined -------
 
 
-def test_awk_family_inline_program_asks_in_auto_mode():
+def test_awk_family_inline_program_is_a_boundary_in_the_asking_modes():
     """awk hides its whole program in an operand — system(), | "sh", print > file.
-    Static analysis can't prove any of that confined, so the family asks."""
+    Static analysis can't prove any of that confined, so the family asks as a boundary
+    in Ask and Accept edits. Auto runs every shell command (the owner, 2026-10-11)."""
     unconfined = [
         "awk 'BEGIN{system(\"rm -rf /home/example/other\")}'",
         "gawk 'BEGIN{system(\"cat ~/.ssh/id_rsa\")}'",
@@ -110,15 +113,18 @@ def test_awk_family_inline_program_asks_in_auto_mode():
         "cat notes.txt | awk 'BEGIN{system(\"id\")}'",
     ]
     for cmd in unconfined:
-        d, reason = policy.decide("Bash", {"command": cmd}, "auto", WS)
-        assert d == "ask", cmd
-        assert reason.startswith("outside workspace"), (cmd, reason)
-        assert policy.decide("run_bash", {"command": cmd}, "auto", WS)[0] == "ask", cmd
+        assert policy.decide("Bash", {"command": cmd}, "auto", WS) == ("allow", "auto mode"), cmd
+        for mode in ("ask", "accept-edits"):
+            d, reason = policy.decide("Bash", {"command": cmd}, mode, WS)
+            assert d == "ask", (cmd, mode)
+            assert reason.startswith("outside workspace"), (cmd, mode, reason)
+            assert policy.decide("run_bash", {"command": cmd}, mode, WS) == (d, reason), (cmd, mode)
 
 
 def test_flagged_inline_payloads_still_ask():
     """Regression guard for the forms that already escalated — closing the awk
-    family must not shift the -c/-e handling."""
+    family must not shift the -c/-e handling. (Auto runs every shell command since
+    2026-10-11; Accept edits asks, with the boundary as the reason.)"""
     for cmd in [
         "perl -e 'unlink q(/etc/hosts)'",
         "python3 -c 'import os'",
@@ -127,13 +133,16 @@ def test_flagged_inline_payloads_still_ask():
         "node -e 'require(\"fs\")'",
         "env python3 -c 'import os'",
     ]:
-        assert policy.decide("Bash", {"command": cmd}, "auto", WS)[0] == "ask", cmd
+        assert policy.decide("Bash", {"command": cmd}, "auto", WS) == ("allow", "auto mode"), cmd
+        d, reason = policy.decide("Bash", {"command": cmd}, "accept-edits", WS)
+        assert d == "ask" and reason.startswith("outside workspace"), (cmd, reason)
 
 
 def test_glued_shell_operators_do_not_hide_an_interpreter():
     """`cat f|awk 'prog'` tokenizes as one word "f|awk", so the scan never saw the
     interpreter at all — every inline payload behind an unspaced |, ;, && or
-    subshell rode straight through auto mode."""
+    subshell rode straight through auto mode. (Auto runs every shell command since
+    2026-10-11; Accept edits asks, with the boundary as the reason.)"""
     for cmd in [
         "cat notes.txt|awk 'BEGIN{system(\"id\")}'",
         "cat notes.txt|python3 -c 'import os'",
@@ -141,7 +150,9 @@ def test_glued_shell_operators_do_not_hide_an_interpreter():
         "true&&perl -e 'unlink q(/etc/x)'",
         "(cd sub&&node -e 'require(\"fs\")')",
     ]:
-        assert policy.decide("Bash", {"command": cmd}, "auto", WS)[0] == "ask", cmd
+        assert policy.decide("Bash", {"command": cmd}, "auto", WS) == ("allow", "auto mode"), cmd
+        d, reason = policy.decide("Bash", {"command": cmd}, "accept-edits", WS)
+        assert d == "ask" and reason.startswith("outside workspace"), (cmd, reason)
 
 
 def test_awk_family_over_asks_by_design():
@@ -149,27 +160,24 @@ def test_awk_family_over_asks_by_design():
     something else. Proving which token is the command word means parsing the
     shell — assignments, `env`, `nice`, `xargs`, `find -exec` all hide an
     invocation — so the scan covers every position and eats the false positive.
-    Same doctrine as the rest of the module: over-ask, never under-ask."""
-    assert policy.decide("Bash", {"command": "grep -rn awk ."}, "auto", WS)[0] == "ask"
+    Same doctrine as the rest of the module: over-ask, never under-ask. (In Ask and
+    Accept edits; auto runs every shell command since 2026-10-11.)"""
+    assert policy.decide("Bash", {"command": "grep -rn awk ."}, "auto", WS) == ("allow", "auto mode")
+    d, reason = policy.decide("Bash", {"command": "grep -rn awk ."}, "accept-edits", WS)
+    assert d == "ask" and reason.startswith("outside workspace"), reason
 
 
-async def test_confined_commands_still_auto_allow(tmp_path):
+def test_confined_commands_still_auto_allow(tmp_path):
     """The fix must not make Dream prompt-happy: ordinary in-workspace commands
-    keep running unprompted in auto mode."""
-    from dream.core.execution import ExecutionScope, probe_sandbox
-    import pytest
-    for cmd in ("pytest -q", "npm run build", "python3 run.py --flag"):
-        assert policy.decide("run_bash", {"command": cmd}, "auto", tmp_path)[0] == "ask"
-    scope = ExecutionScope(tmp_path)
-    capability = await probe_sandbox(scope)
-    if not capability.available:
-        pytest.skip(capability.reason)
-    options = dict(execution_scope=scope, execution_capability=capability)
+    keep running unprompted in auto mode -- since 2026-10-11 (the owner: no sandbox)
+    with no containment evidence, as every shell command does, deletion included.
+    Where they ask (Accept edits), they are not mistaken for a boundary."""
     for cmd in ["ls -la", "git status", "pytest -q", "npm run build",
                 "echo hi >> notes.txt", "python3 run.py --flag",
-                "grep -rn policy ."]:
-        assert policy.decide("run_bash", {"command": cmd}, "auto", tmp_path, **options)[0] == "allow", cmd
-    assert policy.decide("run_bash", {"command": "rm -rf build/"}, "auto", tmp_path, **options)[0] == "ask"
+                "grep -rn policy .", "rm -rf build/"]:
+        assert policy.decide("run_bash", {"command": cmd}, "auto", tmp_path) == ("allow", "auto mode"), cmd
+        d, reason = policy.decide("run_bash", {"command": cmd}, "accept-edits", tmp_path)
+        assert d == "ask" and not reason.startswith("outside workspace"), (cmd, reason)
 
 
 def test_an_unresolvable_path_asks_instead_of_raising(tmp_path):

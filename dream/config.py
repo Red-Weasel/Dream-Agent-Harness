@@ -50,7 +50,7 @@ def free_memory_name(name: str) -> str:
     return f"{name}-2" if name and reserved_memory_name(name) else name
 
 # Per-workspace project instructions, read like Claude Code reads CLAUDE.md.
-PROJECT_INSTRUCTION_FILES = ("DREAM.md", "CLAUDE.md")
+PROJECT_INSTRUCTION_FILES = ("DREAM.md", "AGENTS.md", "CLAUDE.md")
 PROJECT_INSTRUCTIONS_MAX = 32_768  # bytes; a longer file is truncated with a note
 
 # A memory file past this many characters gets a near-cap note telling the model
@@ -279,6 +279,10 @@ TOOL_RESULT_CAP = int(os.environ.get("DREAM_TOOL_RESULT_CAP", "24000"))
 FREQUENCY_PENALTY = read_numeric("DREAM_FREQUENCY_PENALTY")
 PRESENCE_PENALTY = read_numeric("DREAM_PRESENCE_PENALTY")
 REPETITION_PENALTY = read_numeric("DREAM_REPETITION_PENALTY")
+
+# Exact consecutive long-line guard for local streamed replies. Remote and
+# nonstream requests are unchanged; explicit 0 disables this narrow heuristic.
+TEXT_REPETITION_GUARD = os.environ.get("DREAM_TEXT_REPETITION_GUARD", "1") == "1"
 
 # --- Timeouts ----------------------------------------------------------------
 

@@ -222,6 +222,7 @@
   }
   function refresh() { return tab === 'runtime' ? loadRuntime() : tab === 'extensions' ? loadExtensions() : tab === 'settings' ? loadSettings() : loadLearning(); }
   opener.onclick = () => open(); recording.onclick = () => open('learn', recording);
+  window.addEventListener('dream:settings-open', event => open('settings', byId(event.detail?.source) || opener));
   byId('dc-close').onclick = () => dialog.close();
   dialog.addEventListener('close', () => { (returnFocus.hidden ? opener : returnFocus).focus(); schedulePoll(); });
   // Capture Escape before the companion's inspector/composer shortcuts. Native

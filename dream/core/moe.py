@@ -185,15 +185,21 @@ async def _run_backend(backend, prompt: str) -> str:
 
 async def _consult_cli(provider: Provider, prompt: str, *, cwd: str | None = None, model=None, effort=None,
                        mode: str | None = None, system: str | None = None, isolate: bool = False, meter=None) -> str:
+    from contextlib import ExitStack
     from .cli_review import CLIConsultation, codex_isolation, CODEX_SIGN_IN, runner_env
     consultation = CLIConsultation(provider, model, runtime_meter=_context_meter(provider, meter), cwd=cwd, mode=mode)
+    settings = ExitStack()
     try:
         consultation.prepare()
         if effort is not None:
-            from .council_config import validate_effort
-            validate_effort(provider.key, effort, model)
-            # Codex exec accepts per-invocation configuration before stdin '-'.
-            consultation.argv[-1:-1] = ['-c', 'model_reasoning_effort=' + json.dumps(effort)]
+            from .backends.cli_agent import native_effort_argv
+            position = 2 if provider.key == 'codex' else 1
+            consultation.argv[position:position] = native_effort_argv(provider.key, effort, model)
+            if provider.key == 'gemini':
+                from .gemini_thinking import thinking_environment
+                consultation.env = settings.enter_context(thinking_environment(
+                    model, effort, cwd=str(consultation.cwd), executable=consultation.executable,
+                    env=consultation.env))
         if isolate:
             consultation.argv[-1:-1] = await codex_isolation(consultation.executable, str(consultation.cwd))
             consultation.env = runner_env(CODEX_SIGN_IN)
@@ -203,8 +209,13 @@ async def _consult_cli(provider: Provider, prompt: str, *, cwd: str | None = Non
                 tool_scope="the CLI's own tools under its read-only sandbox, no MCP servers")
         return await consultation.run((system or ADVISOR_SYSTEM) + '\n\n' + prompt)
     finally:
-        await consultation._stop()
-        consultation.close()
+        try:
+            await consultation._stop()
+        finally:
+            try:
+                consultation.close()
+            finally:
+                settings.close()
 
 
 async def _consult_anthropic(provider: Provider, prompt: str, *, cwd: str | None = None, model=None, effort=None,
@@ -363,14 +374,24 @@ async def _consult_openai(provider: Provider, prompt: str, *, cwd: str | None = 
                           system: str | None = None, meter=None) -> str:
     """One-shot call against an OpenAI-compatible provider, no tools."""
     selected_model = model or provider.default_model or 'default'
+    # DREAM-257: the persona is labelled where it is chosen -- Dream's built-in advisor framing, or the text a caller
+    # supplied in its place (Sleepwalk's runs). sourced() keeps the characters, so the request is byte for byte the same.
+    from .system_prompt import sourced
+    persona = system or ADVISOR_SYSTEM
+    if type(persona) is str:
+        persona = (sourced(persona, "caller_supplied_system", origin="consult_advisor") if system
+                   else sourced(persona, "advisor_persona", origin="dream_builtin"))
     backend = OpenAICompatBackend(
         provider=provider,
         model=selected_model,
         profile=resolve_profile(provider, model=selected_model),
-        system_prompt=system or ADVISOR_SYSTEM,
+        system_prompt=persona,
         tools=[],
         permission_cb=None,
     )
+    # DREAM-257: this backend's requests are an advisor's, said by the caller that knows it; the backend records it
+    # beside the request (context inspection) and sends the provider nothing of it.
+    backend.inspect_role = ("advisor", "council_http_consultation")
     if effort is not None:
         backend.set_effort(effort)
     meter = _context_meter(provider, meter)
@@ -475,7 +496,7 @@ async def council(
             result = {'advisor': key, 'label': _label_for(key), 'answer': answer,
                       'model': (models or {}).get(key), 'effort': (efforts or {}).get(key), 'independent': True,
                       'verification': 'unverified', 'consensus_is_proof': False}
-            if key in ('codex', 'grok', 'gemini'):
+            if key in ('codex', 'grok', 'gemini', 'antigravity'):
                 from .cli_review import CLIConsultation
                 result['isolation'] = CLIConsultation(get_provider(key), (models or {}).get(key),
                                                       cwd=cwd, mode=mode).provenance

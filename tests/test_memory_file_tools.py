@@ -147,15 +147,17 @@ async def test_the_cap_is_measured_on_the_file_that_lands(store, monkeypatch):
     """Gate 9b observation: the check rendered without timestamps, ~50 chars short
     of the persisted file, so a memory could land just over the cap."""
     monkeypatch.setattr(config, "MEMORY_FILE_MAX", 500)
-    for n in range(250, 340):
+    # From 200: the file now also names the session that wrote it (source_session), so the bodies that still fit
+    # under the cap start below 250.
+    for n in range(200, 340):
         res = await memory_write.handler({"name": f"c{n}", "content": "x" * n})
         p = config.MEMORY_DIR / f"c{n}.md"
         if _bad(res):
             assert not p.exists()
         else:
             assert len(p.read_text()) <= 500, (n, len(p.read_text()))
-    assert any((config.MEMORY_DIR / f"c{n}.md").exists() for n in range(250, 340))
-    assert not all((config.MEMORY_DIR / f"c{n}.md").exists() for n in range(250, 340))
+    assert any((config.MEMORY_DIR / f"c{n}.md").exists() for n in range(200, 340))
+    assert not all((config.MEMORY_DIR / f"c{n}.md").exists() for n in range(200, 340))
 
 
 @pytest.mark.asyncio

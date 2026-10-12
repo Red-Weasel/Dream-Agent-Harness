@@ -16,6 +16,8 @@ import html as _html
 from typing import Any
 
 from rich.text import Text
+from prompt_toolkit.formatted_text import HTML, to_formatted_text
+from prompt_toolkit.formatted_text.utils import fragment_list_to_text
 
 from .render import (
     MONITOR_MIN_TWO_COL as MIN_TWO_COL,
@@ -220,25 +222,38 @@ def pt_lines(rows: Rows) -> list[tuple[str, int]]:
             budget = PANE_WIDTH - plain
             if budget <= 0:
                 break
-            s = s[:budget]
-            plain += len(s)
+            clipped = Text(s)
+            clipped.truncate(budget, overflow='ellipsis')
+            s = clipped.plain
+            plain += clipped.cell_len
             esc = _html.escape(s)
             html_parts.append(f'<style fg="{color}">{esc}</style>' if color else esc)
         out.append(("".join(html_parts), plain))
     return out
 
 
+def fit_pt(value: str, width: int) -> tuple[str, int]:
+    """Bound a toolbar row by display cells, preserving short styled rows."""
+    text = Text(fragment_list_to_text(to_formatted_text(HTML(value))))
+    if text.cell_len <= width:
+        return value, text.cell_len
+    text.truncate(max(0, width), overflow='ellipsis')
+    return _html.escape(text.plain), text.cell_len
+
+
 def compose_pt(
     left: list[tuple[str, int]], right: list[tuple[str, int]], width: int
 ) -> str:
     """Two-column prompt_toolkit body: left lines padded out to the column
-    boundary, monitor lines on the right. A too-long left line goes ragged for
-    that row rather than truncating information."""
+    boundary, monitor lines on the right. Neither column may wrap over another
+    row when a path, task name or Unicode label exceeds its cell budget."""
     left_w = width - PANE_WIDTH - 2
     out = []
     for i in range(max(len(left), len(right))):
         lh, lp = left[i] if i < len(left) else ("", 0)
         rh, _rp = right[i] if i < len(right) else ("", 0)
+        lh, lp = fit_pt(lh, left_w if rh else width)
+        rh, _rp = fit_pt(rh, PANE_WIDTH)
         pad = max(left_w - lp, 1) if rh else 0
         out.append(lh + " " * pad + rh)
     return "\n".join(out)

@@ -15,6 +15,7 @@ from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server
 from .. import __version__, config, extensions, presets
 from ..core import policy
 from . import (
+    artifact_tools,
     checkpoint_tools,
     computer_tools,
     installed_skill_tools,
@@ -28,6 +29,7 @@ from . import (
     github_tools,
     project,
     questions,
+    ram_tools,
     skill_tools,
     starters,
     studio,
@@ -39,6 +41,7 @@ from . import (
 
 # The tools that ship with Dream.
 _BASE_TOOLS: list[SdkMcpTool] = [
+    *artifact_tools.ARTIFACT_TOOLS,
     web.web_search,
     web.browse,
     *computer_tools.COMPUTER_TOOLS,
@@ -66,6 +69,7 @@ _BASE_TOOLS: list[SdkMcpTool] = [
     *widgets.WIDGET_TOOLS,
     *task_tools.TASK_TOOLS,
     *plugin_tools.PLUGIN_TOOLS,
+    *ram_tools.RAM_TOOLS,             # the project's shared board (dream.memory.ram)
 ]
 
 
@@ -189,6 +193,8 @@ def build(
     ``wrap_tool`` binds engine/session middleware to each extension-guarded tool
     before it reaches either the SDK MCP server or a non-SDK backend. Returns
     dict with server config, tool ids, and warnings."""
+    from .session_tools import SESSION_TOOLS, enabled as linked_session_enabled
+    base_tools = _BASE_TOOLS + (SESSION_TOOLS if linked_session_enabled() else [])
     _SOURCE.clear()
     custom_pairs, warnings = _load_custom_tools()
     # De-dup: a custom tool may not claim a name already taken by a built-in or an
@@ -196,7 +202,7 @@ def build(
     # a self-built tool calling itself "Read" would otherwise wear Read's free pass.
     # First definition wins; collisions are reported.
     builtin = policy.builtin_names()
-    claimed = {t.name for t in _BASE_TOOLS} | builtin
+    claimed = {t.name for t in base_tools} | builtin
     custom: list[SdkMcpTool] = []
     for t, path in custom_pairs:
         if not extensions.tool_enabled(t):
@@ -231,9 +237,17 @@ def build(
     # Provenance, not the name string, decides a custom tool's capability — declare
     # this boot's set before anything (the exempt list below included) classifies it.
     policy.declare_custom_tools(t.name for t in custom)
-    catalog = extensions.filter_tools(_BASE_TOOLS + custom + list(extra_tools or []))
+    catalog = extensions.filter_tools(base_tools + custom + list(extra_tools or []))
     preset = presets.session()      # DREAM-170: the session's skill preset narrows the set; Default keeps it whole
-    tools = [extensions.guard_tool(t) for t in catalog if presets.keeps_tool(t, preset)]
+    # A DeepSleep terminal keeps its link tools and the project board whatever its preset (the owner, 2026-10-11):
+    # its instructions send it to both, and a preset that dropped the board left "@everyone, post to the board" stuck.
+    linked_names = ({t.name for t in SESSION_TOOLS} | {t.name for t in ram_tools.RAM_TOOLS}
+                    if linked_session_enabled() else set())
+    tools = [extensions.guard_tool(t) for t in catalog if t.name in linked_names or presets.keeps_tool(t, preset)]
+    # The intent boundary is inside Engine permission and hook middleware:
+    # rejected attempts must never be reported as actual handler execution.
+    from ..core.task_checkpoints import wrap_tool as checkpoint_tool
+    tools = [checkpoint_tool(tool) for tool in tools]
     if wrap_tool is not None:
         from functools import update_wrapper
 

@@ -1,29 +1,29 @@
 window { background: @dream_bg0; color: @dream_fg; }
 /* S2: the whole native window uses copies of the web theme's softened tokens (theme.css html.dream-design);
    the header's session label has the .dream-pill shape. */
-@define-color dream_bg0 #0E0F18;
-@define-color dream_bg #12141F;
-@define-color dream_bg2 #171926;
-@define-color dream_panel #1E202F;
-@define-color dream_raised #27293A;
-@define-color dream_line #3B3E54;
-@define-color dream_line_strong #515670;
-@define-color dream_fg #EBECF5;
-@define-color dream_dim #B6B9CE;
-@define-color dream_faint #A2A6BE;
+@define-color dream_bg0 #151210;
+@define-color dream_bg #1b1713;
+@define-color dream_bg2 #211c17;
+@define-color dream_panel #2a231b;
+@define-color dream_raised #362d23;
+@define-color dream_line #514334;
+@define-color dream_line_strong #786047;
+@define-color dream_fg #f7efe3;
+@define-color dream_dim #d3c4ae;
+@define-color dream_faint #b9a88f;
 @define-color dream_ok #7FD6AE;
 headerbar { background: @dream_bg0; border-bottom: 1px solid @dream_line; box-shadow: none; min-height: 56px; padding: 6px 14px; }
 headerbar .title { font-size: 16px; font-weight: bold; }
 headerbar .subtitle { color: @dream_dim; font-size: 11px; }
 button { background: @dream_panel; color: @dream_fg; border: 1px solid @dream_line; box-shadow: none; text-shadow: none; border-radius: 7px; padding: 6px 10px; min-height: 24px; }
 button:hover { background: @dream_raised; color: #ffffff; }
-button:checked { background: #302A48; color: #E0D7FF; border-color: #AA94FF; }
+button:checked { background: #513619; color: #ffe1a6; border-color: #f3bd55; }
 button:disabled { color: #718095; background: @dream_panel; border-color: @dream_raised; }
-button:focus, entry:focus { border-color: #AA94FF; outline-color: #AA94FF; outline-offset: 2px; }
+button:focus, entry:focus { border-color: #f3bd55; outline-color: #f3bd55; outline-offset: 2px; }
 button.flat { background: transparent; border-color: transparent; }
-button.suggested-action { background: #6751A8; border-color: #AA94FF; color: #fff; }
-entry { color: @dream_fg; background: @dream_bg2; border: 1px solid @dream_line; border-radius: 7px; box-shadow: none; min-height: 30px; padding: 3px 10px; caret-color: #AA94FF; }
-entry selection { background: #514477; color: #ffffff; }
+button.suggested-action { background: #ad4d0b; border-color: #f3bd55; color: #fff; }
+entry { color: @dream_fg; background: @dream_bg2; border: 1px solid @dream_line; border-radius: 7px; box-shadow: none; min-height: 30px; padding: 3px 10px; caret-color: #f3bd55; }
+entry selection { background: #925215; color: #ffffff; }
 label.muted { color: @dream_dim; font-size: 11px; }
 label.brand { font-size: 23px; font-weight: 500; color: @dream_fg; letter-spacing: 5px; }
 label.brand-tagline { font-size: 8px; letter-spacing: 1.6px; color: @dream_dim; }
@@ -36,7 +36,7 @@ box.terminalbar { background: @dream_bg2; border-bottom: 1px solid @dream_raised
 box.statusbar { background: @dream_bg; border-top: 1px solid @dream_raised; padding: 7px 14px; }
 box.empty { background: @dream_bg2; padding: 24px; border-radius: 16px; margin: 20px; }
 box.council-startup { padding: 12px 0; }
-checkbutton:focus, expander:focus { outline-color: #AA94FF; outline-offset: 2px; }
+checkbutton:focus, expander:focus { outline-color: #f3bd55; outline-offset: 2px; }
 checkbutton:disabled { color: #718095; }
 label.headline { font-size: 29px; font-weight: 600; color: @dream_fg; }
 /* The load screen (the owner's plan of 2026-10-01): readable field names and sources, and the Recommended settings card
@@ -47,25 +47,25 @@ box.rec-card { background: @dream_panel; border: 1px solid @dream_line; border-r
 label.rec-title { font-size: 18px; font-weight: 600; color: @dream_fg; }
 label.rec-source { font-size: 12px; color: @dream_faint; }
 box.rec-mode { background: @dream_bg2; border: 1px solid @dream_line; border-radius: 10px; padding: 12px 14px 14px 14px; }
-box.rec-mode.active { background: #1E1A33; border-color: #8F7BE0; }
+box.rec-mode.active { background: #392716; border-color: #cf8b33; }
 label.rec-mode-name { font-size: 12px; font-weight: 700; letter-spacing: 1.4px; color: @dream_dim; }
-box.rec-mode.active label.rec-mode-name { color: #D6CBFF; }
-label.rec-pill { font-size: 11px; font-weight: 600; color: #1A1426; background-color: #AA94FF; border-radius: 9px; padding: 1px 9px; }
+box.rec-mode.active label.rec-mode-name { color: #f3bd55; }
+label.rec-pill { font-size: 11px; font-weight: 600; color: #25180c; background-color: #f3bd55; border-radius: 9px; padding: 1px 9px; }
 label.rec-when { font-size: 13px; color: @dream_dim; }
 label.rec-key { font-size: 14px; color: @dream_dim; }
 label.rec-value { font-size: 14px; font-weight: 600; color: @dream_fg; }
 label.rec-heading { font-size: 13px; font-weight: 700; letter-spacing: 0.4px; color: @dream_fg; }
-label.rec-level { font-size: 13px; font-weight: 600; color: #F6A06A; }
+label.rec-level { font-size: 13px; font-weight: 600; color: #e9a657; }
 label.rec-text { font-size: 13px; color: @dream_dim; }
 label.description { font-size: 14px; color: @dream_dim; }
-label.kicker { font-size: 12px; color: #F6A06A; }
+label.kicker { font-size: 12px; color: #e9a657; }
 label.shortcut { font-family: monospace; color: @dream_dim; background: @dream_raised; border-radius: 5px; padding: 4px 8px; }
 paned > separator { background: @dream_raised; min-width: 6px; min-height: 6px; }
-paned > separator:hover { background: #AA94FF; }
+paned > separator:hover { background: #f3bd55; }
 scrollbar { background: @dream_bg0; }
 scrollbar slider { background: @dream_line; border-radius: 4px; min-width: 5px; min-height: 30px; }
 progressbar trough { background: @dream_bg2; min-height: 2px; border: none; }
-progressbar progress { background: #AA94FF; min-height: 2px; border: none; }
+progressbar progress { background: #f3bd55; min-height: 2px; border: none; }
 infobar { background: #402d29; color: #ffe3d5; }
 menu, popover, dialog { background: @dream_bg2; color: @dream_fg; }
 menuitem:hover { background: @dream_line; }
@@ -75,12 +75,43 @@ textview, textview text { background: @dream_bg2; color: @dream_fg; }
 box.sidebar { background: @dream_bg; border-right: 1px solid @dream_raised; padding: 12px 8px; }
 button.nav-item { background: transparent; border: 1px solid transparent; border-radius: 9px; padding: 6px 12px; color: @dream_dim; }
 button.nav-item:hover { background: @dream_panel; color: @dream_fg; }
-button.nav-item.selected { background: linear-gradient(105deg, #493583, #28213F 65%, #714333); border-color: #A08ABF; color: #F2ECFF; box-shadow: inset 2px 0 #BCABFF; }
-button.nav-item:focus { outline-color: #F6A06A; outline-width: 2px; outline-style: solid; outline-offset: -3px; }
+button.nav-item.selected { background: linear-gradient(105deg, #704017, #3b281a 65%, #8b471b); border-color: #c68d47; color: #fff0d7; box-shadow: inset 2px 0 #f3bd55; }
+button.nav-item:focus { outline-color: #e9a657; outline-width: 2px; outline-style: solid; outline-offset: -3px; }
 box.nav-divider { min-height: 1px; margin: 10px 10px; opacity: 0.8;
-  background-image: linear-gradient(90deg, alpha(#F6A06A, 0), #F6A06A 25%, #AA94FF 75%, alpha(#AA94FF, 0)); }
-button.nav-toggle:checked { background: alpha(#F6A06A, 0.08); border-color: #F6A06A; color: #F2ECFF; box-shadow: 0 0 10px alpha(#F6A06A, 0.25); }
+  background-image: linear-gradient(90deg, alpha(#e9a657, 0), #e9a657 25%, #f3bd55 75%, alpha(#f3bd55, 0)); }
+button.nav-toggle:checked { background: alpha(#e9a657, 0.08); border-color: #e9a657; color: #fff0d7; box-shadow: 0 0 10px alpha(#e9a657, 0.25); }
 box.nav-switch { min-width: 24px; min-height: 12px; border-radius: 6px; background: @dream_raised; padding: 2px; }
 box.nav-knob { min-width: 8px; min-height: 8px; border-radius: 4px; background: @dream_dim; }
-button.nav-toggle:checked box.nav-switch { background: #F6A06A; }
-button.nav-toggle:checked box.nav-knob { background: #1A1426; }
+button.nav-toggle:checked box.nav-switch { background: #e9a657; }
+button.nav-toggle:checked box.nav-knob { background: #25180c; }
+
+/* Account evidence, independent of Council membership. */
+.frontier-pill { border-radius: 24px; padding: 8px 14px; margin: 0 9px; background: #272019; border: 1px solid #57432e; }
+.frontier-pill:hover { background: #3e2d1d; border-color: #ff934f; }
+.account-red { color: #f47885; }
+.account-unknown { color: #e7b868; }
+.account-green { color: #71d3a0; }
+.frontier-user { font-size: 10px; color: #c6b498; margin-left: 22px; }
+.frontier-pill { min-height: 24px; }
+headerbar combobox button { padding: 4px 6px; }
+
+/* DREAM-278: a compact native launch workspace and bounded model library. */
+box.empty { margin: 24px; padding: 26px; border: 1px solid @dream_line; }
+button.model-chooser { padding: 12px 14px; min-height: 48px; }
+label.model-name { font-size: 15px; font-weight: 600; }
+popover list { background: @dream_bg2; }
+popover row { border-radius: 8px; margin-bottom: 3px; }
+popover row:selected { background: #513619; color: @dream_fg; }
+popover row:hover { background: @dream_raised; }
+box.launch-actions { padding-top: 8px; }
+label.rec-fact-value { font-size: 15px; font-weight: 600; color: #f3bd55; }
+button.suggested-action:hover { background: #c56310; }
+
+label.model-name { color: @dream_fg; }
+button.suggested-action:disabled { background: @dream_raised; border-color: @dream_line; color: @dream_faint; }
+/* The sidebar's Unload model / Load model (2026-10-10), under the provider pills. */
+.engine-controls { margin: 0 9px; }
+.engine-state { color: @dream_dim; font-size: 11px; padding: 0 6px; }
+button.engine-button { border-radius: 18px; padding: 6px 14px; background: #272019; border: 1px solid #57432e; color: @dream_fg; }
+button.engine-button:hover { background: #3e2d1d; border-color: #ff934f; }
+button.engine-button:disabled { opacity: 0.45; }

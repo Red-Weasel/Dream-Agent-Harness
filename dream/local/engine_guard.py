@@ -7,15 +7,23 @@ the engine runs in its own session, where no terminal hangup reaches it.
 The owner is the process that spawns the engine and is responsible for stopping it: the desktop's
 `python -m dream.desktop.startup run` (the session process; it holds the launch lock and stops the
 engine in its `finally`) or the terminal `dream local` process. When it dies by any means -- exit,
-crash, SIGKILL, or SIGHUP when the desktop window that hosts its terminal dies -- the engine goes too:
+crash, SIGKILL, or SIGHUP when the desktop window that hosts its terminal dies -- the engine is asked
+to exit (SIGTERM, its orderly stop). It is not forced: an engine that does not act on that request may
+outlive the grace below, and is then reported as still running rather than killed.
 
 * PR_SET_PDEATHSIG: the kernel sends the engine SIGTERM, its orderly stop, when the owner dies. The
   signal follows the spawning THREAD, so it is armed only for a spawn from the main thread, which
   lives exactly as long as the process.
 * A watchdog process (this file, run as a script) waits on pidfds of the owner and the engine. When
-  the owner goes first it sends SIGTERM itself if the parent-death signal was not armed, waits
-  DREAM_ENGINE_KILL_GRACE_S (default 120 s, the grace stop_owned gives) and SIGKILLs an engine that is
-  still running. It leaves as soon as the engine exits.
+  the owner goes first it sends SIGTERM itself if the parent-death signal was not armed and waits up to
+  DREAM_ENGINE_KILL_GRACE_S (default 120 s) for the engine to exit. It leaves as soon as the engine
+  exits.
+
+The watchdog NEVER sends SIGKILL (DREAM-253): a forced termination landed in GPU work in flight and left
+bad GPU pages and an unkillable process. An engine or supervisor still running after the grace is left
+running: the watchdog says so in the engine log and exits with status 1, and nothing it does removes
+the engine's pid record. The setting keeps its name, DREAM_ENGINE_KILL_GRACE_S, for compatibility; it is
+now only how long the watchdog waits before it reports the stop as incomplete.
 
 `keep_hot` spawns untied: that engine is meant to outlive Dream. Standard library only: the watchdog
 runs as `python -I <this file>`.
@@ -32,8 +40,9 @@ import time
 from pathlib import Path
 
 PR_SET_PDEATHSIG = 1
-GRACE_ENV = "DREAM_ENGINE_KILL_GRACE_S"
+GRACE_ENV = "DREAM_ENGINE_KILL_GRACE_S"       # a historical name, kept: nothing is killed after it (DREAM-253)
 DEFAULT_GRACE_S = 120.0
+INCOMPLETE_STOP = 1                           # the watchdog's exit status when the engine outlasted the grace
 
 _prctl = None
 
@@ -82,9 +91,9 @@ def spawn(command, *, keep_hot: bool = False, log_path=None, grace_s: float | No
     """`subprocess.Popen` for an engine this process owns. Unless `keep_hot`, the engine gets the
     parent-death signal and a watchdog; `proc.dream_watchdog` is the watchdog's Popen (None when
     untied). The watchdog notes what it does in `log_path` (the engine log). `grace_s` is how long the
-    watchdog gives the engine after SIGTERM before SIGKILL (default: DREAM_ENGINE_KILL_GRACE_S or 120 s);
-    a supervisor (`ie supervise`, DREAM-144) is given its own shutdown time, because a killed supervisor
-    leaves its children on the cards."""
+    watchdog waits after SIGTERM before it reports the engine still running (default:
+    DREAM_ENGINE_KILL_GRACE_S or 120 s); a supervisor (`ie supervise`, DREAM-144) is given its own
+    shutdown time. Nothing is ever SIGKILLed (DREAM-253)."""
     arm = None if keep_hot else _parent_death_signal()
     proc = subprocess.Popen(command, preexec_fn=arm, **popen_kwargs)
     proc.dream_watchdog = None if keep_hot else _watch(proc, term=arm is None, log_path=log_path, grace_s=grace_s)
@@ -141,7 +150,10 @@ def _send(fd: int, sig: int) -> None:
 
 
 def main(argv: list[str]) -> int:
-    """The watchdog: argv = owner_pidfd engine_pidfd grace_s send_term owner_pid engine_pid."""
+    """The watchdog: argv = owner_pidfd engine_pidfd grace_s send_term owner_pid engine_pid.
+
+    Returns 0 when the engine is gone (before its owner, or within `grace_s` of the owner's death) and
+    INCOMPLETE_STOP when it is still running after that wait. SIGTERM is the only signal it ever sends, once."""
     owner, engine = int(argv[0]), int(argv[1])
     grace, send_term, owner_pid, engine_pid = float(argv[2]), argv[3] == "1", argv[4], argv[5]
     poller = select.poll()
@@ -165,10 +177,10 @@ def main(argv: list[str]) -> int:
     if _exits_within(engine, grace):
         say(f"engine pid {engine_pid} stopped")
         return 0
-    _send(engine, signal.SIGKILL)
-    say(f"engine pid {engine_pid} still running {grace:g} s after SIGTERM; sent SIGKILL")
-    _exits_within(engine, 5.0)
-    return 0
+    # DREAM-253: no escalation. The engine keeps its SIGTERM and its pid record; this line is the report.
+    say(f"engine pid {engine_pid} still running {grace:g} s after SIGTERM; left running, not force-killed. "
+        "Its orderly stop is incomplete and its GPU memory is not free until it exits")
+    return INCOMPLETE_STOP
 
 
 if __name__ == "__main__":

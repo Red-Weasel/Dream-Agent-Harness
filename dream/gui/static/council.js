@@ -20,10 +20,15 @@
           <p id="council-main-note" class="council-help"></p>
           <label>Main effort<select id="council-main-effort" aria-label="Main effort" aria-describedby="council-effort-note"></select></label><p id="council-effort-note" class="council-help"></p>
         </section>
-        <section><h3>Members <span>Active work or independent review</span></h3><p class="council-help">Choose models by name and set their effort. Members can take an editing turn or provide a read-only review. Applying the roster does not run a task or load local weights.</p><div id="council-advisors"></div></section>
+        <section><h3>Members <span>Active work or independent review</span></h3><p class="council-help">Choose models by name and set their effort. Members can take an editing turn or provide an independent assessment. Native CLI permissions govern their own tools. Applying the roster does not run a task or load local weights.</p><div id="council-advisors"></div></section>
         <details><summary>Consultation limits</summary><div class="council-grid"><label>Concurrent advisors<input id="council-concurrency" type="number" min="1" max="32" required></label><label>Timeout in seconds<input id="council-timeout" type="number" min="0" max="3600" step="any" required></label></div></details>
         <div class="council-actions"><button type="submit" id="council-apply" class="council-primary">Apply Council</button><button type="button" id="council-reset">Use current configuration</button><span id="council-draft" class="council-help"></span></div>
       </fieldset></form>
+      <section id="council-signin"><h3>Sign in <span>Provider accounts</span></h3><p class="council-help">Opens the provider's own sign-in in a separate window. You sign in there or in your browser. The Dream app displays that window; Dream does not read or save what is typed or shown in it, does not send it to agents, and checks account status separately from opening the sign-in window. What the provider's own program does with your account is up to that program. You can do this while Dream is working.</p>
+        <div class="council-ask"><label for="council-login-provider">Provider<select id="council-login-provider" aria-label="Provider" aria-describedby="council-login-note"></select></label><button type="button" id="council-login-start">Open sign-in window</button></div>
+        <p id="council-login-note" class="council-help"></p>
+        <p id="council-login-feedback" role="status" tabindex="-1" hidden></p>
+      </section>
       <section><h3>Bring members in</h3><p class="council-help">Assign work gives members tools in this workspace using your current permission mode. A team relay runs members in order, then returns to your main agent. Review requests are read-only and can run together.</p>
         <p id="council-legal-note" class="council-help" hidden>Legal review is enabled and requires sources. Ask in the conversation to use Council tools with source evidence. This panel cannot submit legal reviews.</p>
         <label>Task or review question<textarea aria-label="Question for advisors" id="council-question" rows="3" maxlength="8000" placeholder="Polish the saved animation, verify playback, and report the changes."></textarea></label>
@@ -34,6 +39,86 @@
     </div>`;
   document.body.append(dialog);
   let status = null, pending = '', dirty = false, stopping = false, uncertain = false;
+  const FRONTIERS = [['anthropic', 'Claude'], ['grok', 'Grok'], ['antigravity', 'Gemini'], ['codex', 'Codex']];
+  let frontierMessage = '', localMain = null;
+  const frontierSelections = new Map();
+  let accounts = new Map(), accountsReading = false;
+  function frontierState() {
+    const controls = {};
+    for(const [key, label] of FRONTIERS) {
+      const account = accounts.get(key);
+      const signedIn = account?.status === 'signed_in';
+      const accountStatus = typeof account?.status === 'string' ? account.status : 'unknown';
+      const detail = typeof account?.detail === 'string' ? account.detail : 'Account status has not been checked.';
+      const labelStatus = signedIn ? 'signed in' : accountStatus === 'signed_out' ? 'signed out' :
+        accountStatus === 'unavailable' ? 'CLI unavailable' : 'account unverified';
+      controls[key] = {on:signedIn, signed_in:signedIn, status:accountStatus, enabled:!loginBusy,
+        username:signedIn && typeof account?.username === 'string' ? account.username.slice(0, 160) : '',
+        title:`${label} · ${labelStatus} — ${detail}. Click to open sign-in.`};
+    }
+    return {controls, message:frontierMessage, loginBusy};
+  }
+  async function refreshAccounts() {
+    if(accountsReading) return;
+    accountsReading = true;
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetch('/api/accounts', {headers:{'X-Dream-Token':TOKEN}, cache:'no-store', signal:controller.signal});
+      const data = await response.json();
+      if(!response.ok || !Array.isArray(data.accounts)) throw new Error('Account status is unavailable.');
+      accounts = new Map(data.accounts.filter(a => a && FRONTIERS.some(([key]) => key === a.provider)).map(a => [a.provider,a]));
+    } catch {
+      accounts = new Map(FRONTIERS.map(([provider]) => [provider,{status:'unknown',detail:'Account status could not be checked. Refresh or open sign-in.'}]));
+    } finally { clearTimeout(timer); accountsReading = false; frontierSync(); }
+  }
+  function frontierSync() {
+    window.dispatchEvent(new CustomEvent('dream:frontier-state', {detail:frontierState()}));
+  }
+  function frontierNote(text) { frontierMessage = bounded(text, 1500); frontierSync(); }
+  async function toggleFrontier(key, requested) {
+    if(!FRONTIERS.some(([provider]) => provider === key) || pending) return;
+    // Read current server state before changing it: another surface may have changed the roster or started work.
+    pending = 'council_status'; sync();
+    try {
+      acceptStatus(await api({action:'council_status'}));
+      if(status.busy || status.main_available === false || !status.choices.some(c => c.key === key && c.available))
+        throw new Error('This frontier cannot change now. Wait for the active turn or sign in and refresh Council.');
+      const cfg = {...status.config, advisors:[...status.config.advisors],
+        advisor_models:{...status.config.advisor_models}, advisor_efforts:{...status.config.advisor_efforts}};
+      const on = cfg.orchestrator === key || cfg.advisors.includes(key);
+      const enable = typeof requested === 'boolean' ? requested : !on;
+      if(enable === on) return;
+      let model = status.model;
+      if(enable) {
+        const saved = frontierSelections.get(key);
+        if(!FRONTIERS.some(([provider]) => provider === cfg.orchestrator)) {
+          model = saved?.model || '';
+          cfg.orchestrator = key; cfg.orchestrator_effort = saved?.effort || null;
+          cfg.advisors = cfg.advisors.filter(provider => provider !== key);
+        } else {
+          cfg.advisors.push(key);
+          if(saved?.model) cfg.advisor_models[key] = saved.model;
+          if(saved?.effort) cfg.advisor_efforts[key] = saved.effort;
+        }
+      } else if(cfg.orchestrator === key) {
+        const next = cfg.advisors.find(provider => FRONTIERS.some(([frontier]) => frontier === provider) && status.choices.some(c => c.key === provider && c.available));
+        if(next) {
+          model = cfg.advisor_models[next] || ''; cfg.orchestrator = next;
+          cfg.orchestrator_effort = cfg.advisor_efforts[next] || null;
+          cfg.advisors = cfg.advisors.filter(provider => provider !== next && provider !== key);
+        } else if(localMain && status.choices.some(c => c.key === localMain.provider && c.available)) {
+          cfg.orchestrator = localMain.provider; model = localMain.model; cfg.orchestrator_effort = localMain.effort;
+          cfg.advisors = cfg.advisors.filter(provider => provider !== key);
+        } else throw new Error('Turn on another frontier before switching off the main agent.');
+      } else cfg.advisors = cfg.advisors.filter(provider => provider !== key);
+      for(const provider of Object.keys(cfg.advisor_models)) if(!cfg.advisors.includes(provider)) delete cfg.advisor_models[provider];
+      for(const provider of Object.keys(cfg.advisor_efforts)) if(!cfg.advisors.includes(provider)) delete cfg.advisor_efforts[provider];
+      pending = 'council_configure'; sync(); frontierNote('Applying frontier selection…');
+      acceptStatus(await api({action:'council_configure', config:cfg, model}));
+      frontierNote('Frontier selection applied.');
+    } catch(error) { frontierNote(error.message); }
+    finally { pending = ''; sync(); }
+  }
   const rows = new Map();
   const bounded = (value, limit = 24000) => String(value ?? '').slice(0, limit);
   function message(text, error = false) {
@@ -88,7 +173,8 @@
   function effortOptions(select, choice, selected = '') {
     select.replaceChildren(); option(select, '', 'Provider default');
     const levels = Array.isArray(choice?.efforts) ? choice.efforts : [];
-    for(const level of levels) option(select, level, level);
+    for(const level of levels) option(select, level,
+      choice?.key === 'gemini' ? (level === 'on' ? 'On · high thinking' : 'Off · reduced thinking') : level);
     // Retain a previously applied value when metadata no longer reports it.
     // The owner can explicitly reset it to default instead of losing it silently.
     if(selected && !levels.includes(selected)) option(select, selected, selected + ' · previously configured');
@@ -115,6 +201,7 @@
     $('council-main-warning').hidden = !unavailable && !status?.warning;
     $('council-main-warning').textContent = bounded(status?.warning || (unavailable ? 'The main agent is unavailable. Start a new Dream application before continuing.' : ''), 2000);
     dialog.setAttribute('aria-busy', String(!!pending));
+    frontierSync();
   }
   function renderDraft() {
     const cfg = status.config;
@@ -163,6 +250,12 @@
       uncertain = true; throw new Error('Council status is incomplete. Refresh before making changes.');
     }
     status = data; uncertain = false;
+    for(const [key] of FRONTIERS) {
+      if(data.config.orchestrator === key) frontierSelections.set(key, {model:data.model, effort:data.config.orchestrator_effort});
+      else if(data.config.advisors.includes(key)) frontierSelections.set(key, {model:data.config.advisor_models?.[key], effort:data.config.advisor_efforts?.[key]});
+    }
+    if(!localMain && !FRONTIERS.some(([key]) => key === data.config.orchestrator))
+      localMain = {provider:data.config.orchestrator, model:data.model, effort:data.config.orchestrator_effort};
     if(!dirty || replaceDraft) renderDraft();
     const previous = $('council-target').value; $('council-target').replaceChildren();
     for(const key of data.config.advisors) {
@@ -260,8 +353,94 @@
     catch(error) { message(error.message, true); }
     finally { stopping = false; sync(); }
   };
-  button.onclick = () => { dialog.showModal(); if(!pending) refresh(); };
+  // --- Sign in (DREAM-246). Separate from the Council state above: it has its own request, its own feedback and
+  // never waits for a turn. The only thing sent is the provider's name; the session holds the fixed commands.
+  const LOGIN_PROVIDERS = [['anthropic', 'Claude'], ['codex', 'ChatGPT (Codex)'], ['grok', 'Grok'], ['antigravity', 'Gemini (Antigravity)']];
+  let loginInfo = null, loginBusy = false, loginRun = 0;
+  for(const [key, label] of LOGIN_PROVIDERS) option($('council-login-provider'), key, label);
+  function loginMessage(text, error = false) {
+    const node = $('council-login-feedback'); node.hidden = false; node.textContent = bounded(text, 2000);
+    node.classList.toggle('council-error', error); node.setAttribute('role', error ? 'alert' : 'status');
+    if(error) node.focus();
+    frontierNote(text);
+  }
+  async function loginApi(payload) {
+    const abort = new AbortController(), timer = setTimeout(() => abort.abort(), 15000);
+    try {
+      const response = await fetch('/api/control', {method:'POST', cache:'no-store', signal:abort.signal,
+        headers:{'X-Dream-Token':TOKEN, 'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+      let data = null;
+      try { data = await response.json(); } catch { /* reported below */ }
+      if(response.status === 401) throw new Error('This Studio token is no longer authorized. Reopen Studio from the running terminal.');
+      // A refusal the session wrote itself says what happened. Any other answer that is not a confirmed result
+      // (unreadable, an unexplained error, no result) was still sent: its outcome is unknown, and nothing is sent again.
+      if(data && typeof data.error === 'string' && data.error) throw new Error(bounded(data.error, 1500));
+      if(!response.ok || !data || typeof data !== 'object' || data.ok !== true || !data.result || typeof data.result !== 'object')
+        throw new Error(`The session's answer could not be read${response.ok ? '' : ` (HTTP ${response.status})`}. It is not known whether a sign-in window opened; look for one before trying again.`);
+      return data.result;
+    } catch(error) {
+      if(error.name === 'AbortError' || error instanceof TypeError) throw new Error('The session did not answer. It is not known whether a sign-in window opened; look for one before trying again.');
+      throw error;
+    } finally { clearTimeout(timer); }
+  }
+  function loginSync() {
+    const key = $('council-login-provider').value, target = loginInfo?.targets?.find(t => t.key === key);
+    const noDesktop = loginInfo?.desktop === false;
+    $('council-login-start').disabled = loginBusy || noDesktop;
+    const parts = [];
+    if(target?.note) parts.push(target.note);
+    // What the desktop window last reported, not a check of any account: one sign-in window is open at a time.
+    if(typeof loginInfo?.open?.label === 'string') parts.push(`A sign-in window is open for ${loginInfo.open.label}. Finish or close it before opening another.`);
+    if(noDesktop) parts.push('This page is not inside the Dream desktop window, so it cannot open a sign-in window.' + (target ? ` In a separate terminal of your own, run: ${target.command}` : ''));
+    $('council-login-note').textContent = bounded(parts.join(' '), 600);
+    frontierSync();
+  }
+  async function loginRefresh() {
+    try { const info = await loginApi({action:'provider_login_status'}); if(Array.isArray(info.targets)) loginInfo = info; }
+    catch { /* the button stays available; the session answers when it is pressed */ }
+    loginSync();
+  }
+  async function loginStart(provider) {
+    if(typeof provider === 'string' && FRONTIERS.some(([key]) => key === provider)) $('council-login-provider').value = provider;
+    if($('council-login-start').disabled) return;
+    const run = ++loginRun; loginBusy = true; loginSync(); loginMessage('Asking for the sign-in window…');
+    try {
+      let result = await loginApi({action:'provider_login', provider:$('council-login-provider').value});
+      const unread = 'The session\'s answer could not be read. It is not known whether a sign-in window opened; look for one before trying again.';
+      for(let tries = 0; result.status === 'queued' && tries < 30 && run === loginRun; tries++) {
+        if(typeof result.id !== 'string' || typeof result.message !== 'string') throw new Error(unread);   // only this request is asked about, never "the newest"
+        loginMessage(result.message);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        const info = await loginApi({action:'provider_login_status', id:result.id});
+        if(!info.request) throw new Error('The session no longer knows this request. Look for a sign-in window before trying again.');
+        result = info.request;
+      }
+      if(result.status === 'queued') throw new Error('The desktop window has not answered yet. Look for a sign-in window before trying again.');
+      if(typeof result.message !== 'string' || !result.message) throw new Error(unread);   // never "done" for an answer that said nothing
+      loginMessage(result.message, !['launched', 'closed', 'manual'].includes(result.status));
+    } catch(error) { loginMessage(error.message, true); }
+    finally { if(run === loginRun) { loginBusy = false; loginSync(); loginRefresh(); refreshAccounts(); } }   // the button first; then whether a window is reported open
+  }
+  $('council-login-provider').addEventListener('change', loginSync);
+  $('council-login-start').onclick = loginStart;
+  loginSync();
+  let returnFocus = button;
+  function open(source = button) {
+    returnFocus = source;
+    if(!dialog.open) dialog.showModal();
+    loginRefresh(); if(!pending) refresh();
+  }
+  button.onclick = () => open();
+  window.addEventListener('dream:council-open', event => open($(event.detail?.source) || button));
+  window.DreamFrontiers = {state:frontierState, toggle:toggleFrontier, refresh:refreshAccounts, refreshCouncil:refresh, login:loginStart};
+  window.addEventListener('dream:frontier-toggle', event => toggleFrontier(event.detail?.provider, event.detail?.enabled));
+  window.addEventListener('dream:frontier-login', event => {
+    if(FRONTIERS.some(([key]) => key === event.detail?.provider)) loginStart(event.detail.provider);
+  });
+  window.addEventListener('dream:session', refreshAccounts);
+  window.addEventListener('dream:account-refresh', refreshAccounts);
+  setInterval(refreshAccounts, 15000);
   $('council-close').onclick = () => dialog.close();
-  dialog.addEventListener('close', () => button.focus());
+  dialog.addEventListener('close', () => returnFocus.focus());
   sync();
 })();

@@ -7,6 +7,12 @@ themselves stay on /api/memory; the response styles are listed here and set thro
 Every file is one of a fixed list, never a path from the request. A save must name the version it was opened at (its
 `stamp`), so an edit made elsewhere in the meantime is refused rather than overwritten. Writes are atomic. A file
 that is a link, or that resolves outside its folder, is refused.
+
+Effective context (DREAM-257, phase 1) is read here too: /api/lucid/context lists the bounded preview journal of
+what this session's HTTP requests carried and /api/lucid/context/{request_id} shows one entry, from memory only
+(context_view): captured hashes, sizes and counts with bounded, redacted previews -- not the requests themselves,
+whose omitted text is not retained. Requests a provider's own SDK or CLI assembles are not observed, and the answer
+says so.
 """
 from __future__ import annotations
 
@@ -266,7 +272,73 @@ def save(scope: str, key: str, payload: dict) -> dict:
             "warning": "Saved, but the disk did not confirm it; check the file after a restart."})}
 
 
+_NO_STORE = {"Cache-Control": "no-store"}
+
+
+def context_view(session_id, request_id=None) -> dict | None:
+    """Effective context (DREAM-257): what the HTTP requests of ONE session carried, from the in-memory journal
+    (core/context_inspection.py). Without `request_id`, the session's attempts as summaries (no component, no
+    preview, no prompt text); with one, that attempt's record with its bounded, redacted previews, or None when this
+    session has no such record (another session's, evicted, never made). Nothing is read from disk and no path
+    comes from the caller."""
+    from ..core import context_inspection as inspection
+    # `harness` is the inspector's own version; `package` is Dream's version string (a release name, not a source
+    # revision). `journal` says what this is: bounded previews with captured hashes and counts, not the requests.
+    about = {"schema": inspection.SCHEMA, "harness": inspection.HARNESS, "package": dict(inspection.PACKAGE),
+             "journal": dict(inspection.JOURNAL_KIND), "coverage": dict(inspection.COVERAGE),
+             "caveats": list(inspection.CAVEATS), "not_counted": list(inspection.NOT_COUNTED),
+             "session_id": session_id if isinstance(session_id, str) else None}
+    if request_id is None:
+        records = inspection.JOURNAL.list(session_id)
+        return {**about, "records": records, "empty_note": None if records else inspection.EMPTY_NOTE,
+                "limits": {"records_per_session": inspection.JOURNAL.max_records,
+                           "bytes_per_session": inspection.JOURNAL.max_session_bytes,
+                           "bytes_per_record": inspection.JOURNAL.max_record_bytes,
+                           "components_per_record": inspection.MAX_COMPONENTS}}
+    if not isinstance(request_id, str) or inspection.REQUEST_ID.fullmatch(request_id) is None:
+        return None
+    record = inspection.JOURNAL.get(session_id, request_id)
+    if record is not None and record.get("protocol") == "openai_responses":
+        about["not_counted"] = ["Individual component tokens are not reported by the provider; "
+                                "its whole-input count cannot be apportioned to components."]
+        about["caveats"] = [inspection.CAVEATS[0], inspection.CAVEATS[1],
+            "The provider count preflight and inference usage are separate observations, not additive. "
+            "No local tokenizer is used for this advisory input.",
+            "Only a bounded, redacted preview of the approved input is retained; the whole-input hash "
+            "cannot recover omitted text. Provider output and private recovery capsules are not retained."]
+    return None if record is None else {**about, "record": record}
+
+
 def routes(server):
+    async def context(request):
+        # Read-only, and still this session's alone: the header token (never ?token=, which a link or another page
+        # could carry), no other page's origin, and only the session this server is showing now.
+        # Every answer below, refusals and errors included, is marked no-store.
+        if not server._authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401, headers=_NO_STORE)
+        # An Origin header, when the browser sends one, must be this page's own (a "null" origin is not); and a
+        # browser that says where the fetch came from (Sec-Fetch-Site) must say same-origin, or none for a request
+        # the owner made directly. same-site and cross-site are other pages.
+        origin = request.headers.get("origin")
+        if (origin is not None and origin.rstrip("/") != str(request.base_url).rstrip("/")) \
+                or request.headers.get("sec-fetch-site", "same-origin").strip().lower() not in ("same-origin", "none"):
+            return JSONResponse({"error": "Origin does not match this session."}, status_code=403, headers=_NO_STORE)
+        if request.method not in ("GET", "HEAD"):      # reading only; said here so the refusal is no-store too
+            return JSONResponse({"error": "Context inspection is read-only."}, status_code=405,
+                                headers={**_NO_STORE, "Allow": "GET"})
+        try:
+            session = server._session
+            session_id = session.get("session_id") if isinstance(session, dict) else None
+            request_id = request.path_params.get("request_id")
+            result = context_view(session_id, request_id)
+        except Exception:      # never an exception's own text: it could name a path or quote a prompt
+            return JSONResponse({"error": "Context inspection is unavailable."}, status_code=500, headers=_NO_STORE)
+        if result is None:
+            return JSONResponse({"error": "This session has no such request context: it was never recorded here, "
+                                          "or it has been dropped to make room. Refresh the list."},
+                                status_code=404, headers=_NO_STORE)
+        return JSONResponse(result, headers=_NO_STORE)
+
     async def endpoint(request):
         if not server._authorized(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -290,5 +362,11 @@ def routes(server):
             return JSONResponse({"error": str(exc)}, status_code=400)
         except OSError:
             return JSONResponse({"error": "Cannot safely access that file."}, status_code=400)
+    # The context routes come first: "/api/lucid/context/<id>" would otherwise read as a scope and a key.
+    # They accept every method only to refuse all but GET/HEAD themselves (405, no-store): a method left to the
+    # framework's own 405 (OPTIONS and TRACE were) would be answered without that header.
+    refused_here = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE"]
     return [Route("/api/lucid", endpoint, methods=["GET"]),
+            Route("/api/lucid/context", context, methods=refused_here),
+            Route("/api/lucid/context/{request_id}", context, methods=refused_here),
             Route("/api/lucid/{scope}/{key}", endpoint, methods=["GET", "POST"])]

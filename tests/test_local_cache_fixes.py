@@ -145,9 +145,12 @@ async def test_the_model_is_told_when_rounds_run_low(monkeypatch):
 
 async def test_write_file_append_adds_to_the_end(tmp_path, monkeypatch):
     from dream.tools import native
+    from dream.tools.context import ToolContext, bind_context
     monkeypatch.setattr(native, "_resolve", lambda raw: tmp_path / raw)
-    await native.write_file.handler({"path": "big.js", "content": "part one\n"})
-    out = await native.write_file.handler({"path": "big.js", "content": "part two\n", "append": True})
+    # write_file checks the session's workspace for Dream's protected files first (worker_checkpoints.protected_write)
+    with bind_context(ToolContext(None, None, None, "fixture", workspace=tmp_path)):
+        await native.write_file.handler({"path": "big.js", "content": "part one\n"})
+        out = await native.write_file.handler({"path": "big.js", "content": "part two\n", "append": True})
     assert (tmp_path / "big.js").read_text() == "part one\npart two\n"
     assert "Appended" in json.dumps(out)
 

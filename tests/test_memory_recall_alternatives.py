@@ -74,15 +74,18 @@ async def test_recall_keeps_a_primary_exact_match_before_alternative_hits(store)
 
 
 @pytest.mark.asyncio
-async def test_recall_without_alternatives_keeps_the_primary_search_path(store, monkeypatch):
+async def test_recall_without_alternatives_uses_active_primary_search(store, monkeypatch):
     store.upsert_memory("semantic", "Dinner plan", "Dinner reservation is Friday.", slug="dinner")
 
-    def alternative_path(*args, **kwargs):
-        raise AssertionError("primary-only recall must not use alternative retrieval")
-
-    monkeypatch.setattr(store, "search_memories_with_alternatives", alternative_path)
+    original = store.search_active_memories
+    calls = []
+    def active_path(query, **kwargs):
+        calls.append(query)
+        return original(query, **kwargs)
+    monkeypatch.setattr(store, 'search_active_memories', active_path)
     result = await recall.handler({"query": "dinner"})
     assert "slug: dinner" in _text(result)
+    assert calls == ['dinner']
 
 
 def test_alternative_union_respects_limit_and_bumps_each_memory_once(store):
@@ -108,7 +111,8 @@ async def test_recall_does_not_present_alternative_recency_as_a_match(store):
     })
 
     text = _text(result)
-    assert "Nothing matched 'no matching subject' directly" in text
+    assert "No memories found for 'no matching subject'" in text
+    assert 'unrelated' not in text
     assert "matched alternative" not in text
 
 

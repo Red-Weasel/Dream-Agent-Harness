@@ -372,9 +372,13 @@ def test_auto_mode_never_prompts_for_reads_and_always_gates_delete():
         for mode in policy.MODES:
             assert policy.decide(name, inp, mode, WS)[0] == "allow", (name, mode)
     inp = {"paths": ["inside.txt"]}
-    for mode in ("ask", "accept-edits", "auto"):
+    for mode in ("ask", "accept-edits"):
         d, why = policy.decide("delete_file", inp, mode, WS)
         assert d == "ask" and why == "deletes: inside.txt", (mode, why)
+    # Auto mode (the owner, 2026-10-11): a few ordinary files go; code, project files and bulk deletes still ask.
+    assert policy.decide("delete_file", inp, "auto", WS)[0] == "allow"
+    d, why = policy.decide("delete_file", {"paths": ["inside.py"]}, "auto", WS)
+    assert d == "ask" and "code or a project file" in why, why
     assert policy.decide("delete_file", inp, "plan", WS)[0] == "deny"
 
 

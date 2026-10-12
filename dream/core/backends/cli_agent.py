@@ -14,15 +14,16 @@ streams, captures the resume/session id, and yields whatever the adapter transla
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
+from contextlib import aclosing, contextmanager, nullcontext
 import json
 import math
 import os
-import shutil
+import shutil  # noqa: F401  (kept as a module attribute: tests replace shutil.which through it)
 import time
 from typing import Any, AsyncIterator
 
 from .base import Backend, Event
+from ..cli_discovery import locate_command, node_child_env
 from ..execution import supervised_command
 
 # One JSON event per line, and a codex `item.completed` can carry a whole command's
@@ -35,6 +36,32 @@ _STDERR_KEEP = 64 * 1024
 # After terminate(), how long to wait before escalating to kill(). A CLI that
 # shrugs off SIGTERM used to hang the wait() forever — the whole session with it.
 _TERM_GRACE_S = 3.0
+
+
+def native_effort(provider: str, level: str | None, model: str | None = None) -> str | None:
+    """Validate a CLI control before changing state or creating a process."""
+    if level is None:
+        return None
+    if provider not in ('codex', 'grok', 'gemini', 'antigravity'):
+        raise ValueError('Effort is not implemented for this CLI adapter')
+    if not isinstance(level, str):
+        raise ValueError('Effort must be a supported string or None')
+    from ..council_config import validate_effort
+    normalized = level.strip().lower()
+    if normalized == 'med':
+        normalized = 'medium'
+    return validate_effort(provider, normalized, model)
+
+
+def native_effort_argv(provider: str, level: str | None, model: str | None = None) -> list[str]:
+    level = native_effort(provider, level, model)
+    if level is None:
+        return []
+    if provider == 'gemini':
+        return []  # Per-run settings overlay; no dedicated native CLI flag.
+    if provider in ('grok', 'antigravity'):
+        return ['--effort', level]
+    return ['-c', 'model_reasoning_effort=' + json.dumps(level)]
 
 
 async def _reap(proc: asyncio.subprocess.Process) -> int:
@@ -94,8 +121,9 @@ class CliAdapter:
     """Per-CLI knowledge: how to invoke the binary and read its JSON event stream.
 
     Subclasses set ``key``/``cmd``/``label`` and implement the three hooks. Both
-    ``translate`` and ``capture_session`` are pure functions of a single decoded
-    stream object, so they can be exercised over recorded fixtures with no subprocess.
+    ``translate`` and ``capture_session`` consume decoded stream objects and can
+    be exercised over recorded fixtures with no subprocess. ``commit_result``
+    retains accounting only after the backend publishes a settled result.
     """
 
     key: str = "cli"
@@ -105,6 +133,10 @@ class CliAdapter:
     # handled in argv); False when it must be registered persistently out-of-band
     # (grok/gemini) — the engine owns that register/deregister lifecycle.
     mcp_via_argv: bool = False
+
+    def stdin_payload(self, prompt: str) -> bytes | None:
+        """None keeps existing argv transport; adapters may own stdin framing."""
+        return None
 
     def argv(
         self, prompt: str, *, cwd: str, resume_id: str | None, sandbox: str,
@@ -118,6 +150,10 @@ class CliAdapter:
 
     def capture_session(self, obj: dict) -> str | None:
         """Return the resume/session id if this object carries one, else ``None``."""
+        return None
+
+    def commit_result(self, event: Event) -> None:
+        """Commit accounting only when the backend publishes a settled result."""
         return None
 
     def mcp_register_argv(self, name: str, env: dict[str, str], server_cmd: list[str]) -> list[str] | None:
@@ -145,6 +181,14 @@ class CodexAdapter(CliAdapter):
     label = "ChatGPT · Codex"
     mcp_via_argv = True  # the dream server rides in via session-scoped `-c` overrides
 
+    def __init__(self) -> None:
+        self._usage_thread: str | None = None
+        self._usage_totals: dict[str, int] = {}
+
+    def stdin_payload(self, prompt: str) -> bytes:
+        # Avoid process-list disclosure and the OS per-argument size limit.
+        return prompt.encode('utf-8')
+
     def argv(
         self, prompt: str, *, cwd: str, resume_id: str | None, sandbox: str,
         mcp_config: dict | None = None,
@@ -162,7 +206,7 @@ class CodexAdapter(CliAdapter):
         argv += self._mcp_overrides(mcp_config)
         if resume_id:
             argv += ["resume", resume_id]
-        argv.append(prompt)
+        argv.append('-')
         return argv
 
     @staticmethod
@@ -173,12 +217,13 @@ class CodexAdapter(CliAdapter):
             return []
         name = mcp_config["name"]
         out = [
-            "-c", f'mcp_servers.{name}.command="{mcp_config["command"]}"',
-            "-c", f"mcp_servers.{name}.args={json.dumps(mcp_config['args'])}",
+            "-c", f'mcp_servers.{name}.command={json.dumps(mcp_config["command"], ensure_ascii=False)}',
+            "-c", f"mcp_servers.{name}.args={json.dumps(mcp_config['args'], ensure_ascii=False)}",
         ]
         env = mcp_config.get("env") or {}
         if env:
-            inline = "{" + ", ".join(f'{k}="{v}"' for k, v in env.items()) + "}"
+            inline = "{" + ", ".join(f'{json.dumps(k, ensure_ascii=False)}={json.dumps(v, ensure_ascii=False)}'
+                                     for k, v in env.items()) + "}"
             out += ["-c", f"mcp_servers.{name}.env={inline}"]
         return out
 
@@ -200,20 +245,52 @@ class CodexAdapter(CliAdapter):
 
     def translate(self, obj: dict, state: dict) -> list[Event]:
         t = obj.get("type")
+        if t == 'thread.started':
+            thread = self.capture_session(obj)
+            if thread and thread != self._usage_thread:
+                self._usage_thread = thread
+                self._usage_totals = {}
         if t == "item.started":
             return self._item_started(obj.get("item") or {})
         if t == "item.completed":
             return self._item_completed(obj.get("item") or {})
         if t == "turn.completed":
+            raw = obj.get("usage") or {}
+            # The exec emitter uses thread totals, including resumed turns.
+            # Keep the provider snapshot separate from Dream's additive meter.
+            if 'codex_usage' not in state:
+                totals = {key: value for key, value in raw.items()
+                          if key in ('input_tokens', 'cached_input_tokens', 'output_tokens',
+                                     'reasoning_output_tokens', 'cache_write_input_tokens')
+                          and type(value) is int and value >= 0}
+                decreased = any(value < self._usage_totals.get(key, 0)
+                                for key, value in totals.items())
+                delta = ({} if decreased else
+                         {key: value - self._usage_totals.get(key, 0)
+                          for key, value in totals.items()})
+                state['codex_usage'] = self._map_usage(delta)
+                state['codex_usage_reset'] = decreased
             return [Event("result", {
                 "is_error": False,
                 "subtype": "success",
-                "usage": self._map_usage(obj.get("usage") or {}),
+                "usage": state['codex_usage'],
+                "usage_scope": "turn",
+                "context_tokens": None,  # exec JSON does not expose the last request size
+                "provider_usage": raw,
+                "provider_usage_scope": "session",
+                "usage_counter_reset": state['codex_usage_reset'],
                 "total_cost_usd": None,
             })]
         # thread.started (captured via capture_session), turn.started, and anything
         # unrecognised carry no rendered event.
         return []
+
+    def commit_result(self, event: Event) -> None:
+        raw = event.data.get('provider_usage') or {}
+        self._usage_totals.update({key: value for key, value in raw.items()
+                                  if key in ('input_tokens', 'cached_input_tokens', 'output_tokens',
+                                             'reasoning_output_tokens', 'cache_write_input_tokens')
+                                  and type(value) is int and value >= 0})
 
     def _item_started(self, item: dict) -> list[Event]:
         it = item.get("type")
@@ -227,6 +304,7 @@ class CodexAdapter(CliAdapter):
             # Dream's own tools (recall/remember/…) reach codex over MCP.
             return [Event("tool_use", {
                 "name": item.get("tool", "mcp"),
+                "server": item.get("server"),
                 "input": item.get("arguments") or {},
                 "id": item.get("id"),
             })]
@@ -247,10 +325,14 @@ class CodexAdapter(CliAdapter):
             })]
         if it == "mcp_tool_call":
             err = item.get("error")
+            result = item.get("result")
             return [Event("tool_result", {
                 "name": item.get("tool", "mcp"),
-                "content": self._mcp_result_text(item.get("result"), err),
-                "is_error": err is not None,
+                "server": item.get("server"),
+                "content": self._mcp_result_text(result, err),
+                "is_error": (err is not None or item.get('status') == 'failed'
+                             or isinstance(result, dict) and
+                             (result.get('isError') is True or result.get('is_error') is True)),
                 "id": item.get("id"),
             })]
         if it == "error":
@@ -284,12 +366,13 @@ class CodexAdapter(CliAdapter):
 
     @staticmethod
     def _map_usage(raw: dict) -> dict[str, Any]:
-        """codex reports input/output tokens; expose the OpenAI-style names Dream's
-        stats read while keeping the raw fields (cached/reasoning counts) alongside."""
+        """Expose additive turn deltas with both Codex and Dream accounting names."""
         return {
             **raw,
             "prompt_tokens": raw.get("input_tokens"),
             "completion_tokens": raw.get("output_tokens"),
+            "cached_tokens": raw.get("cached_input_tokens"),
+            "prompt_tokens_details": {"cached_tokens": raw.get("cached_input_tokens")},
         }
 
 
@@ -306,6 +389,9 @@ def adapter_for(key: str) -> CliAdapter:
         from .gemini_adapter import GeminiAdapter
 
         return GeminiAdapter()
+    if key == "antigravity":
+        from .antigravity_adapter import AntigravityAdapter
+        return AntigravityAdapter()
     raise ValueError(f"no CLI adapter for '{key}'")
 
 
@@ -313,7 +399,7 @@ class CliAgentBackend(Backend):
     """Drive a CLI adapter one turn per subprocess.
 
     The first turn prepends Dream's system prompt + wake context to the user prompt
-    (the CLI has no system-prompt override); later turns resume the same session via
+    as user-context text; later turns resume the same session via
     the captured id. The mode → sandbox mapping is supplied by ``sandbox_getter`` so
     the sandbox tracks Dream's permission mode as it changes mid-session.
     """
@@ -329,6 +415,7 @@ class CliAgentBackend(Backend):
         mcp_config: dict | None = None,
         idle_timeout: float | None = None,
         idle_pause_getter: Any = None,
+        mode_getter: Any = None,
     ) -> None:
         self.adapter = adapter
         self.provider_label = adapter.label
@@ -336,10 +423,13 @@ class CliAgentBackend(Backend):
         self.cwd = cwd
         self.model = model
         self.sandbox_getter = sandbox_getter
+        self.mode_getter = mode_getter
         # Registers Dream's stdio memory server for each turn (session-scoped) so the
         # CLI engine can recall/remember. None → the CLI runs with only its own tools.
         self.mcp_config = mcp_config
         self._session_id: str | None = None
+        # The CLI file connect() resolved; None until then.
+        self._executable: str | None = None
         self._proc: asyncio.subprocess.Process | None = None
         self._spawning: asyncio.Task | None = None
         self._interrupt_generation = 0
@@ -386,12 +476,29 @@ class CliAgentBackend(Backend):
             await asyncio.gather(reading, return_exceptions=True)
 
     async def connect(self) -> None:
-        if shutil.which(self.adapter.cmd) is None:
+        # DREAM-246: the lookup the picker and Council choices use, so the file shown as
+        # installed is the file spawned. Installation only; sign-in is not checked here.
+        self._executable = None
+        executable = locate_command(self.adapter.cmd)
+        if executable is None:
             raise RuntimeError(
-                f"{self.adapter.label}: '{self.adapter.cmd}' not found on PATH."
+                f"{self.adapter.label}: '{self.adapter.cmd}' not found on PATH "
+                "or in the known install folders."
             )
+        self._executable = executable
 
     async def ask(self, prompt: str) -> AsyncIterator[Event]:
+        settings = nullcontext(None)
+        if self.adapter.key == 'gemini':
+            from ..gemini_thinking import thinking_environment
+            settings = thinking_environment(self.model, self._effort, cwd=self.cwd,
+                                            executable=self._executable)
+        with settings as run_env:
+            async with aclosing(self._ask(prompt, run_env=run_env)) as turn:
+                async for event in turn:
+                    yield event
+
+    async def _ask(self, prompt: str, *, run_env: dict | None = None) -> AsyncIterator[Event]:
         if self._proc is not None or self._spawning is not None:
             raise RuntimeError('This CLI backend already has an active turn')
         sandbox = self.sandbox_getter() if self.sandbox_getter else "workspace-write"
@@ -399,6 +506,7 @@ class CliAgentBackend(Backend):
         # First turn (no session yet): prepend the system prompt + wake context.
         # Resumed turns carry it forward server-side, so send the bare prompt.
         full_prompt = prompt if resume_id else f"{self.system_prompt}\n\n{prompt}"
+        stdin_payload = self.adapter.stdin_payload(full_prompt)
         argv = self.adapter.argv(
             full_prompt, cwd=self.cwd, resume_id=resume_id, sandbox=sandbox,
             mcp_config=self.mcp_config,
@@ -407,14 +515,36 @@ class CliAgentBackend(Backend):
         options = []
         if self.model:
             options.extend(['--model', self.model])
-        if self._effort is not None:
-            if self.adapter.key != 'codex':
-                raise ValueError('Effort is not implemented for this CLI adapter')
-            options.extend(['-c', 'model_reasoning_effort=' + json.dumps(self._effort)])
+        options.extend(native_effort_argv(self.adapter.key, self._effort, self.model))
         # Codex exec options precede resume; other CLI options precede their
         # existing arguments. All values remain separate argv cells.
         position = 2 if self.adapter.key == 'codex' else 1
         argv[position:position] = options
+        if self.adapter.key == 'antigravity' and self.mode_getter and self.mode_getter() == 'auto':
+            argv.append('--dangerously-skip-permissions')
+        # Spawn the file connect() found. The adapter's argv stays pure (command
+        # names); a backend that was never connected spawns the bare name as before.
+        spawn_options: dict[str, Any] = {'env': run_env} if run_env is not None else {}
+        if self.adapter.key in ('gemini', 'antigravity'):
+            spawn_options['cwd'] = self.cwd
+        if stdin_payload is not None:
+            spawn_options['stdin'] = asyncio.subprocess.PIPE
+        if self.adapter.key == 'antigravity':
+            from ...mcp.bridge import DISCOVERY_ENV
+            env = dict(os.environ if run_env is None else run_env)
+            env.pop(DISCOVERY_ENV, None)
+            env.pop('DREAM_SESSION_ID', None)
+            if self.mcp_config:
+                env.update(self.mcp_config.get('env') or {})
+            spawn_options['env'] = env
+        if self._executable is not None and argv and argv[0] == self.adapter.cmd:
+            argv[0] = self._executable
+            # An nvm install is an `env node` script whose node a launcher's PATH lacks. Only then
+            # does the child get its own environment (the parent's plus that one folder on PATH);
+            # otherwise no env is passed at all, exactly as before. os.environ is never changed.
+            child_env = node_child_env(self.adapter.cmd, self._executable, env=spawn_options.get('env', run_env))
+            if child_env is not None:
+                spawn_options['env'] = child_env
 
         interrupt_generation = self._interrupt_generation
         self._spawning = asyncio.create_task(asyncio.create_subprocess_exec(
@@ -423,6 +553,7 @@ class CliAgentBackend(Backend):
             stderr=asyncio.subprocess.PIPE,
             limit=STDOUT_LIMIT,
             start_new_session=True,
+            **spawn_options,
         ))
         try:
             proc = await asyncio.shield(self._spawning)
@@ -443,15 +574,22 @@ class CliAgentBackend(Backend):
         # Drain stderr concurrently so a chatty CLI can't deadlock on a full pipe
         # while we're only pulling stdout.
         stderr_chunks: list[bytes] = []
+        native_denied = False
 
         async def _drain_stderr() -> None:
+            nonlocal native_denied
             assert proc.stderr is not None
             kept = 0
+            diagnostic_tail = b''
             while True:
                 chunk = await proc.stderr.read(4096)
                 if not chunk:
                     break
                 self._last_activity = time.monotonic()
+                if self.adapter.key == 'antigravity':
+                    from .antigravity_adapter import denied_diagnostic
+                    diagnostic_tail = diagnostic_tail[-512:] + chunk
+                    native_denied = native_denied or denied_diagnostic(diagnostic_tail)
                 stderr_chunks.append(chunk)
                 kept += len(chunk)
                 # Trim from the FRONT: the tail is what gets shown.
@@ -459,6 +597,17 @@ class CliAgentBackend(Backend):
                     kept -= len(stderr_chunks.pop(0))
 
         stderr_task = asyncio.create_task(_drain_stderr())
+
+        async def _feed_stdin():
+            try:
+                proc.stdin.write(stdin_payload)
+                await proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                proc.stdin.close()
+
+        feed_task = asyncio.create_task(_feed_stdin()) if stdin_payload is not None else None
 
         state: dict[str, Any] = {}
         pending_result: Event | None = None
@@ -541,6 +690,9 @@ class CliAgentBackend(Backend):
                     process_error = exc
                     raise
                 finally:
+                    if feed_task is not None:
+                        feed_task.cancel()
+                        await asyncio.gather(feed_task, return_exceptions=True)
                     stderr_task.cancel()
                     await asyncio.gather(stderr_task, return_exceptions=True)
                     # Inspect after cancellation too: closing a pending reader
@@ -584,7 +736,9 @@ class CliAgentBackend(Backend):
         # Only EOF plus settled process/stderr cleanup can publish terminal
         # evidence. Keep the first accounting record even if the wire repeats it.
         interrupted = interrupt_generation != self._interrupt_generation
-        tail = b"".join(stderr_chunks).decode("utf-8", "replace").strip()[-800:]
+        tail = ("check sign-in, model access and native permissions in agy"
+                if self.adapter.key == 'antigravity' else
+                b"".join(stderr_chunks).decode("utf-8", "replace").strip()[-800:])
         if pending_result is not None:
             diagnostics = []
             if interrupted:
@@ -595,6 +749,8 @@ class CliAgentBackend(Backend):
                 diagnostics.append("CLI protocol failure: multiple terminal results")
             if fatal_error is not None:
                 diagnostics.append(f"CLI fatal error: {fatal_error}")
+            if native_denied:
+                diagnostics.append('Antigravity reported a native permission denial; review permissions in agy')
             if diagnostics:
                 data = pending_result.data
                 reason = data.get("error")
@@ -604,6 +760,7 @@ class CliAgentBackend(Backend):
                     "provider_subtype": data.get("subtype"), "cli_exit_code": rc,
                     "error": f"{reason}; {diagnostic}" if reason else diagnostic,
                 })
+            self.adapter.commit_result(pending_result)
             yield pending_result
         elif interrupted:
             yield Event("error", f"{self.adapter.label} interrupted before terminal publication; inspect completed work before retrying.")
@@ -617,21 +774,7 @@ class CliAgentBackend(Backend):
             self.model = model
 
     def set_effort(self, level: str | None) -> None:
-        # Validate before mutation so unsupported controls cannot poison a later
-        # ordinary turn. Codex has its own native ladder, including max/ultra
-        # on supported models; HTTP tier clamping does not apply here.
-        native = level
-        if level is not None:
-            if self.adapter.key != 'codex':
-                raise ValueError('Effort is not implemented for this CLI adapter')
-            if not isinstance(level, str):
-                raise ValueError('Effort must be a supported string or None')
-            from ..council_config import validate_effort
-            native = level.strip().lower()
-            if native == 'med':
-                native = 'medium'
-            validate_effort('codex', native, self.model)
-        self._effort = native
+        self._effort = native_effort(self.adapter.key, level, self.model)
 
     async def interrupt(self) -> None:
         proc = self._proc

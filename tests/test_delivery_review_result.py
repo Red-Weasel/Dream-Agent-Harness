@@ -58,6 +58,7 @@ async def test_known_unmet_requirement_cannot_be_accepted_by_loop(monkeypatch, t
     b._client = _FakeClient([_tool_round('done', '{"path":"page.html"}'),
                             _text_round('STATUS: DONE\nNEXT: nothing')])
     loop = AutonomousLoop(SimpleNamespace(ask=b.ask, workspace=tmp_path), state_dir=tmp_path / 'runs')
+    loop.workspace = loop._make_workspace('Build a page with an export button.')  # a loop turn runs in a journaled run
     with pytest.raises(RuntimeError, match='verification_findings'):
         await loop._drive('Build a page with an export button.')
 

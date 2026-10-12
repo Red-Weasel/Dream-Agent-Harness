@@ -130,21 +130,30 @@ def unavailable(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unavailable_sandbox_never_runs_even_with_ordinary_approval(tmp_path, unavailable):
+async def test_run_bash_runs_on_the_host_whatever_the_sandbox_probe_says(tmp_path, unavailable):
+    # No shell sandbox (the owner, 2026-10-11): with the sandbox unavailable, auto runs the command on the host, in the
+    # workspace, with or without an ordinary approval; Ask runs it only with an approval for this exact command.
     scope = ex.ExecutionScope(tmp_path)
-    command = "echo unsafe > marker"
+    command = "echo host >> marker"
     for approval in (None, ex.CommandApproval(command, scope, time.monotonic() + 10)):
-        with pytest.raises(ex.ExecutionRefused, match="sandbox unavailable"):
-            await ex.execute_bash(command, ex.ExecutionContext(scope, approval=approval))
-    assert not (tmp_path / "marker").exists()
+        result, contained = await ex.execute_bash(command, ex.ExecutionContext(scope, approval=approval))
+        assert result.returncode == 0 and not contained
+    assert (tmp_path / "marker").read_text().split() == ["host", "host"]
+    with pytest.raises(ex.ExecutionRefused, match="approval required"):
+        await ex.execute_bash(command, ex.ExecutionContext(scope, "ask"))
+    approval = ex.CommandApproval(command, scope, time.monotonic() + 10)
+    result, contained = await ex.execute_bash(command, ex.ExecutionContext(scope, "ask", approval))
+    assert result.returncode == 0 and not contained
+    assert (tmp_path / "marker").read_text().split() == ["host", "host", "host"]
 
 
 @pytest.mark.asyncio
 async def test_uncontained_grant_is_exact_single_use_and_expires(tmp_path, unavailable):
+    # Auto runs every command without a grant since 2026-10-11 (no sandbox); a grant is what Ask needs.
     scope = ex.ExecutionScope(tmp_path)
     command = "echo granted > marker"
     grant = ex.CommandApproval(command, scope, time.monotonic() + 10, allow_uncontained=True)
-    context = ex.ExecutionContext(scope, approval=grant)
+    context = ex.ExecutionContext(scope, "ask", grant)
     with pytest.raises(ex.ExecutionRefused):
         await ex.execute_bash(command + "-other", context)
     result, contained = await ex.execute_bash(command, context)
@@ -154,7 +163,7 @@ async def test_uncontained_grant_is_exact_single_use_and_expires(tmp_path, unava
         await ex.execute_bash(command, context)
     expired = ex.CommandApproval(command, scope, time.monotonic() - 1, allow_uncontained=True)
     with pytest.raises(ex.ExecutionRefused):
-        await ex.execute_bash(command, ex.ExecutionContext(scope, approval=expired))
+        await ex.execute_bash(command, ex.ExecutionContext(scope, "ask", expired))
 
 
 @pytest.mark.asyncio
@@ -173,11 +182,15 @@ async def test_native_timeout_enforces_context_and_reports_cleanup(tmp_path, fam
 
 @pytest.mark.asyncio
 async def test_native_arguments_cannot_supply_approvals(tmp_path, unavailable, monkeypatch):
+    # In a session that asks (auto runs every command since 2026-10-11), the model's own arguments cannot approve
+    # the command or switch the mode.
     from dream.tools import native
     monkeypatch.setattr(native, "ctx", lambda: SimpleNamespace(workspace=tmp_path))
-    result = await native.run_bash.handler({"command": "echo bad > marker",
-                                           "allow_uncontained": True, "mode": "red-team"})
-    assert result["is_error"] and not (tmp_path / "marker").exists()
+    with ex.execution_context(ex.ExecutionScope(tmp_path), mode="ask"):
+        result = await native.run_bash.handler({"command": "echo bad > marker",
+                                               "allow_uncontained": True, "mode": "auto"})
+    assert result["is_error"] and "approval required" in result["content"][0]["text"]
+    assert not (tmp_path / "marker").exists()
 
 
 @pytest.fixture
@@ -302,49 +315,72 @@ def test_mount_descriptor_survives_source_replacement(tmp_path):
 
 @pytest.mark.parametrize("command", ["python build.py", "python -c 'print(1)'", "bash build.sh",
                                      "pytest -q", "npm run build", "make check", "echo $(pwd)"])
-def test_auto_routines_require_actual_executor_capability(tmp_path, command):
+def test_auto_routines_run_without_executor_capability(tmp_path, command):
+    # No shell sandbox (the owner, 2026-10-11): auto runs routine commands with no executor evidence; plan denies.
     scope = ex.ExecutionScope(tmp_path)
-    assert policy.decide("run_bash", {"command": command}, "auto", tmp_path)[0] == "ask"
-    cap = ex.SandboxCapability(True, "fixture", scope, "/usr/bin/bwrap")
+    assert policy.decide("run_bash", {"command": command}, "auto", tmp_path) == ("allow", "auto mode")
     assert policy.decide("run_bash", {"command": command}, "auto", tmp_path,
-                         execution_scope=scope, execution_capability=cap)[0] == "allow"
+                         execution_scope=scope) == ("allow", "auto mode")
+    cap = ex.SandboxCapability(True, "fixture", scope, "/usr/bin/bwrap")
     assert policy.decide("run_bash", {"command": command}, "plan", tmp_path,
                          execution_scope=scope, execution_capability=cap)[0] == "deny"
 
 
 @pytest.mark.parametrize("command", ["curl https://example.test", "wget -q https://example.test/a.tgz",
                                      "timeout 30 curl -sS https://example.test | tar xz"])
-def test_network_scope_makes_contained_downloads_routine(tmp_path, command):
+def test_auto_runs_downloads_without_containment_and_ask_asks(tmp_path, command):
+    # No shell sandbox (2026-10-11): auto runs a download on the host, containment evidence or not; Ask still asks.
     scope = ex.ExecutionScope(tmp_path, network=True)
     cap = ex.SandboxCapability(True, "fixture", scope, "/usr/bin/bwrap")
     assert policy.decide("run_bash", {"command": command}, "auto", tmp_path,
                          execution_scope=scope, execution_capability=cap)[0] == "allow"
-    # Without verified containment a download still asks.
-    assert policy.decide("run_bash", {"command": command}, "auto", tmp_path, execution_scope=scope)[0] == "ask"
+    assert policy.decide("run_bash", {"command": command}, "auto", tmp_path, execution_scope=scope)[0] == "allow"
+    assert policy.decide("run_bash", {"command": command}, "ask", tmp_path, execution_scope=scope)[0] == "ask"
 
 
 @pytest.mark.parametrize("command", ["curl https://example.test; rm -rf build",
-                                     "curl https://example.test && git push origin main", "ssh host true",
-                                     "bash -c 'curl https://example.test; sudo true'"])
-def test_network_scope_still_asks_for_everything_else(tmp_path, command):
+                                     "curl https://example.test && git push origin main", "ssh host true"])
+def test_network_commands_with_consequences_run_in_auto_and_ask_in_ask(tmp_path, command):
+    # Auto runs every shell command since 2026-10-11 (no sandbox), consequential ones included.
     scope = ex.ExecutionScope(tmp_path, network=True)
     cap = ex.SandboxCapability(True, "fixture", scope, "/usr/bin/bwrap")
     assert policy.decide("run_bash", {"command": command}, "auto", tmp_path,
-                         execution_scope=scope, execution_capability=cap)[0] == "ask"
+                         execution_scope=scope, execution_capability=cap) == ("allow", "auto mode")
+    assert policy.decide("run_bash", {"command": command}, "ask", tmp_path, execution_scope=scope)[0] == "ask"
 
 
 @pytest.mark.parametrize("command", ["rm -rf build", "env rm -rf build", "git push origin main",
-                                     "git reset --hard", "npm publish", "sudo true",
-                                     "bash -c 'rm -rf build'", "find . -delete", "curl https://example.test",
+                                     "git reset --hard", "npm publish",
+                                     "bash -c 'rm -rf build'", "find . -delete",
                                      "echo start\nrm -rf build", "timeout 5 rm -rf build"])
-def test_consequences_still_ask_when_contained(tmp_path, command):
+def test_consequences_run_in_auto_and_ask_in_ask_and_accept_edits(tmp_path, command):
+    # No shell sandbox (the owner, 2026-10-11): auto runs consequential commands without asking; Ask and Accept edits
+    # ask before every shell command; plan denies.
     scope = ex.ExecutionScope(tmp_path)
     cap = ex.SandboxCapability(True, "fixture", scope, "/usr/bin/bwrap")
     assert policy.decide("Bash", {"command": command}, "auto", tmp_path,
+                         execution_scope=scope, execution_capability=cap) == ("allow", "auto mode")
+    for mode in ("ask", "accept-edits"):
+        assert policy.decide("Bash", {"command": command}, mode, tmp_path, execution_scope=scope)[0] == "ask"
+    assert policy.decide("Bash", {"command": command}, "plan", tmp_path, execution_scope=scope)[0] == "deny"
+
+
+@pytest.mark.parametrize("command", ["sudo true", "curl https://example.test",
+                                     "bash -c 'curl https://example.test; sudo true'"])
+def test_auto_mode_runs_what_the_sandbox_makes_harmless(tmp_path, command):
+    # The owner, 2026-10-11: auto mode no longer stops for these (first for the sandbox's sake; since the sandbox's
+    # removal the same day, auto runs every shell command on the host). Plain ask mode still asks.
+    scope = ex.ExecutionScope(tmp_path)
+    cap = ex.SandboxCapability(True, "fixture", scope, "/usr/bin/bwrap")
+    assert policy.decide("run_bash", {"command": command}, "auto", tmp_path,
+                         execution_scope=scope, execution_capability=cap)[0] == "allow"
+    assert policy.decide("run_bash", {"command": command}, "ask", tmp_path,
                          execution_scope=scope, execution_capability=cap)[0] == "ask"
 
 
-def test_dedicated_delete_and_rm_share_bounded_redteam_exception(tmp_path):
+def test_redteam_target_bounds_delete_and_write_tools_but_not_the_auto_shell(tmp_path):
+    # No shell sandbox (the owner, 2026-10-11): auto runs every shell command, so in a red-team scope the shell is no
+    # longer held to the target -- `rm elsewhere` runs, on the host. The dedicated delete and write tools still are.
     target = tmp_path / "target"
     target.mkdir()
     scope = ex.ExecutionScope(tmp_path, red_team=True, target_roots=(target,), expires_at=time.monotonic()+10)
@@ -353,7 +389,9 @@ def test_dedicated_delete_and_rm_share_bounded_redteam_exception(tmp_path):
         assert policy.decide(tool, args, "auto", tmp_path, **kw)[0] == "allow"
         assert policy.decide(tool, args, "plan", tmp_path, **kw)[0] == "deny"
     for command in ["rm elsewhere", "rm target/*", "rm target/a; rm elsewhere"]:
-        assert policy.decide("run_bash", {"command": command}, "auto", tmp_path, **kw)[0] == "ask"
+        assert policy.decide("run_bash", {"command": command}, "auto", tmp_path, **kw) == ("allow", "auto mode")
+        assert policy.decide("run_bash", {"command": command}, "ask", tmp_path, execution_scope=scope)[0] == "ask"
+    assert policy.decide("delete_file", {"paths": ["elsewhere"]}, "auto", tmp_path, **kw)[0] == "deny"
     (target / "escape").symlink_to(tmp_path.parent)
     assert policy.decide("delete_file", {"paths": ["target/escape/a"]}, "auto", tmp_path, **kw)[0] == "deny"
     assert policy.decide("write_file", {"path": "elsewhere"}, "auto", tmp_path, **kw)[0] == "deny"
@@ -397,6 +435,7 @@ async def test_dream_verifies_its_sandbox_wherever_plain_bubblewrap_works(tmp_pa
 
 @pytest.mark.asyncio
 async def test_real_boundary_scripts_symlinks_git_secrets_and_host_socket(tmp_path, monkeypatch):
+    # run_bash has no sandbox since 2026-10-11 (it runs on the host); run_script's workers still run in this one.
     workspace, outside = tmp_path / "workspace", tmp_path / "outside"
     workspace.mkdir(); outside.mkdir()
     sentinel = outside / "sentinel"
@@ -432,8 +471,8 @@ for family in [socket.AF_UNIX, socket.AF_INET]:
     else: raise AssertionError("socket boundary escaped")
 print("boundary verified")
 ''')
-        result, contained = await ex.execute_bash("/usr/bin/python3 probe.py", ex.ExecutionContext(scope))
-        assert contained and result.returncode == 0, result.output
+        result = await ex.run_contained(["/usr/bin/python3", "probe.py"], scope)
+        assert result.returncode == 0, result.output
         assert b"boundary verified" in result.output
         assert (workspace / "built.txt").is_file()
         assert sentinel.read_text() == "untouched"
@@ -444,25 +483,26 @@ print("boundary verified")
 
 @pytest.mark.asyncio
 async def test_real_tmp_is_private_to_one_invocation_and_never_written_on_host(tmp_path):
+    # The sandbox run_script's workers still use (run_bash has none since 2026-10-11 and shares the host's /tmp).
     scope = ex.ExecutionScope(tmp_path)
     await real_capability(scope)
     scratch = Path("/tmp") / ("dream-private-" + uuid.uuid4().hex)
     assert not scratch.exists()
     code = f"from pathlib import Path; p = Path({str(scratch)!r}); p.write_text('private'); assert p.read_text() == 'private'"
-    result, contained = await ex.execute_bash(
-        shlex.join(["/usr/bin/python3", "-c", code]), ex.ExecutionContext(scope))
-    assert contained and result.returncode == 0, result.output
+    result = await ex.run_contained(["/usr/bin/python3", "-c", code], scope)
+    assert result.returncode == 0, result.output
     assert not scratch.exists()
-    # A second command receives a fresh /tmp, even within the same session scope.
+    # A second worker receives a fresh /tmp, even within the same scope.
     code = f"from pathlib import Path; assert not Path({str(scratch)!r}).exists()"
-    result, contained = await ex.execute_bash(
-        shlex.join(["/usr/bin/python3", "-c", code]), ex.ExecutionContext(scope))
-    assert contained and result.returncode == 0, result.output
+    result = await ex.run_contained(["/usr/bin/python3", "-c", code], scope)
+    assert result.returncode == 0, result.output
     assert not scratch.exists()
 
 
 @pytest.mark.asyncio
 async def test_real_redteam_only_target_is_writable_and_runtime_expires(tmp_path):
+    # The sandbox run_script's workers still use. run_bash has none since 2026-10-11: a red-team scope does not hold
+    # the shell to its target (test_redteam_target_bounds_delete_and_write_tools_but_not_the_auto_shell).
     target = tmp_path / "target"
     target.mkdir()
     (tmp_path / "preserved").write_text("outside target")
@@ -478,28 +518,26 @@ except PermissionError: pass
 except OSError: pass
 else: raise AssertionError("escaped target")
 ''')
-    result, _ = await ex.execute_bash("/usr/bin/python3 redteam.py", ex.ExecutionContext(scope))
+    result = await ex.run_contained(["/usr/bin/python3", "redteam.py"], scope)
     assert result.returncode == 0, result.output
     assert not (target / "delete-me").exists() and (tmp_path / "preserved").exists()
     expiring = ex.ExecutionScope(tmp_path, red_team=True, target_roots=(target,), expires_at=time.monotonic()+1)
     started = time.monotonic()
-    result, _ = await ex.execute_bash("sleep 20", ex.ExecutionContext(expiring), timeout=20)
+    result = await ex.run_contained(["/bin/sleep", "20"], expiring, timeout=20)
     assert result.timed_out and time.monotonic() - started < 4
 
 
 @pytest.mark.asyncio
-async def test_real_auto_runs_pytest_with_explicit_readonly_toolchain(tmp_path):
-    toolchain = Path(sys.prefix).resolve()
-    # The fixture's installed pytest is external to the temporary workspace.
-    # This explicit read-only toolchain mount is supplied by the test harness.
-    scope = ex.ExecutionScope(tmp_path, read_roots=(toolchain,))
-    await real_capability(scope)
+async def test_real_auto_runs_pytest_on_the_host(tmp_path):
+    # No shell sandbox (the owner, 2026-10-11): auto runs pytest on the host with the installed toolchain as it is;
+    # no read-only toolchain mount is involved.
+    scope = ex.ExecutionScope(tmp_path)
     (tmp_path / "answer.py").write_text("def answer(): return 6 * 7\n")
     (tmp_path / "test_answer.py").write_text("from answer import answer\ndef test_answer(): assert answer() == 42\n")
     command = "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 " + shlex.join([
         sys.executable, "-m", "pytest", "-q", "test_answer.py"])
     result, contained = await ex.execute_bash(command, ex.ExecutionContext(scope))
-    assert contained and result.returncode == 0 and b"1 passed" in result.output, result.output
+    assert not contained and result.returncode == 0 and b"1 passed" in result.output, result.output
 
 
 @pytest.mark.parametrize("address,public", [
@@ -510,64 +548,3 @@ async def test_real_auto_runs_pytest_with_explicit_readonly_toolchain(tmp_path):
 def test_network_proxy_admits_only_global_addresses(address, public):
     from dream.core import sandbox_net
     assert sandbox_net._public(address) is public
-
-
-@pytest.mark.asyncio
-async def test_real_network_scope_keeps_the_boundary_and_reaches_only_public_hosts(tmp_path, monkeypatch):
-    from dream.core import sandbox_net
-    workspace, outside = tmp_path / "workspace", tmp_path / "outside"
-    workspace.mkdir(); outside.mkdir()
-    sentinel = outside / "sentinel"
-    sentinel.write_text("untouched")
-    (workspace / "escape").symlink_to(outside, target_is_directory=True)
-    scope = ex.ExecutionScope(workspace, read_roots=(outside,), network=True)
-    await real_capability(scope)
-    requests = []
-
-    async def host_service(reader, writer):
-        requests.append(await reader.readuntil(b"\r\n\r\n"))
-        writer.write(b"HTTP/1.0 200 OK\r\nContent-Length: 11\r\n\r\nhost-served")
-        await writer.drain()
-        writer.close()
-
-    server = await asyncio.start_server(host_service, "127.0.0.1", 0)
-    port = server.sockets[0].getsockname()[1]
-    host_socket = socket.socket(socket.AF_UNIX)
-    host_socket.bind(str(workspace / "host.sock"))
-    try:
-        (workspace / "probe.py").write_text(f'''
-import os, socket, sys, urllib.error, urllib.request
-from pathlib import Path
-for fd in range(3, 256):
-    try: os.fstat(fd)
-    except OSError: pass
-    else: raise AssertionError("host descriptor leaked: " + str(fd))
-for name in ["escape/sentinel", {str(sentinel)!r}, "/etc/host-escape"]:
-    try: Path(name).write_text("escaped")
-    except OSError: pass
-    else: raise AssertionError("outside write allowed: " + name)
-for family in [socket.AF_UNIX, socket.AF_NETLINK, socket.AF_PACKET]:
-    try: socket.socket(family, socket.SOCK_RAW if family != socket.AF_UNIX else socket.SOCK_STREAM)
-    except PermissionError: pass
-    else: raise AssertionError("socket boundary escaped")
-try: socket.create_connection(("127.0.0.1", {port}), timeout=3)
-except ConnectionRefusedError: pass
-else: raise AssertionError("host loopback reachable directly")
-os.environ.pop("no_proxy"); os.environ.pop("NO_PROXY")  # force the proxy for 127.0.0.1
-proxy = urllib.request.build_opener(urllib.request.ProxyHandler({{"http": os.environ["HTTP_PROXY"]}}))
-try: print(proxy.open("http://127.0.0.1:{port}/", timeout=10).read().decode())
-except urllib.error.HTTPError as e: print(e.code, e.read().decode())
-''')
-        result, contained = await ex.execute_bash("/usr/bin/python3 probe.py", ex.ExecutionContext(scope))
-        assert contained and result.returncode == 0, result.output
-        assert b"403 Dream sandbox proxy: 127.0.0.1 is a local or private address" in result.output, result.output
-        assert requests == [] and sentinel.read_text() == "untouched"
-        # The same path relays to an address the policy admits.
-        monkeypatch.setattr(sandbox_net, "_public", lambda address: True)
-        result, contained = await ex.execute_bash("/usr/bin/python3 probe.py", ex.ExecutionContext(scope))
-        assert contained and result.returncode == 0, result.output
-        assert result.output.strip().endswith(b"host-served"), result.output
-        assert len(requests) == 1 and requests[0].startswith(b"GET / HTTP/1.1\r\n")
-    finally:
-        host_socket.close()
-        server.close()

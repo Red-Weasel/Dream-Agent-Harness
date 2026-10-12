@@ -75,8 +75,8 @@ failed turn even if the CLI exits cleanly; partial output and usage remain visib
 
 `media_action(action="status")` reports the selected workspace and configured shell
 read/target roots, tool-image setting and host encoder discovery. Each fact states
-its source. Host executable presence does not establish that its libraries are
-available inside a shell sandbox. Enabling image tools does not establish endpoint
+its source. Host executable presence does not establish that the program and its
+libraries actually run. Enabling image tools does not establish endpoint
 image acceptance. These fields remain unverified until an appropriate actual check.
 
 Status does not load a model, launch a render or grant host access. If file tools

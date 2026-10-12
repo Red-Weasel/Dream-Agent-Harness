@@ -167,16 +167,13 @@ async def test_dream_cards_stay_inside_the_column(chat, width, height):
         await asyncio.gather(pending, return_exceptions=True)
 
 
-async def test_the_model_chip_sits_under_the_composer_and_opens_council(chat):
-    # DREAM-242: no view shows the work bar; its first chip, the session's model, is the first of the chips under the
-    # composer (it led the top bar, DREAM-228), and a click still opens Council.
+async def test_council_opens_from_the_sidebar_and_no_model_chip_is_left(chat):
+    # DREAM-242: no view shows the work bar. DREAM-251..285 took the session's model off the work bar, so no model chip
+    # sits under the composer; Council, where the main model changes between turns, is a sidebar entry instead.
     _, page, prompts, _ = chat
     await expect(page.locator('#dream-workbar')).to_be_hidden()
-    chip = page.locator('#cn-model')
-    await expect(chip).to_have_text('fixture')                               # the session's model, from hello
-    first = await page.locator('footer .hint .cn-chip:visible').first.get_attribute('id')
-    assert first == 'cn-model', first
+    await expect(page.locator('#cn-model')).to_have_count(0)
     await expect(page.locator('#dream-council')).to_be_hidden()
-    await chip.click()
-    await expect(page.locator('#dream-council')).to_be_visible()             # where the main model changes between turns
+    await page.locator('#dream-nav-council').click()
+    await expect(page.locator('#dream-council')).to_be_visible()
     assert prompts == []

@@ -109,9 +109,9 @@ def test_compose_pt_pads_columns():
     body = monitor.compose_pt([("LL", 2)], [("RR", 2)], width=100)
     left_w = 100 - monitor.PANE_WIDTH - 2
     assert body == "LL" + " " * (left_w - 2) + "RR"
-    # over-long left line goes ragged (1 space), never truncated
+    # Long left values stay in their own column instead of wrapping over telemetry.
     body = monitor.compose_pt([("L" * 90, 90)], [("RR", 2)], width=100)
-    assert body == "L" * 90 + " " + "RR"
+    assert body == "L" * (left_w - 1) + "… RR"
     # right column longer than left: left side is blank-padded
     body = monitor.compose_pt([], [("RR", 2)], width=100)
     assert body.endswith("RR")
@@ -190,6 +190,7 @@ def _app(tmp_path):
     )
     app.gpu = _FakeSampler()
     app.show_monitor = True
+    app.show_tasks = True  # This fixture exercises the optional detailed status.
     return app
 
 

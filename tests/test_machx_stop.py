@@ -1,5 +1,5 @@
-"""Exiting Dream must free the GPUs: machx.stop() takes down the server process
-group, escalates if needed, and is safe to call when nothing is running."""
+"""Exiting Dream must free the GPUs: machx.stop() asks the server process group to stop (SIGTERM, never
+SIGKILL: DREAM-253, tests/test_engine_no_sigkill.py), and is safe to call when nothing is running."""
 
 import subprocess
 import time
@@ -32,9 +32,10 @@ def test_stop_is_idempotent_when_nothing_runs(tmp_path, monkeypatch):
     assert not (tmp_path / "machx.pid").exists()
 
 
-def test_stop_gives_a_plain_engine_two_minutes_before_sigkill():
+def test_stop_waits_two_minutes_for_a_plain_engine():
     """2026-09-30 21:55: a SIGKILL seconds after SIGTERM landed while the engine was still finishing a prefill piece,
-    and the GPU work in flight faulted card 0 (65 page faults, an engine reset). Closing Dream now waits up to 120 s
-    for the engine's own orderly stop (about half a second on the current engine) before it kills anything."""
+    and the GPU work in flight faulted card 0 (65 page faults, an engine reset). Closing Dream waits up to 120 s
+    for the engine's own orderly stop (about half a second on the current engine). Since DREAM-253 nothing is
+    killed after that wait either: stop() returns False and keeps the pid file (tests/test_engine_no_sigkill.py)."""
     import inspect
     assert inspect.signature(machx.stop).parameters["timeout"].default == 120.0

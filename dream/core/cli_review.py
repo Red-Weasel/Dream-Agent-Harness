@@ -9,7 +9,8 @@ in place; the real Dream workspace is the cwd; the CLI keeps its normal tools
 one posture Dream sets is the main path's: the main-path adapter builds the
 sandbox/approval flags from Dream's permission mode via ``sandbox_for_mode``
 (plan/ask -> read-only, otherwise workspace-write). A consultation that is given
-no mode runs as ask, read-only. Only the prompt transport differs from the main
+no mode runs as ask. Antigravity plan is guidance rather than enforced read-only
+containment; its native permissions remain authoritative. Only the prompt transport differs from the main
 path: stdin (Codex, Gemini) or a prompt file (Grok) instead of one argv cell,
 so a large Council context never meets the per-argument size limit.
 
@@ -23,10 +24,11 @@ import asyncio
 import json
 import os
 from pathlib import Path
-import shutil
+import shutil  # noqa: F401  (kept as a module attribute: tests replace shutil.which through it)
 import tempfile
 
 from .backends.base import Event
+from .cli_discovery import locate_command, node_child_env
 from .backends.cli_agent import _owned_cleanup, adapter_for, sandbox_for_mode
 from .execution import supervised_command
 
@@ -112,6 +114,8 @@ def _posture(key: str, sandbox: str) -> str:
     if key == 'gemini':
         from .backends.gemini_adapter import GeminiAdapter
         return '--approval-mode ' + GeminiAdapter._approval_mode(sandbox)
+    if key == 'antigravity':
+        return '--mode ' + ('plan' if sandbox == 'read-only' else 'accept-edits') + '; native permissions; plan is guidance, not read-only containment'
     return '--sandbox ' + sandbox
 
 
@@ -127,6 +131,9 @@ class CLIConsultation:
         self.process = None
         # None: the child inherits the owner's environment, as the main path does.
         self.env = None
+        # The CLI name looked up and the file found for it, before symlinks are resolved (set by prepare).
+        self._cli_name = None
+        self._found = None
         self.provenance = {
             'transport': 'subscription_cli', 'provider': provider.key, 'model': model,
             'isolation': 'none: runs like the main-model CLI path',
@@ -140,14 +147,19 @@ class CLIConsultation:
         }
 
     def prepare(self):
-        executable = shutil.which(self.provider.cli_cmd or self.provider.key)
+        # DREAM-246: the lookup the picker and Council choices use. Installation only.
+        command = self.provider.cli_cmd or self.provider.key
+        executable = locate_command(command)
         if not executable:
             raise CLIIsolationError(f'{self.provider.key} CLI is not installed')
-        if self.provider.key not in ('codex', 'grok', 'gemini'):
+        if self.provider.key not in ('codex', 'grok', 'gemini', 'antigravity'):
             raise CLIIsolationError('Unsupported CLI consultation provider')
         if self.cwd is None or not self.cwd.is_dir():
             raise CLIIsolationError('A CLI consultation needs the Dream workspace as its cwd')
         self.executable = str(Path(executable).resolve())
+        # argv[0] is the resolved file, as before. The file as found is kept as well: an nvm install's node sits
+        # beside the found link, not beside the script the link leads to.
+        self._cli_name, self._found = command, executable
         # Holds only Grok's prompt file; nothing of the owner's is copied here.
         self._temp = tempfile.TemporaryDirectory(prefix='dream-consult-')
         self.root = Path(self._temp.name)
@@ -165,6 +177,10 @@ class CLIConsultation:
                 # The main path's model option and position (after `exec` for Codex).
                 position = 2 if self.provider.key == 'codex' else 1
                 argv[position:position] = ['--model', self.model]
+            if self.provider.key == 'antigravity' and self.mode == 'auto':
+                argv.append('--dangerously-skip-permissions')
+            if self.provider.key == 'antigravity':
+                self.provenance['native_sandbox'] = 'terminal restrictions; not a read-only filesystem guarantee'
             self.argv = argv
         except BaseException:
             self.close()
@@ -187,8 +203,21 @@ class CLIConsultation:
             path = self.root / 'prompt.txt'
             path.unlink(missing_ok=True)
             _private_write(path, prompt.encode())
+        # Decided at the spawn, from the environment this run was going to get: self.env as it is now (None is the
+        # owner's environment, a mapping is a caller's restricted one). When the found CLI needs the node beside
+        # it, the child gets a copy of exactly that environment with the one folder on PATH; nothing else is added
+        # to a restricted mapping, and neither self.env nor os.environ is changed.
+        base_env = self.env
+        if self.provider.key == 'antigravity':
+            from ..mcp.bridge import DISCOVERY_ENV
+            base_env = dict(os.environ if base_env is None else base_env)
+            base_env.pop(DISCOVERY_ENV, None)
+            base_env.pop('DREAM_SESSION_ID', None)
+        env = node_child_env(self._cli_name, self._found, base_env)
+        if env is None:
+            env = base_env
         spawning = asyncio.create_task(asyncio.create_subprocess_exec(
-            *supervised_command(self.argv), cwd=str(self.cwd), env=self.env, start_new_session=True,
+            *supervised_command(self.argv), cwd=str(self.cwd), env=env, start_new_session=True,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE))
         try:
             self.process = await asyncio.shield(spawning)
@@ -215,7 +244,8 @@ class CLIConsultation:
         async def feed():
             try:
                 if self.provider.key != 'grok':
-                    proc.stdin.write(prompt.encode())
+                    payload = adapter_for(self.provider.key).stdin_payload(prompt)
+                    proc.stdin.write(payload if payload is not None else prompt.encode())
                     await proc.stdin.drain()
             except (BrokenPipeError, ConnectionResetError):
                 pass
@@ -224,7 +254,7 @@ class CLIConsultation:
 
         tasks = [asyncio.create_task(drain(proc.stdout)), asyncio.create_task(drain(proc.stderr)), asyncio.create_task(feed())]
         try:
-            output, _, _ = await asyncio.gather(*tasks)
+            output, diagnostics, _ = await asyncio.gather(*tasks)
             await proc.wait()
             _record_usage(self.provider.key, output, self.runtime_meter)
             if proc.returncode:
@@ -234,6 +264,10 @@ class CLIConsultation:
                     raise CLIIsolationError('gemini CLI exited 55 (FatalUntrustedWorkspaceError); '
                                             'trust the Dream workspace in Gemini CLI')
                 raise CLIIsolationError(f'{self.provider.key} CLI exited {proc.returncode}; check sign-in and CLI configuration')
+            if self.provider.key == 'antigravity':
+                from .backends.antigravity_adapter import denied_diagnostic
+                if denied_diagnostic(diagnostics):
+                    raise CLIIsolationError('Antigravity denied required actions; review native permissions in agy')
             return _answer(self.provider.key, output)
         finally:
             await self._stop()
@@ -267,6 +301,9 @@ def _record_usage(provider, output, meter):
         kind = obj.get('type')
         if (provider == 'codex' and kind == 'turn.completed') or (provider == 'grok' and kind in ('end', 'error')):
             usage = obj.get('usage')
+        elif provider == 'antigravity' and obj.get('event') == 'result':
+            payload = obj.get('result')
+            usage = payload.get('usage') if isinstance(payload, dict) else None
         elif provider == 'gemini' and kind == 'result':
             usage = obj.get('stats')
         elif provider == 'grok' and kind == 'usage':
@@ -276,14 +313,16 @@ def _record_usage(provider, output, meter):
         if not isinstance(usage, dict) or not any(k in usage for k in ('input_tokens', 'output_tokens', 'prompt_tokens', 'completion_tokens')):
             continue
         keys = ('input_tokens', 'output_tokens', 'prompt_tokens', 'completion_tokens',
-                'cached_input_tokens', 'cached', 'cache_read_input_tokens', 'cache_creation_input_tokens')
+                'cached_input_tokens', 'cached', 'cache_read_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')
         if any(k in usage and (type(usage[k]) is not int or usage[k] < 0) for k in keys):
             continue
         usage = {k: usage[k] for k in keys if k in usage}
-        if provider in ('codex', 'gemini'):
-            # These CLIs report inclusive input totals, unlike SDK uncached input.
-            usage = {'prompt_tokens': usage.get('input_tokens', 0), 'completion_tokens': usage.get('output_tokens', 0),
-                     'prompt_tokens_details': {'cached_tokens': usage.get('cached_input_tokens', usage.get('cached', 0))}}
+        if provider in ('codex', 'gemini', 'antigravity'):
+            cached = usage.get('cache_read_tokens', usage.get('cached_input_tokens', usage.get('cached', 0)))
+            # Codex/Gemini include cache reads in input; Antigravity reports them separately.
+            prompt = usage.get('input_tokens', 0) + (cached if provider == 'antigravity' else 0)
+            usage = {'prompt_tokens': prompt, 'completion_tokens': usage.get('output_tokens', 0),
+                     'prompt_tokens_details': {'cached_tokens': cached}}
         if kind == 'usage':
             identity = obj.get('messageId')
             if identity and identity in message_ids:
@@ -306,6 +345,22 @@ def _answer(provider: str, output: bytes) -> str:
     ``error`` renders nothing there (``turn.failed`` is its failure) and Gemini's is
     a non-fatal note (its ``result`` status decides completion).
     """
+    if provider == 'antigravity':
+        adapter, state, parts, results = adapter_for(provider), {}, [], []
+        for line in output.splitlines():
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                for event in adapter.translate(obj, state):
+                    if event.kind == 'assistant_done':
+                        parts.append(event.data)
+                    elif event.kind == 'result':
+                        results.append(event.data)
+        if len(results) != 1 or results[0]['is_error'] or not parts:
+            raise CLIIsolationError('Antigravity returned no complete assessment; review sign-in and native permissions')
+        return '\n\n'.join(parts)
     parts, complete = [], False
 
     def boundary():
@@ -368,6 +423,8 @@ class CLIReviewBackend:
         self.provenance = dict(self.consultation.provenance, bound_read_tools=list(self.tools), max_rounds=8)
 
     async def connect(self):
+        if self.consultation.provider.key == 'antigravity':
+            raise CLIIsolationError('Antigravity cannot provide an enforced read-only reviewer yet; choose another reviewer')
         self.consultation.prepare()
 
     async def disconnect(self):

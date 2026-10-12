@@ -132,6 +132,8 @@ async def serve() -> None:
     client (the CLI engine) closes the pipe."""
     from .bridge import ParentBridgeClient
     bridge = ParentBridgeClient.from_environment()
+    if bridge is None and os.environ.get('DREAM_REQUIRE_PARENT_BRIDGE') == '1':
+        raise RuntimeError('Dream session bridge is required; standalone memory access refused')
     # A configured-but-invalid bridge raises above. Never open a second memory
     # context or silently expose the standalone seven tools on bridge failure.
     if bridge is None:

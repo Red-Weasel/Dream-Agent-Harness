@@ -9,7 +9,7 @@ import signal
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import httpx
 import pytest
@@ -179,7 +179,7 @@ def app_factory(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "ensure_dirs", lambda: None)
     monkeypatch.setattr(config, "VAR_DIR", tmp_path)
     monkeypatch.setattr(app_mod.checkpoints, "default_store", Mock(return_value=None))
-    monkeypatch.setattr(app_mod, "PromptSession", Mock())
+    monkeypatch.setattr(app_mod, "PromptSession", MagicMock())  # App adds its prompt-region hook: after_render +=
     monkeypatch.setattr(app_mod, "Renderer", Mock())
     return lambda **kw: app_mod.App(workspace=tmp_path, **kw)
 

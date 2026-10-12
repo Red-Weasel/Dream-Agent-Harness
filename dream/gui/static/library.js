@@ -536,6 +536,222 @@
   memory.search.oninput=drawMemory;memory.filter.onchange=drawMemory;memory.sort.onchange=drawMemory;
   memory.refresh=safe(memory,async()=>{const data=await api('/api/memory');memoryRows=data.items||[];memory.loaded=true;drawMemory();
     if(!openMemory)await drawLucidBoard();report(memory,'Memory folder: '+(data.memory_dir||''));});
+  // DREAM-257: Effective context -- what this session's HTTP requests to a model actually carried, read from the
+  // server's memory only when the owner presses Refresh context (never polled). Everything the server sends goes
+  // into the page as text (node / textContent), never as markup. An answer is dropped when the owner has moved on:
+  // another view, another session, a newer request, or a board that is no longer on the page.
+  const CONTEXT_WHY={
+    tokenizer_not_configured:'no local tokenizer is configured (DREAM_CONTEXT_TOKENIZER)',
+    tokenizer_model_not_bound:'the configured tokenizer is not bound to a model (DREAM_CONTEXT_TOKENIZER_MODEL)',
+    tokenizer_model_mismatch:'the configured tokenizer is bound to a different model than this request used',
+    tokenizer_file_unavailable:'the configured tokenizer file could not be read',
+    tokenizer_file_too_large:'the configured tokenizer file is too large',
+    tokenizer_file_changed_during_load:'the tokenizer file changed while it was loading',
+    tokenizers_not_installed:'the tokenizers package is not installed',
+    tokenizer_load_failed:'the tokenizer file could not be loaded',
+    tokenizer_encode_failed:'the tokenizer could not encode this text',
+    component_too_large_to_count:'this section is too large to count',
+    component_has_no_text:'this section has no text',
+    no_usage_reported_by_this_attempt:'this attempt\'s response reported no usage',
+    not_reported:'the server did not report it',
+    not_a_non_negative_integer:'the server sent something that is not a count',
+    usage_not_an_object:'the server\'s usage could not be read',
+    multipart_text_counted_per_part:'this message has several parts; each text part is counted on its own below',
+    count_budget_exhausted:'this request\'s tokenizing allowance was used up before this piece',
+    work_budget_exhausted:'this request\'s inspection allowance was used up before this piece, so it was not hashed or counted',
+    merged_not_counted:'these pieces were merged into one entry and not counted',
+    request_has_no_tools:'this request carried no tool schemas',
+    counter_mode_unknown:'DREAM_CONTEXT_COUNTER names a counter this version does not have',
+    counter_not_configured:'the CPU helper counter is chosen but its helper or GGUF file is not configured',
+    counter_model_not_bound:'the CPU helper counter is not bound to a model (DREAM_CONTEXT_COUNTER_MODEL)',
+    counter_model_mismatch:'the CPU helper counter is bound to a different model than this request used; no helper was started for it',
+    counter_config_invalid:'the CPU helper counter\'s configuration is not valid',
+    counter_path_mode_unsupported:'path mode cannot verify GGUF identity; use pinned mode',
+    counter_platform_unsupported:'the CPU helper counter is not supported on this system',
+    counter_helper_unavailable:'the configured helper program could not be read',
+    counter_helper_untrusted:'the configured helper program is not a file this user may safely run',
+    counter_gguf_unavailable:'the configured GGUF file could not be read',
+    counter_gguf_untrusted:'the configured GGUF file is writable by anyone',
+    counter_gguf_load_failed:'the helper could not load a tokenizer from the configured GGUF file',
+    counter_source_changed:'the helper program or the GGUF file changed while the helper was starting',
+    counter_identity_mismatch:'the helper reported a different GGUF file than the one configured',
+    counter_bos_policy_unsupported:'this tokenizer adds a start token by itself, so its counts are not used',
+    counter_ready_invalid:'the helper did not start as its protocol requires',
+    counter_helper_starting:'the CPU helper was still starting; this request was not counted',
+    counter_helper_stopping:'the previous CPU helper has not exited; replacement is waiting',
+    counter_helper_failed:'the CPU helper failed',
+    counter_helper_exited:'the CPU helper stopped before answering',
+    counter_deadline:'the CPU helper did not answer within the time allowed',
+    counter_busy:'the CPU helper was busy with another request for the time allowed',
+    counter_response_invalid:'the CPU helper\'s answer was not a valid count',
+    counter_response_oversized:'the CPU helper\'s answer was too long',
+    counter_encode_failed:'the CPU helper could not encode this text',
+    counter_interrupted:'the CPU helper was interrupted and stopped',
+    counter_closed:'the CPU helper was closed',
+    component_not_utf8:'this text cannot be sent as UTF-8, so it was not counted',
+    provider_total_only:'the provider reports the whole input only; individual component counts are unknown'};
+  const CONTEXT_REDUCED={previews_dropped:'previews dropped',tool_listing_dropped:'per-tool listing dropped',components_dropped:'sections dropped'};
+  const contextTitle=c=>c.kind==='responses_input'?'advisor · host-approved input'
+    :c.kind==='system_section'?'system · '+(c.source||'unknown')
+    :c.kind==='tool_call'?'tool call · '+(c.name||'unnamed')+' · arguments · message '+c.message_index
+    :c.kind==='message_part'?(c.role||'message')+' · text part '+c.part_index+' · message '+c.message_index
+    :c.kind==='merged_components'?(c.role||'message')+' · '+c.merged+' further pieces merged · message '+c.message_index
+    :(c.role||'message')+(c.name?' · '+c.name:'')+' · message '+c.message_index;
+  const contextScope={content_text_only:'of this message\'s content text alone, not the whole message',part_text_only:'of this text part alone',
+    arguments_text_only:'of the call\'s arguments text alone; its name, id and the template\'s wrapper are not counted',
+    merged_text_as_one_piece:'of the merged text as one piece',schema_json_text_only:'of this schema\'s canonical JSON text, not the form the chat template renders',
+    tools_array_json_text_only:'of the whole tools array\'s canonical JSON text, not the form the chat template renders'};
+  // The label names the counter that was actually used: the CPU helper's counts are never called tokenizer_text.
+  const contextTokens=(c,method)=>c.tokens_reason==='provider_total_only'
+    ?'Component tokens: '+tokenCount(c.tokens,c.tokens_reason)
+    :'Tokens ('+(method==='engine_source_tokenizer_text'?'engine_source_tokenizer_text':'tokenizer_text')+', '+(contextScope[c.tokens_scope]||'of this text alone')+'): '+tokenCount(c.tokens,c.tokens_reason);
+  const contextPreviewNote=c=>c.preview_reason==='arguments_not_shown'?'Arguments are never shown here. The hash, size and count are of the arguments as sent.'
+    :c.preview_reason==='see_parts'?'This message has several parts; its text parts are listed separately.'
+    :c.preview_reason==='no_text'?'This message has no content text.'
+    :c.preview_reason==='merged'?'Merged entry: no preview is kept for it.'
+    :c.preview_reason==='record_byte_limit'?'Preview dropped to keep this record inside the journal\'s size limit. The original text is not retained.'
+    :'Preview left out: this request\'s preview allowance was used up. The hash and size are of the whole text.';
+  const contextWhy=code=>CONTEXT_WHY[code]||String(code||'no reason recorded');
+  const tokenCount=(value,reason)=>Number.isInteger(value)?value.toLocaleString('en-US'):'unknown ('+contextWhy(reason)+')';
+  const contextSize=n=>Number.isFinite(n)?bytes(n):'unknown size';
+  const contextLabel=r=>[r.recipient||'unknown recipient',r.protocol==='openai_responses'&&('Responses · '+(r.purpose==='input_tokens'?'input count':'inference')),r.agent,r.model||'model unknown','attempt '+r.attempt,r.status,
+    Number.isFinite(r.created_at)?new Date(r.created_at*1000).toLocaleTimeString():''].filter(Boolean).map(String).join(' · ');
+  let contextEpoch=0,contextClear=null;     // a session change drops answers in flight and empties the panel on show
+  window.addEventListener('dream:session',()=>{++contextEpoch;contextClear?.();});
+  function contextDetail(data){
+    const r=data.record,u=r.usage||{},t=r.tokenizer||{},q=r.request||{},out=[node('h3',contextLabel(r))];
+    const responses=r.protocol==='openai_responses';
+    const line=(label,value)=>out.push(node('p',label+': '+value,{class:'library-meta'}));
+    line('Recipient',[r.recipient||'unknown',r.origin&&'origin '+r.origin,r.agent&&'agent '+r.agent,r.worker_id&&'worker '+r.worker_id,
+      Number.isInteger(r.turn)&&'turn '+r.turn].filter(Boolean).join(' · '));
+    line('Model',(r.model||'unknown')+(r.provider?' · provider '+r.provider:'')+' · attempt '+r.attempt+' of request group '+String(r.group_id).slice(0,12));
+    line('HTTP exchange',[r.transport,r.status,Number.isInteger(r.http_status)&&'HTTP '+r.http_status,r.body,r.error_type].filter(Boolean).join(' · ')
+      +'. This says how the exchange went, not whether the task was completed');
+    line('Context window',Number.isInteger(r.window)?r.window.toLocaleString('en-US')+' tokens ('+(r.window_basis||'basis not recorded')+')':'unknown ('+(r.window_basis||'not recorded')+')');
+    if(responses){
+      const count=r.provider_count||{};
+      line('Protocol','OpenAI Responses · '+(r.purpose==='input_tokens'?'input count preflight':'advisory inference'));
+      line('Whole input counted by the provider',tokenCount(count.input_tokens,count.reason)+' · '+String(count.method||'not reported')+'. A count preflight is separate from inference usage');
+      line('Inference input tokens reported',tokenCount(u.input_tokens,u.observed?u.input_tokens_reason:u.reason));
+      line('Inference cached input tokens reported',tokenCount(u.cached_tokens,u.observed?u.cached_tokens_reason:u.reason));
+      line('Inference output tokens reported',tokenCount(u.output_tokens,u.observed?u.output_tokens_reason:u.reason));
+      line('Effective input SHA-256',String(q.input_sha256||'unknown')+' (model, input and the same four input controls in count and inference)');
+      line('POST body SHA-256',String(q.body_sha256||'unknown'));
+      line('Input controls',JSON.stringify(r.params||{}));
+    }else{
+      line('Prompt tokens the server reported for this attempt',tokenCount(u.prompt_tokens,u.observed?u.prompt_tokens_reason:u.reason));
+      line('Cached prompt tokens the server reported',tokenCount(u.cached_tokens,u.observed?u.cached_tokens_reason:u.reason));
+      line('Completion tokens the server reported',tokenCount(u.completion_tokens,u.observed?u.completion_tokens_reason:u.reason));
+    }
+    line('Dream version',(r.package_version||'unknown')+' (the package\'s version string; it does not identify uncommitted source) · inspector '+String(r.harness||data.harness||'unknown'));
+    line('Text token counts',responses?'unknown per component: the provider reports the whole input only. No local tokenizer is started and no total is apportioned to components':t.method==='tokenizer_text'
+      ?'tokenizer_text: a local tokenizer\'s count of each piece of text alone (tokenizer file sha256 '+String(t.digest).slice(0,12)+'…, bound by you to '+t.bound_model+'). Text-derived, not the engine\'s own count, and not additive: only the server\'s reported usage is the request\'s cost'
+      :t.method==='engine_source_tokenizer_text'
+      ?'engine_source_tokenizer_text: a local CPU helper built from the engine\'s tokenizer source counted each piece of text alone, using the tokenizer metadata of a GGUF file you bound to '+t.bound_model
+        +' (counter identity '+String(t.digest).slice(0,12)+'…, GGUF metadata sha256 '+String(t.counter?.gguf_metadata_sha256).slice(0,12)+'…, helper sha256 '+String(t.counter?.helper_sha256).slice(0,12)+'…, vocabulary '+String(t.counter?.vocab_size)+', pre-tokenizer '+String(t.counter?.pre)+(t.counter?.declared_build?', build label you declared: '+String(t.counter.declared_build):'')
+        +'). This is not a tokenizer.json count. It is not shown to be the serving engine\'s binary or checkpoint: the binding is your declaration. It leaves out the chat template, role markers, special tokens and tool and image formatting, and it is not additive: only the server\'s reported usage is the request\'s cost'
+      :'unknown: '+contextWhy(t.reason)+(t.counter?.kind==='gguf_cpu_helper'?' (CPU helper counter)':'')+'. Nothing is estimated');
+    line('Request',responses?'host-approved input · '+contextSize(q.bytes)+' canonical POST body · no chat messages, tools or images':[q.messages+' messages',q.tools+' tools',q.images+' images (never shown here)',contextSize(q.bytes)+(q.complete===false?' (of the messages that were hashed)':''),
+      q.messages_omitted&&q.messages_omitted+' messages in the middle are not listed (hashed and sized only, not token-counted)',
+      q.messages_not_digested&&q.messages_not_digested+' messages were not hashed: the inspection allowance was used up',
+      q.components_dropped_for_bytes&&q.components_dropped_for_bytes+' sections dropped to fit the journal'].filter(Boolean).join(' · '));
+    const reduced=(Array.isArray(r.reduced)?r.reduced:[]).map(x=>CONTEXT_REDUCED[x]||String(x));
+    if(reduced.length)line('Reduced to fit the journal',reduced.join(', ')+'. The original content is not retained');
+    const skipped=Object.entries(r.work?.skipped||{}).map(([why,n])=>n+' × '+contextWhy(why));
+    if(skipped.length)line('Skipped while recording',skipped.join(' · '));
+    const notCounted=Array.isArray(data.not_counted)?data.not_counted.map(String):[];
+    if(notCounted.length)line('Not covered by any count here',notCounted.join('; '));
+    for(const c of Array.isArray(r.components)?r.components:[]){
+      const box=node('details',null,{class:'library-message'}),system=c.kind==='system_section';
+      box.append(node('summary',contextTitle(c)
+        +(c.sha256?' · '+contextSize(c.bytes)+' · sha256 '+String(c.sha256).slice(0,12)+'…':'')+(c.preview_omitted?' · no preview':c.preview_truncated?' · truncated':'')));
+      const meta=text=>box.append(node('p',text,{class:'library-meta'}));
+      meta('Source: '+(c.kind==='responses_input'?'host_approved_packet (the actual approved advisory input; no private recovery capsule or provider output is retained)':system?(c.source||'unknown')+(c.detail?' '+JSON.stringify(c.detail).slice(0,400):'')+' (recorded when the prompt was assembled; characters '+c.start+' to '+c.end+' of the system message)':'conversation'));
+      meta(c.sha256?'SHA-256 of the actual text: '+c.sha256+' · '+contextSize(c.bytes)+' · '+c.chars+' characters':'No text hash for this entry'+(c.message_sha256?'; the whole message\'s SHA-256 is '+c.message_sha256:''));
+      meta(contextTokens(c,t.method));
+      if(c.kind==='tool_call')meta('Representation: '+String(c.representation||'unknown')+'.');
+      if(c.kind==='merged_components')meta('Merged: '+Object.entries(c.merged_kinds||{}).map(([k,n])=>n+' '+k).join(', ')+'. This message had more pieces than one record lists.');
+      if(c.kind==='message')meta([c.images?c.images+' images (not shown, not counted)':'',c.tool_call_count?c.tool_call_count+' tool calls (each listed separately below)':'',
+        c.reasoning_chars?c.reasoning_chars+' characters of reasoning_content (not counted)':'',c.other_parts?c.other_parts+' other parts (not counted)':''].filter(Boolean).join(' · ')||'No images, tool calls or reasoning.');
+      meta(c.preview_omitted?contextPreviewNote(c)
+        :c.preview_truncated?'The preview below is truncated and redacted; the hash and size are of the whole text.'
+        :'The preview below is the whole text, redacted where needed.');
+      if(!c.preview_omitted){const pre=node('pre',String(c.preview||''));pre.style.whiteSpace='pre-wrap';pre.style.overflowWrap='anywhere';box.append(pre);}
+      out.push(box);
+    }
+    const tools=r.tools&&typeof r.tools==='object'?r.tools:null;
+    if(tools&&tools.count){
+      const box=node('details',null,{class:'library-message'});
+      box.append(node('summary','tool schemas · '+tools.count+(tools.sha256?' · '+contextSize(tools.bytes)+' · sha256 '+String(tools.sha256).slice(0,12)+'…':'')));
+      const meta=text=>box.append(node('p',text,{class:'library-meta'}));
+      meta('Source: the request\'s tools array. Representation: canonical JSON text (sorted keys), not the form the chat template renders.');
+      meta(contextTokens(tools,t.method));
+      if(tools.listed_dropped_for_bytes)meta('The per-tool listing ('+tools.listed_dropped_for_bytes+' schemas) was dropped to fit the journal.');
+      for(const s of Array.isArray(tools.listed)?tools.listed:[]){
+        meta(String(s.name||'unnamed')+' · '+(s.sha256?contextSize(s.bytes)+' · sha256 '+String(s.sha256).slice(0,12)+'…':'not hashed')+' · '+contextTokens(s,t.method)
+          +(Array.isArray(s.parameters)&&s.parameters.length?' · parameters: '+s.parameters.map(String).join(', ')+(s.parameters_omitted?' and '+s.parameters_omitted+' more':''):''));
+        if(s.preview){const pre=node('pre',String(s.preview)+(s.preview_truncated?' …':''));pre.style.whiteSpace='pre-wrap';pre.style.overflowWrap='anywhere';box.append(pre);}
+      }
+      if(tools.listed_omitted)meta(tools.listed_omitted+' more schemas are in the array\'s hash and count but are not listed.');
+      out.push(box);
+    }
+    for(const text of Array.isArray(data.caveats)?data.caveats:[])out.push(node('p',String(text),{class:'lucid-note'}));
+    return out;
+  }
+  function contextPanel(){
+    const panel=node('section',null,{class:'lucid-styles lucid-context dream-panel','aria-label':'Effective context'});
+    panel.style.overflowWrap='anywhere';
+    const idle='Not read yet. Press Refresh context to see what this session\'s HTTP requests to a model carried. Nothing is read until you do.';
+    const status=node('p',idle,{class:'lucid-note',role:'status','aria-live':'polite'});
+    const picker=node('div',null),detail=node('div',null);
+    let turn=0,listed=null,summary=idle;
+    const say=(text,error=false)=>{status.textContent=text;status.dataset.error=String(error);};
+    // The session this page believes it is showing, when it knows one. An answer is kept only if nothing moved since
+    // its request began: the same request turn, Lucid view, session epoch (so A -> B -> A is still a change) and
+    // client session id, with the panel still on the page. A stale answer is dropped whether it succeeded or failed.
+    const clientSession=()=>{const id=window.DREAM_SESSION?.session_id;return typeof id==='string'&&id?id:null;};
+    const guard=()=>{const mine=++turn,view=lucidView,epoch=contextEpoch,sid=clientSession();
+      const current=()=>mine===turn&&view===lucidView&&epoch===contextEpoch&&sid===clientSession()&&panel.isConnected;
+      current.session=sid;return current;};
+    const clear=()=>{++turn;listed=null;summary=idle;picker.replaceChildren();detail.replaceChildren();say(idle);};
+    // The server answers for the session IT is showing. When that is not the one this page was showing as the request
+    // began (the server moved on before this page heard of it), nothing of the answer is shown.
+    const foreign=(data,current)=>{const server=typeof data?.session_id==='string'?data.session_id:null;
+      return current.session!==null&&server!==current.session;};
+    const moved='The session changed while this was loading, so nothing is shown. Press Refresh context.';
+    async function open(id){
+      const current=guard(),session=listed;
+      detail.replaceChildren();      // the earlier choice's preview goes at once, not when the new one arrives
+      try{
+        if(!/^[0-9a-f]{32}$/.test(id))throw Error('That request id is not valid. Press Refresh context.');
+        const data=await api('/api/lucid/context/'+encodeURIComponent(id));
+        if(!current())return;
+        if(foreign(data,current)||(data.session_id??null)!==session){clear();say(moved,true);return;}
+        if(data.record?.request_id!==id)throw Error('The server answered for a different request. Press Refresh context.');
+        detail.replaceChildren(...contextDetail(data));say(summary);
+      }catch(e){if(current()){detail.replaceChildren();say(e.message,true);}}
+    }
+    async function load(){
+      const current=guard();listed=null;picker.replaceChildren();detail.replaceChildren();say('Reading the recorded requests…');
+      try{
+        const data=await api('/api/lucid/context');
+        if(!current())return;
+        if(foreign(data,current)){clear();say(moved,true);return;}
+        listed=data.session_id??null;
+        const rows=(Array.isArray(data.records)?data.records:[]).filter(r=>r&&/^[0-9a-f]{32}$/.test(r.request_id));
+        if(!rows.length){summary=String(data.empty_note||'No request context has been recorded for this session yet.');say(summary);return;}
+        const select=field(picker,'Request (recipient · model · attempt)','select',{'aria-label':'Recorded request'});select.style.maxWidth='100%';
+        for(const r of rows)select.append(node('option',contextLabel(r),{value:r.request_id}));
+        select.onchange=()=>open(select.value);
+        summary=rows.length+' recorded request attempt'+(rows.length===1?'':'s')+', newest first. '+String(data.coverage?.note||'');
+        say(summary);await open(select.value);
+      }catch(e){if(current())say(e.message,true);}
+    }
+    contextClear=clear;     // the newest panel is the one on the page
+    const actions=node('div',null,{class:'library-actions'});actions.append(button('Refresh context',()=>load(),{class:'lucid-context-refresh'}));
+    panel.append(node('h2','Effective context'),node('p','A bounded preview journal of what each HTTP request this session sent to a model carried: the sections of its prompt with their sources, hashes and sizes captured as it left, short redacted previews, and the token counts the server reported. It is not a copy of the request: text a preview leaves out is not retained. Requests a provider\'s own SDK or CLI assembles are not observed.',{class:'lucid-note'}),actions,status,picker,detail);
+    return panel;
+  }
   async function drawLucidBoard(){
     const view=lucidView;const data=await api('/api/lucid');
     if(view!==lucidView||openMemory)return;   // the owner moved on (an editor is open): never replace it
@@ -549,7 +765,8 @@
       if(!files.length)col.append(node('p','Start Dream in a project folder to see its files here.',{class:'lucid-note'}));
       return col;};
     board.append(column('Global','Read in every session, whatever the project.',data.global),
-                 column('Current project',data.workspace||'No project open',data.project));
+                 column('Current project',data.workspace||'No project open',data.project),
+                 contextPanel());
     const styles=node('section',null,{class:'lucid-styles dream-panel','aria-label':'Response style'});
     styles.append(node('h2','Response style'),node('p','How Dream words its replies. A change applies to the next session.',{class:'lucid-note'}));
     const shown=node('div',null,{class:'lucid-style-text',role:'region','aria-live':'polite'});

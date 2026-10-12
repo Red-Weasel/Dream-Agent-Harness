@@ -16,9 +16,9 @@ from dream.tui import picker
 @pytest.fixture
 def saved(monkeypatch, tmp_path):
     monkeypatch.setattr(moe, 'CONFIG_PATH', tmp_path / 'council.json')
-    cfg = moe.MoeConfig('codex', ['gemini'], max_concurrency=1,
+    cfg = moe.MoeConfig('codex', ['antigravity'], max_concurrency=1,
                         timeout_seconds=147, legal_review=True,
-                        advisor_models={'gemini': 'chosen-advisor'}, orchestrator_effort='high')
+                        advisor_models={'antigravity': 'chosen-advisor'}, orchestrator_effort='high')
     moe.save_config(cfg)
     return cfg
 
@@ -61,7 +61,7 @@ async def test_invalid_main_model_is_rejected_before_session(monkeypatch, tmp_pa
 
 def providers():
     return [picker.ProviderRow(key, key.title(), 'fixture', True, '')
-            for key in ('codex', 'gemini', 'anthropic')]
+            for key in ('codex', 'antigravity', 'anthropic')]
 
 
 @pytest.mark.asyncio
@@ -90,11 +90,11 @@ async def test_terminal_edit_preserves_advanced_settings(monkeypatch, saved):
 @pytest.mark.asyncio
 async def test_terminal_disabling_advisor_removes_its_effort(monkeypatch, saved):
     from dataclasses import replace
-    moe.save_config(replace(saved, advisors=['gemini', 'anthropic'],
+    moe.save_config(replace(saved, advisors=['antigravity', 'anthropic'],
                             orchestrator_effort='high', advisor_efforts={'anthropic': 'low'}))
     monkeypatch.setattr(picker, '_ask', AsyncMock(side_effect=['n', '1', 'n', 'y', 'n']))
     result = await picker.moe_role_screen(Console(file=StringIO()), Mock(), providers())
-    assert result.advisors == ['gemini']
+    assert result.advisors == ['antigravity']
     assert result.advisor_efforts == {}
     assert result.orchestrator_effort == 'high'
 
@@ -105,7 +105,7 @@ async def test_terminal_new_main_uses_its_default_effort(monkeypatch, saved):
     moe.save_config(replace(saved, orchestrator_effort='high'))
     monkeypatch.setattr(picker, '_ask', AsyncMock(side_effect=['n', '2', 'y', 'n', 'n']))
     result = await picker.moe_role_screen(Console(file=StringIO()), Mock(), providers())
-    assert result.orchestrator == 'gemini'
+    assert result.orchestrator == 'antigravity'
     assert result.orchestrator_effort is None
 
 
@@ -166,7 +166,7 @@ def test_native_launch_carries_main_and_only_enabled_advisors(onboarding_class, 
     panel.advisor_effort_fields = {}
     panel.saved_council = asdict(saved)
     panel.advisor_fields = {
-        'gemini': (SimpleNamespace(get_active=lambda: True),
+        'antigravity': (SimpleNamespace(get_active=lambda: True),
                    SimpleNamespace(get_text=lambda: 'chosen-advisor')),
         'anthropic': (SimpleNamespace(get_active=lambda: False),
                       SimpleNamespace(get_text=lambda: 'unused-model')),
@@ -223,11 +223,11 @@ def test_native_launch_passes_main_and_enabled_advisor_effort(onboarding_class, 
     panel.saved_council = {}
     panel.advisor_fields = {
         'anthropic': (SimpleNamespace(get_active=lambda: True), SimpleNamespace(get_text=lambda: '')),
-        'gemini': (SimpleNamespace(get_active=lambda: False), SimpleNamespace(get_text=lambda: '')),
+        'antigravity': (SimpleNamespace(get_active=lambda: False), SimpleNamespace(get_text=lambda: '')),
     }
     panel.advisor_effort_fields = {
         'anthropic': SimpleNamespace(get_active_id=lambda: 'low'),
-        'gemini': SimpleNamespace(get_active_id=lambda: ''),
+        'antigravity': SimpleNamespace(get_active_id=lambda: ''),
     }
     panel.message = Mock()
     panel.launch()
@@ -271,7 +271,7 @@ def test_catalog_returns_saved_advanced_settings_and_advisor_metadata(monkeypatc
     data = startup.catalog()
     assert data['choices'][0]['kind'] == 'attach'
     assert data['saved_council'] == asdict(saved)
-    assert {'codex', 'anthropic', 'gemini', 'machx'} <= {c['key'] for c in data['council_choices']}
+    assert {'codex', 'anthropic', 'antigravity', 'machx'} <= {c['key'] for c in data['council_choices']}
     assert all(isinstance(c['available'], bool) and c['note'] for c in data['council_choices'])
 
 

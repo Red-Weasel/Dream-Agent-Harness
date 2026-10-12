@@ -28,8 +28,9 @@ HOST = os.environ.get("DREAM_MACHX_HOST", "127.0.0.1")
 PORT = int(os.environ.get("DREAM_MACHX_PORT", "11435"))
 BASE_URL = f"http://{HOST}:{PORT}/v1"
 # How long a supervisor (`ie supervise`, DREAM-144) may take to stop: every child gets its own /admin/shutdown and
-# the slowest child's load plus its stop bounds it. stop() waits this long; the engine guard gives it the same
-# time after SIGTERM before SIGKILL (a plain `ie serve` keeps the guard's 120 s).
+# the slowest child's load plus its stop bounds it. stop() waits this long; the engine guard waits the same time
+# after SIGTERM before it reports the supervisor still running (a plain `ie serve` keeps the guard's 120 s).
+# Neither ever sends SIGKILL (DREAM-253).
 SUPERVISOR_STOP_S = 600.0
 
 # Default per-user model locations; environment overrides take precedence.
@@ -296,7 +297,8 @@ def lanes_queue(options: dict | None) -> int | None:
 def serve(model_path: Path, gpus: int | None = None, ctx: int | None = None,
           options: dict | None = None, *, keep_hot: bool = False) -> subprocess.Popen:
     """Launch `ie serve`. The engine is tied to this process (fix #51): when it dies by any means the
-    engine gets SIGTERM, then SIGKILL after a grace period -- unless `keep_hot` asks it to outlive us."""
+    engine gets SIGTERM, its orderly stop, and never SIGKILL (DREAM-253): one still running after the guard's
+    grace period is logged as still running -- unless `keep_hot` asks it to outlive us."""
     from .settings import server_args
     from .load_lock import load_lock
     from . import engine_guard
@@ -491,8 +493,8 @@ def _signal_group(pid: int, sig: int) -> None:
 
 
 def left_running() -> int | None:
-    """The pid of an engine Dream launched that is still alive (a supervisor still stopping after stop()'s wait,
-    DREAM-144), or None: nothing Dream started is running."""
+    """The pid of an engine Dream launched that is still alive (a supervisor, DREAM-144, or a plain engine,
+    DREAM-253, still running after stop()'s wait), or None: nothing Dream started is running."""
     try:
         pid = int(_pid_file().read_text().strip())
     except Exception:
@@ -524,11 +526,15 @@ def _stop_supervisor(pid: int, timeout: float) -> bool:
 
 
 def stop(timeout: float = 120.0, *, supervisor_timeout: float = SUPERVISOR_STOP_S) -> bool:
-    """Stop the MachX server and free its GPU memory: SIGTERM the process group,
-    escalate to SIGKILL if it lingers past ``timeout``. Idempotent — safe to call
-    when nothing is running. Returns True if a live server was actually stopped.
+    """Ask the MachX server to stop and wait for it: SIGTERM, its orderly stop, to the process group, then up to
+    ``timeout`` for it to exit. Never SIGKILL (DREAM-253): a forced termination landed in GPU work in flight and
+    left bad GPU pages and an unkillable process. Idempotent — safe to call when nothing is running.
+
+    Returns True only if a live server was stopped and is gone (its GPU memory is then free). False means nothing
+    was stopped: either nothing was running, or the server is STILL RUNNING after the wait -- then its pid file
+    is kept, so ``left_running()`` names it and a later stop can look again. SIGTERM is sent once per call.
     A supervisor (`ie supervise`, DREAM-144) is asked to shut down through its front and waited for up to
-    ``supervisor_timeout``, never killed."""
+    ``supervisor_timeout``, on the same terms."""
     pid: int | None = None
     try:
         pid = int(_pid_file().read_text().strip())
@@ -544,7 +550,6 @@ def stop(timeout: float = 120.0, *, supervisor_timeout: float = SUPERVISOR_STOP_
     while time.monotonic() < deadline and _alive(pid):
         time.sleep(0.25)
     if _alive(pid):
-        _signal_group(pid, signal.SIGKILL)
-        time.sleep(0.5)
+        return False                         # still running: not killed, and its pid file stays (left_running())
     _pid_file().unlink(missing_ok=True)
     return True

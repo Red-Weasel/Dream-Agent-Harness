@@ -83,7 +83,9 @@ def test_monitor_pane_live_in_real_terminal(tmp_path):
         # the sliding-window rate appears mid-turn, exact pp stats at round end.
         assert _wait_for(master, buf, b"t/s live", 20, state), "live tokens/s never shown"
         assert _wait_for(master, buf, b"gen 30.0 t/s", 15, state), "exact decode rate missing"
-        assert b"\xe2\x9a\xa1 monitor" in buf  # "⚡ monitor" pane header
+        # "⚡ monitor" pane header. The working frame draws ⚡ as a readable escape, as it does every character
+        # terminals and Rich may measure differently (render._frame_char).
+        assert b"\\u26a1 monitor" in buf
         assert b"ttft 0.8" in buf  # the scripted 0.8s first token, measured live
         # Prompt-processing time + rate land with the round's stats event and
         # paint in the idle toolbar (which needs the CPR replies above).

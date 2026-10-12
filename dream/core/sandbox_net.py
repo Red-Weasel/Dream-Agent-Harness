@@ -54,11 +54,7 @@ def main():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind(("127.0.0.1", 0))
     server.listen(64)
-    proxy = "http://127.0.0.1:%d" % server.getsockname()[1]
-    env = dict(os.environ)
-    for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
-        env[key] = proxy
-    env["no_proxy"] = env["NO_PROXY"] = "localhost,127.0.0.1,::1"
+    env = dict(os.environ)   # shared host network: no proxy forced on the command
     lock = threading.Lock()
 
     def serve():

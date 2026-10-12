@@ -1,4 +1,5 @@
-"""Headless --loop must be able to execute, while the workspace boundary holds.
+"""Headless --loop must be able to execute, while the workspace boundary holds for file tools. (Since 2026-10-11, the
+owner's decision, auto runs every shell command on the host without asking: the shell is no longer held to it.)
 
 Measured in the harness-lab benchmark: with accept-edits (the interactive
 default) Dream was blocked in 11 of 11 unattended runs — every shell command asks,
@@ -20,16 +21,11 @@ def ws(tmp_path):
     return w
 
 
-async def test_auto_runs_confined_shell_without_asking(ws):
-    from dream.core.execution import ExecutionScope, probe_sandbox
-    assert policy.decide("Bash", {"command": "python3 solve.py"}, "auto", ws)[0] == "ask"
-    assert policy.decide("Bash", {"command": "cat data.csv"}, "auto", ws)[0] == "allow"
-    scope = ExecutionScope(ws)
-    capability = await probe_sandbox(scope)
-    if not capability.available:
-        pytest.skip(capability.reason)
-    assert policy.decide("run_bash", {"command": "python3 solve.py"}, "auto", ws,
-                         execution_scope=scope, execution_capability=capability)[0] == "allow"
+def test_auto_runs_shell_without_asking(ws):
+    # No shell sandbox (the owner, 2026-10-11): auto runs every shell command without asking, no sandbox needed.
+    for tool in ("Bash", "run_bash"):
+        for command in ("python3 solve.py", "cat data.csv"):
+            assert policy.decide(tool, {"command": command}, "auto", ws) == ("allow", "auto mode")
 
 
 def test_accept_edits_asks_for_every_shell_command(ws):
@@ -38,11 +34,15 @@ def test_accept_edits_asks_for_every_shell_command(ws):
     assert policy.decide("Bash", {"command": "cat data.csv"}, "accept-edits", ws)[0] == "ask"
 
 
-def test_auto_still_asks_outside_the_workspace(ws):
-    """The whole reason auto is safe enough to default to headlessly."""
+def test_auto_runs_outside_the_workspace_too_and_the_asking_modes_name_it(ws):
+    """No shell sandbox (the owner, 2026-10-11): auto runs outside-workspace shell commands too, headless --loop
+    included. Ask and Accept edits ask, with the boundary as the reason; plan denies."""
     for command in ("echo x > ~/.bashrc", "cat /etc/passwd", "rm -rf /tmp/other"):
-        decision, reason = policy.decide("Bash", {"command": command}, "auto", ws)
-        assert decision != "allow", f"auto allowed an unconfined command: {command}"
+        assert policy.decide("Bash", {"command": command}, "auto", ws) == ("allow", "auto mode")
+        for mode in ("ask", "accept-edits"):
+            decision, reason = policy.decide("Bash", {"command": command}, mode, ws)
+            assert decision == "ask" and reason.startswith("outside workspace"), (command, mode, reason)
+        assert policy.decide("Bash", {"command": command}, "plan", ws)[0] == "deny"
 
 
 def test_loop_defaults_to_auto_and_the_flag_overrides(monkeypatch, tmp_path):

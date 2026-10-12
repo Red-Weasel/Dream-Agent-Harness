@@ -205,15 +205,17 @@ def test_argv_first_turn_and_resume():
     ]
 
 
-def test_argv_ignores_mcp_config():
-    # mcp_config is accepted for interface parity but not injected (gemini reads MCP
-    # servers from ~/.gemini/settings.json), so argv is unchanged by it.
+def test_argv_scopes_shared_settings_to_session_mcp_config():
+    # Gemini reads shared user settings; Dream must allow only its own bridge.
     adapter = GeminiAdapter()
     cfg = {"name": "dream", "command": "/venv/py", "args": ["-m", "dream.mcp"], "env": {}}
     with_cfg = adapter.argv("hi", cwd="/w", resume_id=None, sandbox="read-only", mcp_config=cfg)
     without = adapter.argv("hi", cwd="/w", resume_id=None, sandbox="read-only")
-    assert with_cfg == without
-    assert "dream" not in " ".join(with_cfg)
+    index = with_cfg.index("--allowed-mcp-server-names")
+    assert with_cfg[index + 1] == cfg["name"]
+    assert with_cfg[:index] + with_cfg[index + 2:] == without
+    assert with_cfg.count(cfg["name"]) == 1
+    assert cfg["command"] not in with_cfg
 
 
 # --- subprocess-level ask() against a fake gemini -----------------------------

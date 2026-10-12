@@ -96,7 +96,7 @@ html.dream-design.companion #chat-progress{margin-block:0 8px;padding:0 8px;colo
 html.dream-design.companion .composer{min-height:0;margin-block:0;padding:8px;gap:8px;align-items:flex-end;border:1px solid var(--ch-line-strong);border-radius:26px;background:var(--ch-field);box-shadow:none}
 html.dream-design.companion .composer:focus-within{border-color:var(--ch-focus);box-shadow:none}
 html.dream-design.companion #input{flex:1 1 150px;min-width:0;min-height:36px;max-height:200px;padding:6px 4px;overflow-y:auto;color:var(--ch-text);font:400 16px/1.5 var(--sans)}
-html.dream-design.companion #input::placeholder{color:var(--ch-faint)}
+html.dream-design.companion #input::placeholder{color:var(--ch-faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}   /* one line at a phone width: a wrapped placeholder grew the empty box */
 /* The plan strip keeps its place (fix #88): left of the box from 1000 px, on its own line above it below that. */
 html.dream-design.companion #plan-panel{padding:2px 8px 0}
 @media (min-width:1000px){html.dream-design.companion #plan-panel{align-self:flex-end;padding:0 4px 8px}}

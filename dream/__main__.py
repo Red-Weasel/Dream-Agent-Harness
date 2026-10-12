@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import sys
 
 
@@ -93,9 +94,9 @@ def _main() -> None:
     )
     parser.add_argument(
         "--provider",
-        choices=["anthropic", "machx", "openai", "xai", "codex", "grok", "gemini"],
+        choices=["anthropic", "machx", "openai", "xai", "codex", "grok", "gemini", "antigravity"],
         default="anthropic",
-        help="Model provider. Default: anthropic (Claude). codex/grok/gemini are the "
+        help="Model provider. Default: anthropic (Claude). codex/grok/antigravity are the "
              "subscription CLIs; xai is the xAI HTTP API. For MachX, prefer `dream local`.",
     )
     parser.add_argument("--model", default=None, help="Model id/alias for the provider.")
@@ -117,7 +118,13 @@ def _main() -> None:
     parser.add_argument("--iterations", type=int, default=None,
                         help="Optional positive autonomous iteration limit; unlimited when omitted.")
     parser.add_argument("--resume-run", metavar="ID", help="Resume an existing durable autonomous run")
+    parser.add_argument("--phase-plan", metavar="FILE", help="Run an operator-selected immutable JSON phase schedule")
+    parser.add_argument("--resume-schedule", metavar="ID", help="Resume a schedule using the same --phase-plan")
+    parser.add_argument("--reconcile-check", action="append", default=[], metavar="CHECK_ID=REPORT",
+                        help="Explicit owner report for an interrupted schedule host check")
     parser.add_argument("--resume-note", help="What you verified about interrupted actions, or input resolving a pause")
+    parser.add_argument("--reconcile-action", action="append", default=[], metavar="ACTION_ID=REPORT",
+                        help="Explicit owner report about one uncertain managed action; repeat for multiple actions.")
     parser.add_argument(
         "--mode",
         choices=["ask", "accept-edits", "auto"],
@@ -131,10 +138,44 @@ def _main() -> None:
     if args.iterations is not None and args.iterations < 1:
         parser.error("--iterations must be a positive integer; omit it for no iteration limit")
 
-    from . import config
-    from .tui.app import App
+    from .core.run_resume import reconciliation_actions
+    try:
+        reconciled_actions = reconciliation_actions(args.reconcile_action)
+        reconciled_checks = reconciliation_actions(args.reconcile_check)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if reconciled_actions and not (args.resume_run or args.resume_schedule):
+        parser.error("--reconcile-action requires --resume-run or --resume-schedule")
+
+    phase_plan = None
+    if args.resume_schedule is not None and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,99}', args.resume_schedule):
+        parser.error("--resume-schedule requires a canonical schedule ID")
+    if args.phase_plan is not None:
+        if not args.phase_plan.strip():
+            parser.error("--phase-plan requires a nonempty plan path")
+        if args.loop is not None or args.resume_run is not None or args.iterations is not None:
+            parser.error("--phase-plan has its own fixed goal and limits; omit --loop, --resume-run and --iterations")
+        if reconciled_checks and not args.resume_schedule:
+            parser.error("--reconcile-check requires --resume-schedule")
+        if args.resume_note is not None and (not args.resume_schedule or not args.resume_note.strip() or len(args.resume_note) > 8192):
+            parser.error("--resume-note requires explicit --resume-schedule and a meaningful report of at most 8192 characters")
+        if any(len(report) > 4096 for report in [*reconciled_actions.values(), *reconciled_checks.values()]):
+            parser.error("Schedule reconciliation reports are limited to 4096 characters")
+        from pathlib import Path
+        from .core.providers import get_provider
+        if get_provider(args.provider).kind != 'openai':
+            parser.error("Phase schedules require a compatible HTTP backend with actual managed receipts; native CLI/SDK is unqualified")
+        from .core.phase_plan import load_phase_plan
+        try:
+            phase_plan = load_phase_plan(args.phase_plan, workspace=Path(args.workspace or Path.cwd()))
+            args.workspace = str(phase_plan.workspace)
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+    elif args.resume_schedule or reconciled_checks:
+        parser.error("--resume-schedule and --reconcile-check require --phase-plan")
 
     if args.resume_run:
+        from . import config
         from .core.run_state import RunState
         if args.loop:
             parser.error("--resume-run uses the recorded goal; omit --loop")
@@ -147,33 +188,43 @@ def _main() -> None:
                 state.close()
         except (OSError, ValueError, KeyError) as exc:
             parser.error(str(exc))
-    elif args.resume_note:
+    elif args.resume_note and not args.resume_schedule:
         parser.error("--resume-note requires --resume-run")
 
-    app = App(
-        provider=args.provider, model=args.model,
-        consolidate_on_exit=config.CONSOLIDATE_ON_EXIT and not args.no_consolidate,
-        workspace=args.workspace,
-        gui=args.gui or config.GUI,
-    )
-    # A headless loop has nobody to answer a permission prompt, so accept-edits —
-    # which asks for EVERY shell command — silently refuses all of them. Measured:
-    # Dream was blocked in 11 of 11 unattended benchmark runs and solved the tasks
-    # by reasoning instead of executing. 'auto' still asks for anything not
-    # provably confined to the workspace, so the boundary holds.
-    if args.mode:
-        app.mode = args.mode
-    elif args.loop:
-        app.mode = "auto"
-
     try:
-        if args.loop:
-            options = {"resume_run_id": args.resume_run, "resume_note": args.resume_note} if args.resume_run else {}
+        from . import config
+        from .tui.app import App
+        app = App(
+            provider=args.provider, model=args.model,
+            consolidate_on_exit=config.CONSOLIDATE_ON_EXIT and not args.no_consolidate,
+            workspace=args.workspace,
+            gui=args.gui or config.GUI,
+        )
+        # A headless loop has nobody to answer a permission prompt, so accept-edits —
+        # which asks for EVERY shell command — silently refuses all of them. Measured:
+        # Dream was blocked in 11 of 11 unattended benchmark runs and solved the tasks
+        # by reasoning instead of executing. 'auto' still asks for anything not
+        # provably confined to the workspace, so the boundary holds.
+        if args.mode:
+            app.mode = args.mode
+        elif args.loop or phase_plan is not None:
+            app.mode = "auto"
+        if phase_plan is not None:
+            asyncio.run(app.run_phase_schedule(phase_plan, resume_schedule_id=args.resume_schedule,
+                resume_note=args.resume_note, reconciled_actions=reconciled_actions,
+                reconciled_checks=reconciled_checks))
+        elif args.loop:
+            options = {"resume_run_id": args.resume_run, "resume_note": args.resume_note, "reconciled_actions": reconciled_actions} if args.resume_run else {}
             asyncio.run(app.run_autonomous(args.loop, args.iterations, **options))
         else:
             asyncio.run(app.run())
     except KeyboardInterrupt:
         pass
+    finally:
+        if phase_plan is not None:
+            close = getattr(phase_plan, 'close', None)
+            if callable(close):
+                close()
 
 
 if __name__ == "__main__":

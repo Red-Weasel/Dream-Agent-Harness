@@ -66,6 +66,7 @@ async def test_plan_and_healthy_cached_auto_do_not_probe(app, monkeypatch, mode)
 
 @pytest.mark.parametrize('name', ['Bash', 'evil__run_bash', 'mcp__evil__run_bash', 'mcp__dream__evil__run_bash'])
 async def test_other_executor_and_spoofed_names_never_inherit_native_evidence(app, monkeypatch, name):
+    app.mode = 'ask'   # auto mode runs every command without asking since 2026-10-11 (no sandbox); the prompt is Ask's
     app.engine.execution_capability = SandboxCapability(True, 'cached', app.engine.execution_scope, '/fixture/bwrap')
     def forbidden(scope):
         raise AssertionError('Other tool must not probe native containment')
@@ -75,8 +76,9 @@ async def test_other_executor_and_spoofed_names_never_inherit_native_evidence(ap
     assert not app.approvals
 
 
-@pytest.mark.parametrize('command', ['rm fixture.txt', 'git push origin main'])
+@pytest.mark.parametrize('command', ['rm -r fixtures', 'git push origin main'])   # a folder delete still asks (2026-10-11)
 async def test_recovery_keeps_deletion_and_publish_prompts(app, monkeypatch, command):
+    app.mode = 'ask'   # auto mode runs every command without asking since 2026-10-11 (no sandbox); the prompt is Ask's
     async def probe(scope):
         return SandboxCapability(True, 'recovered', scope, '/fixture/bwrap')
     monkeypatch.setattr(execution, 'probe_sandbox', probe)
@@ -85,8 +87,11 @@ async def test_recovery_keeps_deletion_and_publish_prompts(app, monkeypatch, com
     assert not app.approvals
 
 
-@pytest.mark.parametrize('answer,allowed', [('n', False), ('y', True), ('a', False)])
-async def test_unavailable_requires_exact_host_once_and_never_session_grant(app, monkeypatch, answer, allowed):
+@pytest.mark.parametrize('answer,allowed,remembered', [('n', False, False), ('y', True, False), ('a', True, True)])
+async def test_a_shell_approval_is_one_exact_host_grant(app, monkeypatch, answer, allowed, remembered):
+    # No shell sandbox (the owner, 2026-10-11): yes runs this command once on the host, always remembers this exact
+    # command for the session, and the prompt says the command runs without a sandbox.
+    app.mode = 'ask'   # auto mode runs every command without asking since 2026-10-11 (no sandbox); the prompt is Ask's
     app.answer = answer
     async def probe(scope):
         return SandboxCapability(False, 'still unavailable', scope)
@@ -94,9 +99,23 @@ async def test_unavailable_requires_exact_host_once_and_never_session_grant(app,
     command = 'python fixture.py'
     assert await app._decide_permission('run_bash', {'command': command}) is allowed
     assert len(app.prompts) == 1
-    assert 'host access' in app.prompts[0][1]
+    assert 'no shell sandbox' in app.prompts[0][1]
     assert app.approvals == ([(command, {'uncontained': True})] if allowed else [])
-    assert not app._always_allow
+    assert bool(app._always_allow) is remembered
+
+
+@pytest.mark.parametrize('mode', ['ask', 'accept-edits'])
+@pytest.mark.parametrize('command', ['ls', 'cat ~/.ssh/id_rsa', 'grep -r token /etc'])
+async def test_ask_modes_ask_before_a_read_only_command_even_with_bubblewrap(app, monkeypatch, mode, command):
+    # No shell sandbox (2026-10-11): a working bubblewrap no longer contains run_bash, so a read-only command runs on
+    # the host. Ask and Accept edits ask first; before the fix they ran it unasked whenever bubblewrap was installed.
+    app.mode = mode
+    async def probe(scope):
+        return SandboxCapability(True, 'fixture', scope, '/fixture/bwrap')
+    monkeypatch.setattr(execution, 'probe_sandbox', probe)
+    app.engine.execution_capability = await probe(app.engine.execution_scope)
+    assert await app._decide_permission('run_bash', {'command': command}) is False   # the fixture answers no
+    assert len(app.prompts) == 1 and not app.approvals
 
 
 @pytest.mark.parametrize('change', ['engine', 'mode', 'workspace', 'engine_workspace', 'scope'])
@@ -153,6 +172,7 @@ async def test_cancellation_during_refresh_preserves_cached_failure(app, monkeyp
 
 @pytest.mark.parametrize('available', [True, False])
 async def test_desktop_native_choices_name_boundary_and_show_reason(app, monkeypatch, available):
+    app.mode = 'ask'   # auto mode runs every command without asking since 2026-10-11 (no sandbox); the prompt is Ask's
     async def probe(scope):
         return SandboxCapability(available, 'fixture', scope, '/fixture/bwrap')
     monkeypatch.setattr(execution, 'probe_sandbox', probe)
@@ -162,16 +182,16 @@ async def test_desktop_native_choices_name_boundary_and_show_reason(app, monkeyp
         shown.append((reason, choices))
         return 'n'
     app.studio = SimpleNamespace(client_count=1, request_permission=request)
-    assert not await app._decide_permission('run_bash', {'command': 'rm frames/old.png'})
+    assert not await app._decide_permission('run_bash', {'command': 'rm -r frames'})   # a folder delete still asks (2026-10-11)
     reason, choices = shown[0]
-    assert choices['y'] == ('Run in sandbox once' if available else 'Run outside sandbox once')
-    assert choices.get('h') == ('Run outside sandbox once' if available else None)
+    assert choices['y'] == 'Run once' and 'h' not in choices   # no sandbox, so no in/outside-sandbox choice (2026-10-11)
     assert 'does not remember approval' in reason
-    assert ('deletes files' if available else 'protection unavailable') in reason
+    assert 'deletes files' in reason   # Ask's reason; the sandbox's own reasons went with it (2026-10-11)
     assert not app.approvals
 
 
 async def test_provider_bash_prompt_does_not_claim_dream_sandbox(app):
+    app.mode = 'ask'   # auto mode runs every command without asking since 2026-10-11 (no sandbox); the prompt is Ask's
     shown = []
     async def request(tool, args, reason, choices):
         shown.append((reason, choices))

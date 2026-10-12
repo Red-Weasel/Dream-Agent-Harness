@@ -54,6 +54,41 @@ terminal, streaming chat, browser, Studio previews, tools, and optional memory.
   custom tools. Vision requires an image-capable model and a compatible adapter;
   an image path alone is not visual evidence.
 
+## What's new since v0.2.0
+
+- **DeepSleep.** A board of floating terminal sessions in one window. Claude Code, Codex,
+  Grok Build and Antigravity run as their own command-line programs, and Dream workflow
+  terminals run Dream itself on any provider, a local MachX model included. In/Out links
+  hand work from one terminal to another; the Message Board posts to every terminal or to
+  one by name. Panes tile six to a screen, collapse to their header and switch between
+  Terminal, Conversation and Activity layouts; optional character companions double as
+  connection points. Dream workflow terminals in DeepSleep start in **Auto**.
+- **A tidier terminal.** A tool call is one line with its result under it, text is
+  colored by meaning, confirmed file changes are counted, and the main and Nested prompts
+  offer slash commands for skills, plugins, settings, Council and DeepSleep.
+- **Sign in from the sidebar.** Dream finds the Claude, Codex, Grok and Gemini
+  (Antigravity) command-line tools wherever they are installed, shows each one's sign-in
+  state as a pill, and signs in through the provider's own login (**Sign in**, or
+  `/login <provider>` in a session).
+- **The model loader.** The desktop's model chooser is searchable and grouped, shows each
+  model's name, quantization, format and size separately, and loads or unloads a local
+  model without closing the session.
+- **A stop for a repeating reply.** When a streamed reply writes the same tool call a
+  third time, Dream cuts the stream, runs the distinct calls and tells the model why.
+- **Sub-agents report what they produced.** A worker's expected output is stated before
+  it starts, its files are checked, and a worker that stops early returns its partial
+  evidence and the reason.
+- **The engine is stopped in order.** Dream asks MachX to stop, waits, and says so plainly
+  if it is still running; it never force-kills the engine.
+- **The prompt optimizer is off by default.** In Dream's terminal it can review each
+  message and offer a rewrite before sending; `/optimizer on` or Ctrl+O turns it on.
+- **No shell sandbox.** `run_bash` runs commands directly on your computer, in the
+  project folder, with your user account's normal access. Chat, Nested and the terminal
+  start in **Accept edits**, where edits inside the project go through and every shell
+  command asks first. **Auto runs every shell command without asking and without a
+  sandbox**; see [Automation and approvals](#automation-and-approvals). Browsing keeps its
+  own sandbox.
+
 ## What's new in v0.2.0
 
 - **Nested Dream.** A new sidebar tab shows one session as the main agent and its
@@ -88,7 +123,7 @@ terminal, streaming chat, browser, Studio previews, tools, and optional memory.
   the model is warned before it. Fresh start is now called **Handoff**.
 - **Understand.** The Understand panel is a sidebar switch that sits beside Chat
   or Nested Dream. The skill maps a project once, then re-analyses only the files
-  that changed, and runs its scripts in Dream's sandbox like any other skill.
+  that changed, and runs its scripts with the shell tool like any other skill.
 - **Security hardening.** The model's `browse` tool and the controlled browser
   reach only the public internet: loopback, private and link-local destinations
   are refused before any connection, and page content returns marked as untrusted
@@ -187,7 +222,7 @@ asks for four, from the next time Dream starts the engine.
 
 ## The workspace
 
-Dream uses midnight navy, violet controls, and an orange eclipse identity. Home
+Dream uses a warm charcoal palette with orange accents and the eclipse artwork. Home
 returns you to the selected workspace; Chat keeps the conversation readable;
 Studio holds artifacts and previews. The context inspector displays reported
 runtime facts and marks unavailable information explicitly.
@@ -212,12 +247,21 @@ sorting, filtering and keyboard browsing. On narrow windows, **Tools** holds the
 remaining workspace actions. [Computer controls](docs/public/computer-controls.md)
 and [teaching skills](docs/public/teaching-skills.md) describe their boundaries.
 
-## Automation with explicit boundaries
+## Automation and approvals
 
-Auto mode lets eligible work proceed under the active execution policy. Native
-Bash offers session-scoped **Always allow** choices for eligible exact commands,
-with separate sandbox and host grants. Consequential actions and invalid scopes
-remain gated; provider-owned executors may have their own approval controls.
+Shift+Tab cycles **Ask**, **Accept edits**, **Auto** and **Plan**; Chat, Nested and the
+terminal start in Accept edits. Dream has no shell sandbox: `run_bash` runs each command
+directly on your computer, in the project folder, with your user account's normal access.
+
+- **Ask** and **Accept edits** ask before every shell command. An ordinary command's
+  approval can be kept for that exact command for the rest of the session; deletes, pushes
+  and other consequential commands ask every time.
+- **Auto runs every shell command without asking**, deletes, `git push` and network
+  commands included. Use it only in a folder, and on a machine, where that is acceptable.
+  Dream's own file tools still ask before writing outside the project.
+- **Plan** runs no commands and makes no changes.
+
+The Claude, Codex, Grok and Gemini command-line tools keep their own approval rules.
 
 Active and wall-clock runtime limits are optional. Local HTTP generation has no
 read cutoff by default; an explicit `DREAM_LLM_READ_TIMEOUT_S` can impose one.
@@ -259,13 +303,13 @@ extension choices. Keep runtime backups private and inspect outgoing Git content
   their own installation and capability checks. Missing NVIDIA tooling does not
   establish that no GPU is available.
 
-The latest local CPU qualification of this tree (October 2, 2026, without the
-Blender files) passed **9,296 tests**, with **164 skipped** and **24 warnings**,
-in 25 minutes; three more tests passed only on a re-run (a Chromium crash at
-launch, a timing race under load, and a temp-folder check), and the three
-benchmark tests that name files outside this tree are skipped. These are scoped
-engineering checks, not a claim of universal model compatibility or benchmark
-superiority.
+The October 11, 2026 full CPU run recorded **13,724 passed**, **256 skipped**,
+and **3 failed** in 43 minutes 48 seconds. Those three cases passed on the final
+rerun after correcting scratch-directory permissions and loading the final
+provenance test expectations. The final integration gate passed **283 tests**.
+These are fixture and local browser checks; live provider and GPU model
+qualification were not performed. They do not establish universal model
+compatibility or benchmark superiority.
 [Development and validation](docs/public/development.md).
 
 ## Support

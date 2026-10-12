@@ -295,20 +295,15 @@ async def recall(args: dict[str, Any]) -> dict[str, Any]:
         scope, current, cross = read_scope(args)
     except ValueError as e:
         return err(f"recall: {e}.")
-    search = (
-        c.store.search_memories_with_alternatives
-        if alternatives else c.store.search_memories
-    )
-    search_args = (query, alternatives) if alternatives else (query,)
-    hits = await in_thread(
-        search,
-        *search_args,
-        kind=args.get("kind"),
-        limit=limit,
-        since=args.get("since"),
-        until=args.get("until"),
-        scope=scope,
-    )
+    try:
+        hits = await in_thread(
+            c.store.search_memories_with_alternatives,
+            query, alternatives,
+            kind=args.get("kind"), limit=limit,
+            since=args.get("since"), until=args.get("until"), scope=scope, active=True,
+        )
+    except (ValueError, sqlite3.Error, OSError) as e:
+        return err(f"recall failed: {e}")
     if not hits:
         return ok(f"No memories found for '{args['query']}'.")
     if hits[0].get("via_recency"):
@@ -321,6 +316,8 @@ async def recall(args: dict[str, Any]) -> dict[str, Any]:
     for h in hits:
         tag = " (linked)" if h.get("via_link") else ""
         matched = f" (matched alternative: {h['matched_query']!r})" if h.get("matched_query") else ""
+        if h.get('lifecycle_conflict'):
+            matched += " (lifecycle conflict; verify before relying on this fact)"
         owner = projects.tag(h.get("project") or "", current, cross=cross)
         lines.append(
             f"\n• [{h['kind']}] {h['title']}{tag}{matched} (slug: {h['slug']}, salience {h['salience']}){owner}"

@@ -70,11 +70,12 @@ async def test_roster_update_preserves_backend_and_delivers_current_roster(engin
     await e.configure_council(cfg)
     assert e.backend is old and e.model == 'original-model'
     assert e._tool_context.moe_config == cfg
-    await e.configure_council(MoeConfig('machx', ['gemini']))
+    # DREAM-246: Council's Gemini advisor is the Antigravity CLI ('gemini' is refused with that instruction)
+    await e.configure_council(MoeConfig('machx', ['antigravity']))
     async with asyncio.timeout(5):
         async for _ in e._ask('hello'):
             pass
-    assert 'gemini' in old.prompts[-1] and 'codex' not in old.prompts[-1]
+    assert 'antigravity' in old.prompts[-1] and 'codex' not in old.prompts[-1]
 
 
 async def test_handoff_preserves_dream_state_and_scope_order(engine, monkeypatch):

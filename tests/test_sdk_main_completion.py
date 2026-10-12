@@ -643,3 +643,48 @@ async def test_secondary_boundary_diagnostics_survive_long_primary_failure(engin
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+def test_main_sdk_uses_same_installed_claude_without_importing_native_settings(monkeypatch):
+    from dream.core import cli_discovery
+    monkeypatch.setattr(cli_discovery, 'find_cli', lambda name: '/fixture/current-claude' if name=='claude' else None)
+    monkeypatch.setattr(cli_discovery, 'node_child_env', lambda *args: {'PATH':'/fixture/node:/usr/bin'})
+    backend = backend_for(FiniteClient(terminal()))
+    options = backend._build_options()
+    assert options.cli_path == '/fixture/current-claude'
+    assert options.env['PATH'] == '/fixture/node:/usr/bin'
+    assert options.setting_sources == [] and options.strict_mcp_config is True
+    assert options.can_use_tool is not None and options.permission_mode == 'default'
+    assert options.env['CLAUDE_CODE_DISABLE_BACKGROUND_TASKS'] == '1'
+    assert options.mcp_servers and options.model == 'fixture-sdk'
+    monkeypatch.setattr(cli_discovery, 'find_cli', lambda name: None)
+    assert backend._build_options().cli_path is None
+
+
+@pytest.mark.parametrize('use_result', [False,True])
+async def test_sdk_api_error_preserves_bounded_provider_reason_instead_of_generic_400(use_result):
+    report='Claude Code 2.1.259 does not support this model; version 2.1.280 or newer is required.\n\x1b[31m'
+    receipt=terminal(is_error=True,reason='api_error')
+    if use_result:
+        receipt.result=report
+    else:
+        receipt.errors=[report,'x'*2000,'third','must not enter the diagnostic']
+    events=await drain(backend_for(FiniteClient(receipt)).ask('hello'))
+    result=next(e.data for e in events if e.kind=='result')
+    error=next(e.data for e in events if e.kind=='error')
+    assert result['is_error'] and result['api_error_status']==529
+    assert 'version 2.1.280 or newer' in error and 'Provider report' in error
+    assert '\x1b' not in error and '\n' not in error
+    assert 'must not enter' not in error
+    assert len(result['provider_errors'])<=3
+    assert all(len(detail)<=1000 for detail in result['provider_errors'])
+
+
+async def test_successful_sdk_result_does_not_turn_answer_into_error_report():
+    receipt=terminal()
+    receipt.result='answer'
+    receipt.errors=['provider metadata']
+    events=await drain(backend_for(FiniteClient(receipt)).ask('hello'))
+    result=next(e.data for e in events if e.kind=='result')
+    assert 'provider_errors' not in result
+    assert not any(e.kind=='error' for e in events)

@@ -515,6 +515,7 @@ async def test_a_loop_prompt_is_marked_where_it_is_logged_and_left_out(live):
         "ask": lambda self, prompt: _one_reply(prompt)})()
     [ev async for ev in live.ask("Plan the landing sequence")]
     runner = AutonomousLoop(live, evaluate=False, state_dir=live.workspace / "loop-state")
+    runner.workspace = runner._make_workspace("x")                  # a loop turn runs inside a journaled run
     await runner._drive("AUTONOMOUS MODE — before doing any work, define what DONE means.\n\nGoal:\n    x")
     users = [t for t in live.store.session_turns(live.session_id) if t["role"] == "user"]
     assert [t["tool_name"] for t in users] == [None, "dream:loop"]

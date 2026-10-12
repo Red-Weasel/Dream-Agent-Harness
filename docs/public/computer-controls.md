@@ -139,8 +139,8 @@ Without it, browser DOM evidence remains available and appearance stays unverifi
 Do not put screenshots or other private run evidence in a source release.
 
 Observations use the existing read permission class. Opening, acting and closing
-use ordinary mutating-tool permissions, including in Auto; a shell sandbox does
-not contain external websites or desktop applications. No blanket desktop grant
+use ordinary mutating-tool permissions, including in Auto; nothing contains what an
+action does in an external website or desktop application. No blanket desktop grant
 or permission bypass is added. An **always** answer for `computer_action` covers
 the target as observed, a browser target's page origin or a desktop window with
 its owner; the same target at another origin or another window asks again. Tool

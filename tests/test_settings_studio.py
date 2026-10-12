@@ -15,6 +15,7 @@ import pytest
 from playwright.async_api import async_playwright, expect
 from starlette.testclient import TestClient
 
+from chat_more import more
 from dream import config
 from dream.core import moe, settings
 from dream.core.profiles import read_settings, settings_path
@@ -328,7 +329,7 @@ async def test_settings_tab_renders_sources_edits_round_trip_and_errors_are_inli
     page, url, errors = settings_page
     await page.goto(url)
     await expect(page.locator("#stat")).to_have_text("Ready")
-    await page.locator("#dream-controls-open").click()
+    await more(page, "dream-controls-open")          # Chat shows no bars (DREAM-240/242): Controls is under More
     await page.get_by_role("tab", name="Settings", exact=True).click()
     panel = page.locator("#dc-settings")
     await expect(panel.get_by_role("heading", name="Output & reasoning")).to_be_visible()

@@ -355,12 +355,21 @@ async def test_app_persists_successful_engine_identity_and_keeps_selection_on_re
     e = http_engine(tmp_path)
     settings['models']['openai:C'] = {'vision': True}
     output = io.StringIO()
-    app = SimpleNamespace(engine=e, model='A', renderer=SimpleNamespace(console=Console(file=output, color_system=None)))
+    chooser = []
+
+    async def choose():  # a bare /model opens the terminal's model chooser; Escape gives None
+        chooser.append(line)
+        return None
+    app = SimpleNamespace(engine=e, model='A', renderer=SimpleNamespace(console=Console(file=output, color_system=None)),
+                          _choose_terminal_model=choose)
     await App._command(app, line)
     expected = 'B' if line == '/model B' else 'A'
     assert app.model == e.model == e.backend.model == expected
+    assert chooser == (['/model'] if line == '/model' else [])
     if line == '/model C':
         assert 'could not switch' in output.getvalue() and 'Council' in output.getvalue()
+    elif line == '/model':
+        assert output.getvalue() == ''  # cancelled: nothing switched and nothing said
     else:
         assert expected in output.getvalue()
 
