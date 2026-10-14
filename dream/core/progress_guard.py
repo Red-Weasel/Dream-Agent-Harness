@@ -1,7 +1,7 @@
 """Progress guard: notice a turn that only looks and never changes anything.
 
 2026-09-21 22:09-23:04: ~27 model calls, three diagnostic scripts, nine frame views,
-twenty file reads, no edit to the project, until the owner typed "Dont just inspect".
+twenty file reads, no edit to the project, until the owner typed [feedback].
 The guard counts consecutive read-only steps (read-only tools, and run_bash commands
 with no consequential effect) since the last write or edit; at every `after` of them it
 returns a short steering note the engine hands to the model. `after` = 0 disables it.

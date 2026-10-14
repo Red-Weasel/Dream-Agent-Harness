@@ -469,7 +469,7 @@ async def test_every_item_of_the_stack_can_be_seen_and_reached_from_the_keyboard
     Retry can be scrolled into view and hit; every Tab stop from the request's last choice to the composer is on screen,
     above the composer, as it takes the focus; and Enter acts on the one the owner sees.
 
-    2026-10-02 (the owner's "expand or collapse more"): a failed worker is one row of about 3rem, so "one item" is that
+    2026-10-02 (the owner's [feedback]): a failed worker is one row of about 3rem, so "one item" is that
     row; and a short window starts the failed workers folded, so the owner opens them first (Show failed or stopped)."""
     async with studio(width=w, height=h) as s:
         page = await open_nested(s)

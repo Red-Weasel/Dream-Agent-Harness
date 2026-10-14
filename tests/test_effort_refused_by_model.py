@@ -1,5 +1,5 @@
 """A model with no reasoning-effort levels: the effort is dropped, never left to fail every request (the owner,
-2026-10-11, of a session on 2026-10-10: "i changed the effort ... in the middle of a session and it broke it").
+2026-10-11, of a session on 2026-10-10: [feedback]).
 
 That session's log (var/logs/runtime/20261010-014348-4cd3.jsonl) shows /effort max, then xhigh, high and medium, each
 answered by the engine with HTTP 400 "reasoning_effort is not supported by this model's prompt backend", and every

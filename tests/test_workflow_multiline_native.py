@@ -5,7 +5,11 @@ import subprocess
 import tempfile
 import time
 
+import pytest
 
+
+@pytest.mark.skipif(not Path('/usr/bin/broadwayd').exists() or not Path('/usr/bin/python3').exists(),
+                    reason='needs broadwayd and the system Python with GTK')
 def test_native_vte_modified_enter_is_one_safe_sequence():
     root = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix='dream-multiline-display-') as runtime:

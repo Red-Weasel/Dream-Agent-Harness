@@ -479,7 +479,7 @@ class EndpointCoordinator:
                 if previous is not None:
                     # Every slot is fenced by a cut-off request (one slot: today's refusal). Say WHEN and WHY, and
                     # name the one action that clears it. Twice on 2026-09-20 the owner read the bare refusal as
-                    # "the harness hung" -- the turn had in fact been cut off mid-stream hours earlier and every
+                    # [feedback] -- the turn had in fact been cut off mid-stream hours earlier and every
                     # request since was refused in a quarter of a second.
                     # This module never probes the server. The HTTP backend clears such a record
                     # itself (DREAM-110, openai_compat._enter_lease) once the engine's /health says

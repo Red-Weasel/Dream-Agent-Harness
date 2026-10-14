@@ -1,6 +1,6 @@
 """DREAM-108: memory is project-scoped.
 
-Owner, 2026-09-24: [feedback] -- "memory should be repo specific and project specific".
+Owner, 2026-09-24: [feedback].
 
 Two workspaces A and B share one database and one memory folder, the way two Dream
 sessions in two repos do. Everything written in A is invisible in B (and back), user-wide

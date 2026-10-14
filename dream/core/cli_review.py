@@ -1,6 +1,6 @@
 """Subscription-CLI consultations, run like Dream's main-model CLI path.
 
-DREAM-136 (owner, 2026-09-25: "exactly like running here in vs code"): Council
+DREAM-136 (owner, 2026-09-25: [feedback]): Council
 advisors, CLI reviewers and the prompt optimizer launch the installed CLI the way
 ``backends/cli_agent.py`` does for the main model. The owner's own environment,
 CLI home, sign-in and configuration (MCP servers, skills, hooks, rules) are used

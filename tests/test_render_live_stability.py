@@ -393,7 +393,7 @@ def test_assistant_colors_preserve_literal_content_across_chunks(terminal, monke
     r.live_end()
     screen = terminal.read()
     # a bullet opens the message and every line sits two cells in; the markdown markers are gone (the owner,
-    # 2026-10-09: "fix the markdown too"), while text that only looks like Rich markup stays as written
+    # 2026-10-09: [feedback]), while text that only looks like Rich markup stays as written
     assert ('● Findings\n  • Keep values[0] unchanged.\n'
             '  1. Preserve [red]literal[/red] and print("[ok]").\n  Next step\n  Unstyled body.') in screen
     lines = {line.plain: line for line in committed}

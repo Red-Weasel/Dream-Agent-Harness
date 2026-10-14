@@ -1,5 +1,5 @@
 """The prompt optimizer's buttons inside a Dream terminal on the DeepSleep page are clickable (the owner, 2026-10-11:
-"add the setting and clickable buttons in the terminal"). A real Dream terminal on a controlled model server, no GPU:
+[feedback]). A real Dream terminal on a controlled model server, no GPU:
 [ Skip next ] and [ Optimizer ] on the prompt box's line flip their switches when clicked, idle and while a turn
 works, and the rewrite's [S] Send sends it."""
 import asyncio

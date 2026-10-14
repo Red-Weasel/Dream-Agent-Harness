@@ -363,8 +363,8 @@
   window.addEventListener('dream:event',e=>{try{onEvent(e.detail.m,!!e.detail.replay);}catch(err){console.error(err);}});
 
   // --- the page ------------------------------------------------------------------------------------------------------
-  // The page's header and work bar are not shown in this view (nested.css, DREAM-239: the owner's "wasted space above the
-  // work area"); the orchestrator column's More menu clicks their controls, so nothing they did is lost.
+  // The page's header and work bar are not shown in this view (nested.css, DREAM-239: the owner's [feedback]);
+  // the orchestrator column's More menu clicks their controls, so nothing they did is lost.
   const MENU=[['New chat','studio-new'],['Controls','dream-controls-open'],['Council','dream-council-open'],['Create','dream-create-open'],
     ['Context','dream-inspect-toggle'],['Design','studio-design'],['Checkpoints','studio-checkpoints'],['Metrics','railtoggle']];
   const page=el('section',null,{id:'dream-nested-page',class:'nd','aria-label':'Nested Dream'});page.hidden=true;

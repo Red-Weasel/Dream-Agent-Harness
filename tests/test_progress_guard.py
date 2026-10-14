@@ -1,5 +1,5 @@
 """Progress guard: 55 minutes of reads and no product edit on 2026-09-21 until the
-owner typed 'Dont just inspect'. The harness says it first."""
+owner typed [feedback]. The harness says it first."""
 from __future__ import annotations
 import pytest
 from dream.core.progress_guard import ProgressGuard

@@ -2,7 +2,7 @@
 
 Until DREAM-108 nothing in memory said which project it belonged to, so a session in one
 repo recalled, listed and was woken with another repo's memories and tasks (the owner's
-"terrain and sea water" request planned around another project's sea task). Every row
+[feedback] request planned around another project's sea task). Every row
 now names a project; a row from before carries '' until this migration files it.
 
 It runs at startup, before the session opens, and only when legacy items exist:

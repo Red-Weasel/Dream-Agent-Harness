@@ -363,7 +363,7 @@ async def test_empty_states_meet_aa(studio, provider, want):
 # --- (d) the states no event renders yet, from the stylesheet's tokens --------------------------------------------
 
 def test_pip_tokens_for_every_state_meet_aa_including_the_ones_no_event_sets_yet():
-    # The view paints its own palette now (the v2 mockup's, after the owner's "wrong colors" of 2026-09-30), not Dream's
+    # The view paints its own palette now (the v2 mockup's, after the owner's [feedback] of 2026-09-30), not Dream's
     # theme tokens: every pair is read from nested.css's own token block.
     css = (STATIC / 'nested.css').read_text()
     block = re.search(r'#dream-nested-page\{(.*?)\n\}', css, re.S).group(1)

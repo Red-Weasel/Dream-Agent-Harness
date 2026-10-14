@@ -7,6 +7,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import select
 import struct
 import subprocess
@@ -18,6 +19,9 @@ from pathlib import Path
 import pty
 
 DRIVER = Path(__file__).with_name("pty_driver.py")
+# The measured TTFT is the scripted 0.8 s plus the harness's own turn setup: 0.03 s on the owner's machine when
+# idle, more under the full suite's load. DREAM_TEST_TIME_SCALE (the CI workflow sets it) scales the allowance.
+_TTFT_ALLOWANCE = 0.2 * float(os.environ.get("DREAM_TEST_TIME_SCALE", "1"))
 
 
 def _drain(master: int, buf: bytearray, timeout: float, state: dict) -> None:
@@ -86,7 +90,8 @@ def test_monitor_pane_live_in_real_terminal(tmp_path):
         # "⚡ monitor" pane header. The working frame draws ⚡ as a readable escape, as it does every character
         # terminals and Rich may measure differently (render._frame_char).
         assert b"\\u26a1 monitor" in buf
-        assert b"ttft 0.8" in buf  # the scripted 0.8s first token, measured live
+        shown = re.search(rb"ttft (\d+\.\d+)s", buf)  # the scripted 0.8s first token, measured live
+        assert shown and 0.8 <= float(shown[1]) < 0.8 + _TTFT_ALLOWANCE, shown and shown[0]
         # Prompt-processing time + rate land with the round's stats event and
         # paint in the idle toolbar (which needs the CPR replies above).
         assert _wait_for(master, buf, b"pp 2.00s @2000 t/s", 12, state), \

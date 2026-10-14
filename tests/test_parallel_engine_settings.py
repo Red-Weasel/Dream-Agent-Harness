@@ -1,5 +1,5 @@
-"""DREAM-151's global engine lanes, retired by the owner's settings plan of 2026-10-01 ("just remove 2 since its a
-duplicate"): a model's parallel and sub-agent context are its own launch settings, on the load screen, saved per model.
+"""DREAM-151's global engine lanes, retired by the owner's settings plan of 2026-10-01 ([feedback]): a model's
+parallel and sub-agent context are its own launch settings, on the load screen, saved per model.
 
 `engine.parallel` / `engine.slot_ctx` are no longer settings: `dream settings`, /settings and the Settings tab neither
 show nor change them, and a refused key writes nothing. A global file that still holds an engine section -- any shape

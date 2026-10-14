@@ -1,5 +1,5 @@
 """The prompt box while a turn works, and the prompt optimizer at Dream's terminal prompt (the owner, 2026-10-11:
-"the prompt optimizer and the ability to send messages during a turn, exactly like in this session").
+[feedback]).
 
 While a turn works the prompt box stays at the bottom between its two lines; Enter sends what was typed into the
 running turn when it can take it (the model reads it after its current step), else it waits and goes as the next
