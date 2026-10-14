@@ -9,7 +9,7 @@ Result: `.ua/domain-graph.json`, then a short report. Do the steps in order with
 
 Helpers:
 - **Glue** is `python3 .ua/tmp/ua_glue.py <command>` through run_bash: the `understand` skill's helper. It prints what you need and checks what you write.
-- The plugin's one script runs with run_bash from the workspace: `python3 "$UA_SKILLS/understand-domain/extract-domain-context.py" "$PWD"`. `$UA_SKILLS` is the plugin's skills folder, readable in the sandbox; never cd, ls or edit it.
+- The plugin's one script runs with run_bash from the workspace: `python3 "$UA_SKILLS/understand-domain/extract-domain-context.py" "$PWD"`. `$UA_SKILLS` is the plugin's skills folder, readable by run_bash; never cd, ls or edit it.
 
 ## 1. Prepare
 - `skill_open(name="understand-domain")` prints `Directory: <dir>`. Copy the glue from the sibling `understand` skill, even when `.ua/tmp/ua_glue.py` exists (it may be older): `copy_files(files=[{"src": "<dir>/../understand/glue.py", "dest": ".ua/tmp/ua_glue.py"}])`. Without copy_files, run_bash: `mkdir -p .ua/tmp && cp "$DREAM_SKILLS/understand/glue.py" .ua/tmp/ua_glue.py` (never from skill_file: it shortens long files).

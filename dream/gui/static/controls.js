@@ -405,16 +405,16 @@
   byId('dc-profile-form').addEventListener('input', () => { profileEdited = true; });
   byId('dc-profile-form').onsubmit = event => {
     event.preventDefault();
-    const overrides = {...(runtime.settings?.overrides || {})};
+    // Only this form's fields: the server merges them into the file as it is now, so a limit saved meanwhile in the
+    // Settings tab is kept (this form's copy of the saved limits can be older than the file).
+    const overrides = {}, replace = [...overrideKeys, 'vision'];
     for(const key of overrideKeys) {
-      delete overrides[key];
       const value = byId('dc-' + key).value.trim();
       if(value !== '') overrides[key] = Number(value);
     }
-    delete overrides.vision;
     if(byId('dc-vision').value !== 'auto') overrides.vision = byId('dc-vision').value === 'true';
     const profile = byId('dc-profile').value;
-    change({action:'profile',profile,overrides}, 'Saving profile', async () => {
+    change({action:'profile',profile,overrides,replace}, 'Saving profile', async () => {
       profileSaved = true; profileEdited = false;
       byId('dc-profile-note').textContent = `Saved for new sessions: ${profile}.`;
       feedback(`Saved ${profile} for new sessions. This session remains ${runtime.profile.name}.`);
@@ -764,7 +764,7 @@
     const edit = row.edit, describe = `aria-describedby="${id}-help"`;
     if(!edit) return `<p class="dc-setting-value"><span class="dc-value">${esc(row.display)}</span></p><p class="dc-help dc-locked" id="${id}-locked">${esc(row.locked || 'Read-only here.')}</p>`;
     if(edit.kind === 'switch') return `<div class="dc-row"><button type="button" class="dc-switch" role="switch" aria-checked="${row.value === true}" aria-label="${esc(row.label)}" ${describe} data-setting-switch><i aria-hidden="true"></i><span>${row.value === true ? 'On' : 'Off'}</span></button>${resettable(row) ? '<button type="button" data-setting-reset>Use default</button>' : ''}</div>`;
-    if(edit.kind === 'number') return `<form class="dc-setting-edit" novalidate data-setting-form><input type="number" inputmode="numeric" step="1" min="${esc(edit.min)}" max="${esc(edit.max)}" value="${esc(edit.value ?? '')}" aria-label="${esc(row.label)}" ${describe} data-setting-input><button type="submit" class="dc-primary">Save</button>${resettable(row) ? '<button type="button" data-setting-reset>Use default</button>' : ''}</form>`;
+    if(edit.kind === 'number') return `<form class="dc-setting-edit" novalidate data-setting-form><input type="number" inputmode="${edit.step === 'any' ? 'decimal' : 'numeric'}" step="${esc(edit.step ?? 1)}" min="${esc(edit.min)}" max="${esc(edit.max)}" placeholder="${esc(edit.placeholder)}" value="${esc(edit.value ?? '')}" aria-label="${esc(row.label)}" ${describe} data-setting-input><button type="submit" class="dc-primary">Save</button>${resettable(row) ? '<button type="button" data-setting-reset>Use default</button>' : ''}</form>`;
     if(edit.kind === 'choice') return `<form class="dc-setting-edit" novalidate data-setting-form><select aria-label="${esc(row.label)}" ${describe} data-setting-input>${edit.choices.map(c => `<option value="${esc(c)}"${c === edit.value ? ' selected' : ''}>${esc((edit.labels || {})[c] || c)}</option>`).join('')}</select><button type="submit" class="dc-primary">Save</button>${resettable(row) ? '<button type="button" data-setting-reset>Use default</button>' : ''}${edit.texts ? `<p class="dc-help dc-choice-text" data-choice-text style="white-space:pre-line;flex-basis:100%">${esc(edit.texts[edit.value] || '')}</p>` : ''}</form>`;
     if(edit.kind === 'council') {
       // A Council advisor (DREAM-145): the model is free text with the Council panel's suggestions; the effort is one of the listed ones or the provider's default.

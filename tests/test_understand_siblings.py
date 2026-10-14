@@ -2,14 +2,14 @@
 
 Owner, 2026-09-23, after the Understand map run: [feedback]. The map (DREAM-102's curated `understand`) uses none of the plugin's
 eight siblings; each is its own command. Two cannot work in Dream as written: `understand-dashboard` resolves the plugin
-through shell paths the sandbox cannot see and launches a web server, although Dream already shows the map in its
+through shell paths the sandbox of the time could not see and launches a web server, although Dream already shows the map in its
 Understand dock (sidebar "Understand ⌬", DREAM-087); `understand-domain` resolves PLUGIN_ROOT through shell candidates,
 runs its script by a relative path and hands the analysis to a subagent. Dream ships curated replacements under those
 two bare names; the plugin's copies stay reachable as `understand-anything:<name>`. The other six stay upstream and are
 proved here.
 
 Pinned: (1) the two packages and their texts; (2) a dry run of `understand-domain` through `policy.decide` and the real
-run_bash sandbox (DREAM-105) -- a project without a map (the plugin's extract-domain-context.py), a project with one (derived),
+run_bash (DREAM-105; on the host, no sandbox since 2026-10-11) -- a project without a map (the plugin's extract-domain-context.py), a project with one (derived),
 and broken domain.json files named by the glue and never saved; (3) name precedence and the phrase table; (4) the six
 upstream siblings: explicit selection, whole at a 32k window, no plugin paths in the read-only four, and the
 knowledge/figma scripts run with run_bash as their skill text writes them (parse-knowledge-base.py runs for real).
@@ -181,10 +181,11 @@ def _session(workspace: Path):
 
 def _sh(command: str, workspace: Path):
     """One run_bash command exactly as the model's run_bash runs it (DREAM-105): the policy decides first in auto mode
-    (a refusal raises), then the real sandbox runs it with the skills' script folders mounted read-only."""
+    (a refusal raises), then the host runs it (no sandbox since 2026-10-11) with the skills' script folders in its
+    environment."""
     from dream.core.execution import ExecutionContext, ExecutionScope, execute_bash
     result, contained = asyncio.run(execute_bash(command, ExecutionContext(ExecutionScope(Path(workspace)), mode="auto")))
-    assert contained
+    assert not contained
     return result
 
 
@@ -304,17 +305,16 @@ def _fixture_repo(root: Path) -> str:
 
 needs_domain_script = pytest.mark.skipif(
     not (UA_SKILLS / "understand-domain" / "extract-domain-context.py").is_file()
-    or shutil.which("python3") is None or shutil.which("bwrap") is None,
-    reason="needs the Understand-Anything clone (understand-domain/extract-domain-context.py), python3 and bubblewrap")
+    or shutil.which("python3") is None,
+    reason="needs the Understand-Anything clone (understand-domain/extract-domain-context.py) and python3")
 
 
 @pytest.fixture(scope="module")
 def scanned(tmp_path_factory):
-    """Steps 1-4 on a project with no map: the glue copied in, the plugin's scan through run_bash's real sandbox, the
+    """Steps 1-4 on a project with no map: the glue copied in, the plugin's scan through the real run_bash, the
     listing, the model's domain.json and project.json (hand-written), the glue's build."""
-    if not (UA_SKILLS / "understand-domain" / "extract-domain-context.py").is_file() or (
-            shutil.which("python3") is None or shutil.which("bwrap") is None):
-        pytest.skip("needs the Understand-Anything clone, python3 and bubblewrap")
+    if not (UA_SKILLS / "understand-domain" / "extract-domain-context.py").is_file() or shutil.which("python3") is None:
+        pytest.skip("needs the Understand-Anything clone and python3")
     root = tmp_path_factory.mktemp("shopline")
     head = _fixture_repo(root)
     copied = _copy_glue(root)                                                          # step 1
@@ -330,7 +330,7 @@ def scanned(tmp_path_factory):
 
 
 @needs_domain_script
-def test_the_scan_runs_in_the_sandbox_and_the_listing_names_the_entry_points(scanned):
+def test_the_scan_runs_through_run_bash_and_the_listing_names_the_entry_points(scanned):
     root = scanned["root"]
     ctx = json.loads((root / ".ua/intermediate/domain-context.json").read_text())
     assert ctx["projectRoot"] == str(root) and ctx["fileCount"] >= 7
@@ -927,16 +927,15 @@ def test_the_read_only_four_name_no_plugin_path(name):
 
 def test_knowledge_and_figma_skills_tell_the_model_run_bash_can_run_their_scripts(tmp_path):
     """DREAM-105: the upstream knowledge and figma skills write `python3 "<SKILL_DIR>/parse-knowledge-base.py" ...`. The
-    plugin's clone is readable in run_bash's sandbox, so skill_open's Directory line tells the model to run them with
-    run_bash as written -- no runner tool. (figma-scan.mjs still needs FIGMA_TOKEN and api.figma.com, which the sandbox
-    does not provide.)"""
+    plugin's clone is readable by run_bash, so skill_open's Directory line tells the model to run them with run_bash as
+    written -- no runner tool. (figma-scan.mjs still needs FIGMA_TOKEN and api.figma.com.)"""
     if not (UA_SKILLS / "understand-knowledge" / "SKILL.md").is_file():
         pytest.skip("the Understand-Anything clone is not installed")
     found, _ = loader.discover([UA_SKILLS])
     for name in ("understand-knowledge", "understand-figma"):
         skill = next(s for s in found if s.name == name)
         line = installed_skill_tools.directory_line(skill, tmp_path)
-        assert "readable in run_bash's sandbox" in line and "ua_run" not in line, (name, line)
+        assert "readable by run_bash" in line and "sandbox" not in line and "ua_run" not in line, (name, line)
 
 
 WIKI = {
@@ -951,10 +950,9 @@ WIKI = {
 }
 
 
-def test_parse_knowledge_base_runs_for_real_in_the_sandbox(tmp_path):
-    if not (UA_SKILLS / "understand-knowledge" / "parse-knowledge-base.py").is_file() or (
-            shutil.which("python3") is None or shutil.which("bwrap") is None):
-        pytest.skip("needs the Understand-Anything clone, python3 and bubblewrap")
+def test_parse_knowledge_base_runs_for_real_through_run_bash(tmp_path):
+    if not (UA_SKILLS / "understand-knowledge" / "parse-knowledge-base.py").is_file() or shutil.which("python3") is None:
+        pytest.skip("needs the Understand-Anything clone and python3")
     ws = tmp_path / "wiki"
     for rel, text in WIKI.items():
         (ws / rel).parent.mkdir(parents=True, exist_ok=True)

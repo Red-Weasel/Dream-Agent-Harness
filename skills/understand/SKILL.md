@@ -8,7 +8,7 @@ description: "Use when the user wants this repository or project mapped into a k
 Result: `.ua/knowledge-graph.json`, `.ua/domain-graph.json`, `.ua/diff-overlay.json` and `.ua/meta.json`, then a one-paragraph report. Do the steps in order without stopping to ask: the user wants the finished map. Announce each step as `[step N/9] <name>`.
 
 Helpers:
-- **Plugin scripts** run with run_bash from the workspace, as `node "$UA_SKILLS/understand/<script>" ...` (`python3` for .py). `$UA_SKILLS` is the plugin's skills folder, readable in the sandbox; never cd, ls or edit it.
+- **Plugin scripts** run with run_bash from the workspace, as `node "$UA_SKILLS/understand/<script>" ...` (`python3` for .py). `$UA_SKILLS` is the plugin's skills folder, readable by run_bash; never cd, ls or edit it.
 - **Glue** is `python3 .ua/tmp/ua_glue.py <command>` through run_bash. It prepares the scripts' inputs, assembles the four files and checks them (never write those by hand); do what its `next:` lines say.
 
 ## 1. Status

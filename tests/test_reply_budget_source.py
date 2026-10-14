@@ -162,7 +162,7 @@ def test_the_settings_tab_without_a_launch_max_tokens_is_as_before():
     row = rows["overrides.output_tokens"]
     assert row["display"] == "60,000" and row["origin"] == "global"
     assert row["source_text"] == "Saved in runtime-settings.json"
-    assert row["locked"] == "Change it in Runtime → Next session."
+    assert row["locked"] is None and row["edit"]["kind"] == "number"   # edited in the tab since 2026-10-13
     ceiling = rows["output.ceiling"]
     assert ceiling["value"] == SAVED and ceiling["source_text"] == "Saved in runtime-settings.json (profile output_tokens)"
 

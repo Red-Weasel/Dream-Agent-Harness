@@ -107,15 +107,16 @@ async def _run_harness(
     try:
         await app.run()
     finally:
-        if provider != "machx":
-            return
-        # Dream owns the MachX lifecycle: leaving home turns the lights off.
-        if keep_hot:
-            r.system("MachX left hot (--keep-hot) — model stays loaded in GPU memory")
-        else:
-            r.system("unloading MachX — freeing GPU memory…")
-            stopped = await asyncio.to_thread(machx.stop)
-            r.system(_stop_message(stopped))
+        # Not a `return` here: inside `finally` it discards the exception in flight, so a crash ended `dream` as a
+        # normal close (2026-10-12).
+        if provider == "machx":
+            # Dream owns the MachX lifecycle: leaving home turns the lights off.
+            if keep_hot:
+                r.system("MachX left hot (--keep-hot) — model stays loaded in GPU memory")
+            else:
+                r.system("unloading MachX — freeing GPU memory…")
+                stopped = await asyncio.to_thread(machx.stop)
+                r.system(_stop_message(stopped))
 
 
 def _stop_message(stopped: bool) -> str:

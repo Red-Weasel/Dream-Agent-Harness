@@ -125,11 +125,14 @@ class _GitTimeout(Exception):
 
 
 def _git(project: Path, *args: str) -> str | None:
+    from ..core.git_safety import untrusted_read_env
     try:
-        run = subprocess.run(["git", *args], cwd=project, capture_output=True, text=True, timeout=GIT_TIMEOUT)
+        # The dashboard polls this: never a command the project's own git config names (DREAM-290).
+        env = untrusted_read_env(project, GIT_TIMEOUT)
+        run = subprocess.run(["git", *args], cwd=project, capture_output=True, text=True, timeout=GIT_TIMEOUT, env=env)
     except subprocess.TimeoutExpired:
         raise _GitTimeout()
-    except OSError:
+    except (OSError, subprocess.CalledProcessError):
         return None
     return run.stdout if run.returncode == 0 else None
 

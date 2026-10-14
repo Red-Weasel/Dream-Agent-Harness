@@ -340,6 +340,25 @@ def save_settings(profile: str, overrides: dict | None = None, path: Path | None
                                    "overrides": values if values is not None else saved.get("overrides", {})}, path)
 
 
+def update_profile_fields(profile: str, overrides: dict, replace: object, path: Path | None = None) -> None:
+    """Save the profile and the override fields `replace` names (Studio's Runtime form): each named field takes its
+    value from `overrides`, or is removed when `overrides` has none; every other saved override is kept as the file
+    holds it at the write (the Settings tab may have saved one since the form was filled)."""
+    _profile_name(profile)
+    if not isinstance(replace, list) or not all(isinstance(key, str) and key in _OVERRIDE_FIELDS for key in replace):
+        raise ValueError("replace must list profile override fields")
+    values = _validate_overrides(overrides)
+    if set(values) - set(replace):
+        raise ValueError("overrides may only set the fields replace names")
+
+    def change(saved):
+        current = dict(saved.get("overrides") or {})
+        for key in replace:
+            current.pop(key, None)
+        return {**saved, "version": 1, "profile": profile, "overrides": {**current, **values}}
+    update_settings(change, path)
+
+
 def update_settings(change, path: Path | None = None) -> dict:
     """Read-modify-write the settings file under its lock, atomically; `change(saved)` returns the new
     object. Every section it does not touch -- including ones this version does not know -- is kept."""

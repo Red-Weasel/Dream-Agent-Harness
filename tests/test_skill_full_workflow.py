@@ -1,5 +1,5 @@
 """DREAM-101: a selected skill drives the turn -- the whole workflow when the window allows -- and skill_open tells the
-truth about a directory the run_bash sandbox cannot reach.
+truth about a directory outside the workspace (no claim of a run_bash sandbox, which there is none of since 2026-10-11).
 
 Why: live MiMo sessions running the Understand map got a 2,200-char summary of a 36,100-char skill plus "call skill_open
 for the rest", then a header naming a directory `ls` could not see, and spent turns re-deriving their environment.
@@ -64,13 +64,14 @@ def test_a_second_skill_keeps_the_short_room(skills):
     assert len(tiny) <= 2200 + 20 and "[Workflow shortened." in tiny  # the second is the summary
 
 
-def test_the_directory_line_is_honest_about_the_sandbox(skills, tmp_path):
+def test_the_directory_line_claims_no_sandbox(skills, tmp_path):
     big = next(s for s in skills if s.name == "bigmap")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     line = directory_line(big, workspace)
     assert str(big.root.resolve()) in line
-    assert "run_bash cannot see it" in line and 'skill_file(name="bigmap", path=' in line and "Do not try to cd or ls" in line
+    assert "outside the workspace and not a script folder" in line and 'skill_file(name="bigmap", path=' in line
+    assert "Do not try to cd or ls" in line and "sandbox" not in line and "cannot see" not in line   # no shell sandbox
     assert "ua_run" not in line                                    # not an understand-anything skill
     # inside the workspace: the plain line, as before
     assert directory_line(big, tmp_path) == f"Directory: {big.root.resolve()}"
@@ -79,18 +80,18 @@ def test_the_directory_line_is_honest_about_the_sandbox(skills, tmp_path):
 
 
 def test_a_skill_whose_scripts_run_bash_can_reach_says_so(tmp_path, monkeypatch):
-    """DREAM-105: a plugin skill inside a script root (mounted read-only in run_bash's sandbox) runs its scripts with
-    run_bash as written -- no runner tool; a skill anywhere else is still invisible to the shell."""
+    """DREAM-105: a plugin skill inside a script root runs its scripts with run_bash as written -- no runner tool; a skill
+    anywhere else is read through skill_file. Since 2026-10-11 run_bash has no sandbox, and neither line claims one."""
     from dream.core import skill_runtime
     make_skill(tmp_path / "understand-anything-plugin" / "skills", "understand", "Phase 0: scan.")
     found, _ = loader.discover([tmp_path / "understand-anything-plugin" / "skills"])
     monkeypatch.setattr(skill_runtime, "script_roots", lambda: (tmp_path.resolve(),))
     line = directory_line(found[0], tmp_path / "elsewhere")
-    assert "readable in run_bash's sandbox" in line and "<SKILL_DIR>" in line and "cannot see" not in line
+    assert "readable by run_bash" in line and "<SKILL_DIR>" in line and "sandbox" not in line
     assert "ua_run" not in line
     monkeypatch.setattr(skill_runtime, "script_roots", lambda: ())
     line = directory_line(found[0], tmp_path / "elsewhere")
-    assert "run_bash cannot see it" in line and "ua_run" not in line
+    assert "not a script folder" in line and "sandbox" not in line and "ua_run" not in line
 
 
 def test_the_bundled_file_hint_uses_the_tools_real_parameter(skills, tmp_path):

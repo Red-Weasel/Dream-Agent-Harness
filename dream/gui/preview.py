@@ -144,6 +144,7 @@ class Preview:
         self._browser: Any = None
         self._context: Any = None
         self._page: Any = None
+        self._boundary: Any = None   # the context's network boundary (computer._Boundary), as long as the context
         self._lock = asyncio.Lock()
         # One page, one operation at a time: two loads interleaving would clear
         # each other's logs; an eval racing a load reads a half-built page.
@@ -184,6 +185,7 @@ class Preview:
             if self._page is not None:
                 return
             from playwright.async_api import async_playwright
+            from ..computer import _LAUNCH_ARGS, _Boundary
 
             self._pw = await async_playwright().start()
             # --allow-file-access-from-files: so that a page's fetch() or XHR of a local
@@ -197,18 +199,26 @@ class Preview:
                 self._browser = await self._pw.chromium.launch(
                     headless=True, ignore_default_args=["--disable-gpu"],
                     args=["--allow-file-access-from-files", "--enable-gpu", "--ignore-gpu-blocklist",
-                          "--use-gl=angle", "--use-angle=gl-egl", f"--render-node-override={node}"])
+                          "--use-gl=angle", "--use-angle=gl-egl", f"--render-node-override={node}", *_LAUNCH_ARGS])
                 self.renderer = await self._probe_renderer()
                 if self.renderer == "none" or "swiftshader" in self.renderer.lower():
                     await self._browser.close()      # the GPU path did not come up
                     node = None
             if not node:
                 self._browser = await self._pw.chromium.launch(
-                    headless=True, args=["--allow-file-access-from-files"])
+                    headless=True, args=["--allow-file-access-from-files", *_LAUNCH_ARGS])
                 self.renderer = await self._probe_renderer()
             self.gpu = bool(node)
-            self._context = await self._browser.new_context(viewport=VIEWPORT)
+            # DREAM-290: the context sits behind Dream's network boundary, the controlled browser's proxy
+            # (computer.py, with its launch flags: no direct name resolution, no WebRTC UDP, no QUIC), so every
+            # connection -- a Worker's WebSocket included, which neither route below sees -- is judged by the public
+            # rule there. The routes keep the frame's own, narrower line: https/wss only, nothing local by URL.
+            self._boundary = await _Boundary().start()
+            self._context = await self._browser.new_context(viewport=VIEWPORT,
+                                                            proxy={"server": self._boundary.proxy})
             await self._context.route("**/*", self._route)
+            # context.route never sees a WebSocket: the same line for the page's own (DREAM-290).
+            await self._context.route_web_socket("**/*", self._route_web_socket)
             # A popup is a second page nothing will ever look at. Close it.
             self._context.on("page", self._on_popup)
             self._page = await self._new_page()
@@ -296,6 +306,22 @@ class Preview:
             # is nothing to deliver it to; a traceback here is noise.
             pass
 
+    async def _route_web_socket(self, ws: Any) -> None:
+        """A page's WebSocket: wss:// to a public host, by the same rule as https://; anything else, a ws:// to this
+        computer included, is refused and logged (2026-10-12 security review)."""
+        url = ws.url
+        try:
+            if url.startswith("wss://") and await _allowed("https://" + url[len("wss://"):]):
+                ws.connect_to_server()
+                return
+            if len(self.blocked) < MAX_LOG_LINES:
+                self.blocked.append(url)
+            self._log(f"blocked: {url} (the preview reaches the public internet over https and wss only, like the "
+                      "Studio panel)")
+            await ws.close()
+        except Exception:
+            pass   # the page or browser went away with the socket still opening: nothing to deliver it to
+
     async def _route_file(self, route: Any, url: str) -> None:
         """A local file: the document itself is served as the pane gets it (the prepared
         body at the file's URL); a navigation elsewhere goes through as before (the load
@@ -319,8 +345,8 @@ class Preview:
 
     async def _reset(self) -> None:
         async with self._lock:
-            pw, browser, context = self._pw, self._browser, self._context
-            self._pw = self._browser = self._context = self._page = None
+            pw, browser, context, boundary = self._pw, self._browser, self._context, self._boundary
+            self._pw = self._browser = self._context = self._page = self._boundary = None
             self.loaded = None
         # Innermost first, and a yield between each, so handlers still in flight
         # (a routed request, a console line) finish against a live object instead
@@ -333,6 +359,8 @@ class Preview:
                 except Exception:
                     pass
                 await asyncio.sleep(0)
+        if boundary is not None:
+            boundary.close()
 
     async def _reap_loop(self) -> None:
         idle = config.BROWSER_IDLE_SHUTDOWN_S

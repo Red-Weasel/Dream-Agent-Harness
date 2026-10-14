@@ -71,9 +71,11 @@ class TurnModel(BaseHTTPRequestHandler):
         elif users and REWRITTEN in users[-1]:
             self.server.main_seen.set()
             time.sleep(6)   # the turn works; the owner types meanwhile
-            name = next(n for n in tools if n.endswith('read_file'))
+            name, args = next((n for n in tools if n.endswith('read_file')), None), {'path': 'notes.txt'}
+            if name is None:   # description discovery (the default): read_file is run through the tool_call wrapper
+                name, args = 'tool_call', {'name': 'read_file', 'arguments': args}
             call = {'index': 0, 'id': 'call_notes', 'type': 'function',
-                    'function': {'name': name, 'arguments': json.dumps({'path': 'notes.txt'})}}
+                    'function': {'name': name, 'arguments': json.dumps(args)}}
             text = None
         else:
             text = 'Okay.'

@@ -162,9 +162,17 @@ async def search(
     Raises ``SearxngUnavailable`` if the instance can't be reached.
     """
     if not await ensure_up():
+        # The model reads this too (web_search, image_search), so it says plainly whether a retry can help
+        # (2026-10-12: inside task containers there is no SearXNG to start); the user keeps the diagnosis.
+        if config.SEARXNG_AUTOSTART and config.SEARXNG_DIR.exists():
+            retry = ("It may still be starting: retry the search once in a minute at most; if that fails, "
+                     "continue without web results and say what you could not look up.")
+        else:
+            retry = ("Retrying the search will not help; continue without web results and say what you could "
+                     "not look up.")
         raise SearxngUnavailable(
-            f"SearXNG is not reachable at {config.SEARXNG_URL} and could not be "
-            f"auto-started. Start it manually, e.g.:\n"
+            f"Web search is unavailable: SearXNG is not reachable at {config.SEARXNG_URL} and could not be "
+            f"auto-started. {retry} For the user, to start it:\n"
             f"  cd {config.SEARXNG_DIR} && python -m searx.webapp"
         )
 

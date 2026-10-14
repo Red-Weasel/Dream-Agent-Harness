@@ -8,10 +8,11 @@ retune its own home without editing code.
 from __future__ import annotations
 
 import glob
+import json
 import os
 from pathlib import Path
 
-from .environment import read_numeric
+from .environment import NumericEnvironmentError, read_numeric
 
 # --- Filesystem layout -------------------------------------------------------
 
@@ -319,3 +320,61 @@ def ensure_dirs() -> None:
         CUSTOM_TOOLS_DIR,
     ):
         d.mkdir(parents=True, exist_ok=True)
+
+
+# Owner 2026-10-13: the numbers above must be settable from the Settings tab, not only by environment variables.
+# A value saved there lives in runtime-settings.json's "numeric" section ({"frequency_penalty": "0", ...}) and is
+# applied once when Dream starts (dream.__main__, before the modules that read these are imported); a DREAM_*
+# variable that is set still wins. A saved value that does not parse is skipped here: `dream settings check` and the
+# Settings tab name it. The config attribute -> its variable (DREAM_MAX_TOKENS is output.max_tokens, saved apart):
+NUMERIC_ATTRS = {
+    "MEMORY_FILE_MAX": "DREAM_MEMORY_FILE_MAX",
+    "RERANK_CANDIDATES": "DREAM_RERANK_CANDIDATES",
+    "SALIENCE_HALFLIFE_DAYS": "DREAM_SALIENCE_HALFLIFE",
+    "ANN_THRESHOLD": "DREAM_ANN_THRESHOLD",
+    "CHUNK_THRESHOLD": "DREAM_CHUNK_THRESHOLD",
+    "CHUNK_SIZE": "DREAM_CHUNK_SIZE",
+    "MERGE_THRESHOLD": "DREAM_MERGE_THRESHOLD",
+    "RECONCILE_THRESHOLD": "DREAM_RECONCILE_THRESHOLD",
+    "RECONCILE_MAX_CLUSTERS": "DREAM_RECONCILE_MAX_CLUSTERS",
+    "RECONCILE_EXCERPT": "DREAM_RECONCILE_EXCERPT",
+    "LINK_RESERVE": "DREAM_LINK_RESERVE",
+    "AUTOLINK_THRESHOLD": "DREAM_AUTOLINK_THRESHOLD",
+    "AUTOLINK_K": "DREAM_AUTOLINK_K",
+    "SEARXNG_PORT": "DREAM_SEARXNG_PORT",
+    "BROWSER_TIMEOUT_MS": "DREAM_BROWSER_TIMEOUT_MS",
+    "BROWSER_IDLE_SHUTDOWN_S": "DREAM_BROWSER_IDLE_S",
+    "CONTEXT_WINDOW": "DREAM_CTX_WINDOW",
+    "GUI_PORT": "DREAM_GUI_PORT",
+    "TOOL_STALE_DAYS": "DREAM_TOOL_STALE_DAYS",
+    "DEFAULT_TOOL_BUDGET_LOCAL": "DREAM_TOOL_BUDGET",
+    "SUBAGENT_MAX_ROUNDS": "DREAM_SUBAGENT_ROUNDS",
+    "MAX_TOOL_ROUNDS": "DREAM_MAX_TOOL_ROUNDS",
+    "FREQUENCY_PENALTY": "DREAM_FREQUENCY_PENALTY",
+    "PRESENCE_PENALTY": "DREAM_PRESENCE_PENALTY",
+    "REPETITION_PENALTY": "DREAM_REPETITION_PENALTY",
+    "HTTP_TIMEOUT_S": "DREAM_HTTP_TIMEOUT_S",
+    "LLM_READ_TIMEOUT_S": "DREAM_LLM_READ_TIMEOUT_S",
+}
+
+
+def apply_saved_numeric() -> list[str]:
+    """Apply the Settings tab's saved numbers to this process (see NUMERIC_ATTRS); returns the variables applied."""
+    try:
+        node = json.loads((DATA_DIR / "runtime-settings.json").read_text(encoding="utf-8")).get("numeric")
+    except (OSError, ValueError, AttributeError):
+        return []
+    if not isinstance(node, dict):
+        return []
+    applied, g = [], globals()
+    for attr, name in NUMERIC_ATTRS.items():
+        text = node.get(name.removeprefix("DREAM_").lower())
+        if name in os.environ or not isinstance(text, str):
+            continue
+        try:
+            g[attr] = read_numeric(name, environ={name: text})
+        except NumericEnvironmentError:
+            continue
+        applied.append(name)
+    g["SEARXNG_URL"] = f"http://{SEARXNG_HOST}:{SEARXNG_PORT}"
+    return applied

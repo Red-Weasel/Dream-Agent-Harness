@@ -51,3 +51,19 @@ def test_a_refused_key_proves_nothing(tmp_path, monkeypatch):
         assert client.post('/api/deepsleep/bridge', headers={'X-Dream-Token': 'not-the-key-0123456789'},
                            json={'operation': 'list'}).status_code == 401
         assert statuses(client, srv)['antigravity'] == 'unknown'
+
+
+def test_a_computer_started_minutes_ago_proves_nothing(tmp_path, monkeypatch):
+    """2026-10-12: the monotonic clock counts from boot. A pane that never used its tools held 0.0, and a completed
+    receipt without its time counted as 0 -- so for fifteen minutes after boot both read as 'within the last fifteen
+    minutes' and every light turned green (the full suite's first minutes after a restart)."""
+    import types
+    from dream.gui import server as server_module
+    srv, pane = server(tmp_path, monkeypatch)
+    clock = types.SimpleNamespace(**{name: getattr(time, name) for name in dir(time) if not name.startswith('_')})
+    clock.monotonic = lambda: 120.0                                              # two minutes after boot
+    monkeypatch.setattr(server_module, 'time', clock)
+    with TestClient(srv.app, base_url='http://127.0.0.1') as client:
+        assert statuses(client, srv)['antigravity'] == 'unknown'                 # no tools used yet
+        srv._board().receipts['r1'] = {'state': 'completed', 'target': 'gem1'}    # completed, time unknown
+        assert statuses(client, srv)['antigravity'] == 'unknown'

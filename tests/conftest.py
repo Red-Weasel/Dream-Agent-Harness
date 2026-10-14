@@ -64,6 +64,18 @@ def _isolate_runtime_settings(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _discovery_mode_the_suite_was_written_for(monkeypatch):
+    """Description discovery is Dream's default since 2026-10-13 (dream/core/discovery.py). Most of this suite was
+    written for the full tool list and asserts its prompts, schema budgets and task skill injection, so it runs with
+    DREAM_DISCOVERY_MODE=default (Dream processes the tests start inherit it). The description-mode tests set their
+    own mode: test_description_discovery*.py, test_tool_one_liners.py, and the DeepSleep terminal of
+    test_turn_prompt_box_page.py, which starts without the variable."""
+    from dream.core import discovery
+    monkeypatch.setenv(discovery.MODE_ENV, discovery.DEFAULT)
+    monkeypatch.setattr(discovery, "_STARTUP", discovery.read_environment())
+
+
+@pytest.fixture(autouse=True)
 def _prompt_optimizer_off(monkeypatch):
     """The prompt optimizer reads every typed prompt with two extra model requests (2026-10-11): off in tests,
     Dream terminals they start included, so a test's model sees only the requests it scripts. Its own tests turn

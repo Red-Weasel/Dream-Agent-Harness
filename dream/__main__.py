@@ -18,6 +18,8 @@ def main() -> None:
             errors = numeric_environment_errors()
             if errors:
                 raise errors[0]
+            from . import config
+            config.apply_saved_numeric()   # the Settings tab's saved numbers, before anything reads them
         _main()
     except NumericEnvironmentError as error:
         raise SystemExit(str(error)) from None

@@ -36,10 +36,10 @@ class MediaService:
                 'support': 'native',
                 'ffmpeg': bool(shutil.which('ffmpeg')),
                 'ffprobe': bool(shutil.which('ffprobe')),
-                'evidence_source': 'Host executable lookup only; this does not inspect the shell sandbox.',
+                'evidence_source': 'Host executable lookup only; the encoder has not been run.',
                 'execution_verified': None,
-                'next_step': 'Before encoding, check the chosen encoder in the actual permitted executor. '
-                             'A host path can exist while sandbox paths or shared libraries are unavailable.',
+                'next_step': 'Before encoding, check that the chosen encoder actually runs (a version check). '
+                             'A host path can exist while its shared libraries are unavailable.',
                 'note': 'HTML export needs no encoder. PNG and video need Playwright Chromium; its launch is checked during export.',
                 'formats': ['mp4', 'webm', 'png', 'html'],
             },

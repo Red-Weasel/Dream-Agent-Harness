@@ -1,7 +1,7 @@
-"""Experimental description-first discovery (DREAM-258, phase 2): one explicit, opt-in mode.
+"""Description-first discovery (DREAM-258, phase 2; the default since 2026-10-13).
 
-Default behaviour is untouched. With ``DREAM_DISCOVERY_MODE=descriptions`` set when the process starts, the
-model's INITIAL view of tools and skills is a bounded list of one-or-two-sentence descriptions; a tool's full
+Unless ``DREAM_DISCOVERY_MODE`` is ``default`` (or ``off``) when the process starts, the model's INITIAL view of
+tools is one line per tool (`tool_one_liners`) and of skills a bounded list of short descriptions; a tool's full
 definition and a skill's workflow enter the context only when the model asks for them. Tools stay registered and
 every call still goes through the backend's own execution path (scope, enablement, full-schema validation, the
 run meter, permission, the handler): this module decides what is SHOWN, never what may run.
@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .tool_budget_schemas import LOOKUP_TOOL_NAME
+from .tool_one_liners import ONE_LINERS
 
 MODE_ENV = "DREAM_DISCOVERY_MODE"
 DEFAULT = "default"
@@ -53,7 +54,7 @@ INVOKE_TOOL_NAME = "tool_call"
 
 # Structural bounds, in CHARACTERS, fixed whatever the window or the size of the toolset/preset.
 DESCRIPTION_CHARS = 140       # one catalog or index description (one or two sentences)
-CATALOG_CHARS = 600          # all tool catalog lines together
+CATALOG_CHARS = 9000         # all tool catalog lines together: every built-in tool's one-liner fits (~6,900)
 SKILL_INDEX_CHARS = 300      # all installed-skill index lines together
 LEARNED_INDEX_CHARS = 200     # all learned-skill index lines together
 LEARNED_LINE_CHARS = 200      # one learned-skill line (its slug leads, so a cut keeps the slug)
@@ -114,16 +115,17 @@ def _parse(value: Any) -> Mode:
         return Mode(DEFAULT, raw)
     if text == DESCRIPTIONS:
         return Mode(DESCRIPTIONS, raw)
-    return Mode(DEFAULT, raw, problem=(
-        f"{MODE_ENV}='{shown(raw)}' is not a discovery mode (the only one is '{DESCRIPTIONS}'; unset it for the "
-        "default). Tool and skill discovery is unchanged."))
+    return Mode(DESCRIPTIONS, raw, problem=(
+        f"{MODE_ENV}='{shown(raw)}' is not a discovery mode ('{DESCRIPTIONS}' is the default; '{DEFAULT}' turns "
+        "it off). Description discovery stays on."))
 
 
 def read_environment(environ: Mapping[str, str] | None = None) -> Mode:
     """What DREAM_DISCOVERY_MODE asks for in `environ` (else the process's environment) AS IT IS NOW. This is a
-    reading, not the mode in force: `startup` is. Used to take the startup decision and to notice a change."""
+    reading, not the mode in force: `startup` is. Used to take the startup decision and to notice a change.
+    Unset is DESCRIPTIONS (the default since 2026-10-13)."""
     value = (os.environ if environ is None else environ).get(MODE_ENV)
-    return Mode() if value is None else _parse(value)
+    return Mode(DESCRIPTIONS) if value is None else _parse(value)
 
 
 # The process's one decision, taken when this module is first imported. Dream never rebinds it; a test that
@@ -141,12 +143,24 @@ def resolve(value: Any = None, *, environ: Mapping[str, str] | None = None) -> M
     is now: a variable changed while Dream runs is not applied. With `environ` given, None reads that mapping
     instead (an explicit reading for a caller that owns one, and for tests).
 
-    An unknown value never enables anything: the result is DEFAULT with `problem` naming it."""
+    An unknown value keeps description discovery on, with `problem` naming it."""
     if isinstance(value, Mode):
         return value
     if value is None:
         return startup() if environ is None else read_environment(environ)
     return _parse(value)
+
+
+def for_provider(provider: Any) -> Mode:
+    """The mode a session with `provider` runs in. Unset, description discovery is for a local model only (owner,
+    2026-10-13: [feedback]): a Claude, CLI or remote session keeps the full tool list and prompt. A
+    DREAM_DISCOVERY_MODE set explicitly applies to every provider."""
+    mode = startup()
+    if mode.descriptions and mode.raw is None:
+        from .profiles import is_local
+        if not is_local(provider):
+            return Mode(DEFAULT)
+    return mode
 
 
 def drift(environ: Mapping[str, str] | None = None) -> str | None:
@@ -185,7 +199,10 @@ def entry_line(name: str, description: Any, limit: int = DESCRIPTION_CHARS) -> s
 
 
 def catalog_line(schema: dict[str, Any]) -> str:
+    """The tool's line in the catalog: its written one-liner (tool_one_liners), else derived from its description."""
     fn = schema["function"]
+    if fn["name"] in ONE_LINERS:
+        return f"{fn['name']} — {ONE_LINERS[fn['name']]}"
     return entry_line(fn["name"], fn.get("description"))
 
 

@@ -254,6 +254,7 @@ def test_registry_offers_session_tools_only_to_children_even_with_narrow_preset(
     monkeypatch.setattr(registry.presets, 'session', lambda: {'tools': frozenset(), 'plugins': frozenset()})
     monkeypatch.setattr(task_checkpoints, 'wrap_tool', lambda tool: tool)
     monkeypatch.setattr(registry, 'create_sdk_mcp_server', lambda *args: {})
+    monkeypatch.setattr('dream.core.backends.anthropic.always_load', lambda server, names: server)
     if child:
         monkeypatch.setenv('DREAM_DEEPSLEEP_NODE_ID', 'receiver')
     else:

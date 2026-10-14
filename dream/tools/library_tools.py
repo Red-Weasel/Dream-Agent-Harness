@@ -20,7 +20,7 @@ from claude_agent_sdk import tool
 from .. import config
 from ..library.store import Library, LibraryError, VersionConflict
 from . import mirror
-from .context import err, in_thread, ok
+from .context import ctx, err, in_thread, ok
 
 _LIB: Library | None = None
 
@@ -386,9 +386,15 @@ async def library_replace(args: dict[str, Any]) -> dict[str, Any]:
 )
 async def library_materialize(args: dict[str, Any]) -> dict[str, Any]:
     v = args.get("version")
+    dest = str(args.get("dest", ""))
+    if not dest.strip():
+        # Nothing for the policy to judge, and the store would write into Dream's process directory (DREAM-290).
+        return err("library_materialize needs a 'dest': a path in the workspace, or a folder there.")
+    if not Path(dest).expanduser().is_absolute():
+        # Relative to the workspace, as the policy judged it -- not to Dream's own process directory (DREAM-290).
+        dest = str(ctx().workspace / dest)
     try:
-        out = await in_thread(library().materialize, str(args.get("file_id", "")),
-                              str(args.get("dest", "")),
+        out = await in_thread(library().materialize, str(args.get("file_id", "")), dest,
                               int(v) if v is not None else None)
     except Exception as e:
         return _fail(e)

@@ -21,8 +21,9 @@ from dream.media import blender_live
 SOURCE = "(DREAM_BLENDER or the blender.binary runtime setting)"
 
 
-def _binary_seen_with(env_value: str | None) -> str:
+def _binary_seen_with(env_value: str | None, root: Path) -> str:
     env = {k: v for k, v in os.environ.items() if k != "DREAM_BLENDER"}
+    env["DREAM_ROOT"] = str(root)   # an empty root: never the checkout's own data/runtime-settings.json
     if env_value is not None:
         env["DREAM_BLENDER"] = env_value
     code = "from dream.media import blender_live; print(blender_live.BLENDER)"
@@ -30,13 +31,13 @@ def _binary_seen_with(env_value: str | None) -> str:
                           check=True).stdout.strip()
 
 
-def test_the_default_binary_is_the_system_package():
-    assert _binary_seen_with(None) == "/usr/bin/blender"
-    assert _binary_seen_with("") == "/usr/bin/blender"
+def test_the_default_binary_is_the_system_package(tmp_path):
+    assert _binary_seen_with(None, tmp_path) == "/usr/bin/blender"
+    assert _binary_seen_with("", tmp_path) == "/usr/bin/blender"
 
 
-def test_dream_blender_names_the_binary():
-    assert _binary_seen_with("/opt/blender-4.5.14-linux-x64/blender") == "/opt/blender-4.5.14-linux-x64/blender"
+def test_dream_blender_names_the_binary(tmp_path):
+    assert _binary_seen_with("/opt/blender-4.5.14-linux-x64/blender", tmp_path) == "/opt/blender-4.5.14-linux-x64/blender"
 
 
 def _fake_build(tmp_path: Path) -> Path:

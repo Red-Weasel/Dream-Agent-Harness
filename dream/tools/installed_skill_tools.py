@@ -179,9 +179,9 @@ def _workspace():
 
 
 def directory_line(skill: loader.FileSkill, workspace) -> str:
-    """DREAM-101/105: say where the skill lives AND what run_bash can do there. The sandbox holds the workspace plus the
-    installed skills' script folders READ-ONLY (dream.core.skill_runtime), so a plugin skill's `<SKILL_DIR>/script`
-    runs with run_bash as written; any other folder outside the workspace is invisible to the shell."""
+    """DREAM-101/105: say where the skill lives AND how the model reaches it. A plugin skill's `<SKILL_DIR>/script` in an
+    installed skills' script folder (dream.core.skill_runtime) runs with run_bash as written; any other folder outside
+    the workspace is read through skill_file. Since 2026-10-11 run_bash has no sandbox, so the line claims none."""
     from ..core import skill_runtime
 
     root = skill.root.resolve()
@@ -195,9 +195,9 @@ def directory_line(skill: loader.FileSkill, workspace) -> str:
     if workspace is None or inside:
         return f"Directory: {root}"
     if any(root.is_relative_to(r) for r in skill_runtime.script_roots()):
-        return (f"Directory: {root} -- readable in run_bash's sandbox: run its scripts with run_bash as written, using "
-                f"this path for <SKILL_DIR> (read-only; writes stay in the workspace).")
-    return (f"Directory: {root} -- outside the workspace, so run_bash cannot see it (its sandbox holds the workspace and the installed skills' script folders, not this one). "
+        return (f"Directory: {root} -- readable by run_bash: run its scripts with run_bash as written, using "
+                f"this path for <SKILL_DIR> (never edit it; write in the workspace).")
+    return (f"Directory: {root} -- outside the workspace and not a script folder. "
             f"Read bundled files with skill_file(name=\"{skill.name}\", path=...). Do not try to cd or ls there.")
 
 

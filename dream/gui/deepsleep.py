@@ -156,7 +156,7 @@ class Node:
     initial_effort: str = ''
     launch_generation: int = 0
     spawn_task: asyncio.Task | None = None
-    tools_used_at: float = 0.0   # when this pane's agent last reached Dream through its tools (account light)
+    tools_used_at: float | None = None   # when this pane's agent last reached Dream through its tools (account light)
 
     def view(self):
         result = {k: getattr(self, k) for k in ('id', 'provider', 'model', 'title', 'layout', 'state', 'error', 'agents', 'profile', 'initial_effort')}

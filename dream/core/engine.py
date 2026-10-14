@@ -27,7 +27,7 @@ from ..memory.working import WorkingMemory
 from .budget import ToolBudget, default_tool_budget
 from ..tools import registry
 from ..tools.context import ToolContext, in_thread, set_context, bind_context, err
-from . import turn_origin
+from . import discovery, turn_origin
 from ..tools.native import NATIVE_TOOLS
 from ..web.browser import get_browser
 from . import system_prompt
@@ -412,7 +412,7 @@ class Engine:
         # Stable for the session: the set is fixed at boot.
         from ..mcp_client import prompt_section as mcp_prompt_section
 
-        mcp_section = mcp_prompt_section(self._mcp.servers)
+        mcp_section = mcp_prompt_section(self._mcp.servers, discovery.for_provider(self.provider))
         if mcp_section:
             stable.append(mcp_section)
 
@@ -459,6 +459,7 @@ class Engine:
         return system_prompt.build_system_prompt(
             self.store, self.session_id, stable_sections=stable, workspace=self.workspace,
             profile=self.profile, style=self._session_style,
+            discovery_mode=discovery.for_provider(self.provider),
         )
 
     async def _local_helper_tool(self):
@@ -1649,7 +1650,8 @@ class Engine:
                 guidance = TaskGuidance()
             else:
                 guidance = await in_thread(select_for_task, prompt, max_chars=guidance_budget(self._guidance_window()),
-                                           used=frozenset(self.tools_used))
+                                           used=frozenset(self.tools_used),
+                                           discovery_mode=discovery.for_provider(self.provider))
             project_context = await in_thread(build_context, self.workspace, prompt)
         for warning in guidance.warnings:
             yield Event("system", "Workflow not loaded: " + warning)

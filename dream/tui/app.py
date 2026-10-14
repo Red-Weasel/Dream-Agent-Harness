@@ -2204,8 +2204,12 @@ class App(CouncilControls):
                 raise ValueError('Local request reconciliation is unavailable for this adapter.')
             return reconcile(request_id, confirmed_idle=True)
         if action == "profile":
-            from ..core.profiles import save_settings
-            await asyncio.to_thread(save_settings, payload["profile"], payload.get("overrides"))
+            from ..core.profiles import save_settings, update_profile_fields
+            if "replace" in payload:   # Studio's Runtime form: its own fields, merged into the file as it is now
+                await asyncio.to_thread(update_profile_fields, payload["profile"], payload.get("overrides") or {},
+                                        payload["replace"])
+            else:
+                await asyncio.to_thread(save_settings, payload["profile"], payload.get("overrides"))
             return {"applies": "new sessions", "profile": payload["profile"]}
         if action in ("settings_get", "settings_save"):
             return await asyncio.to_thread(self._studio_settings, action, payload)

@@ -19,7 +19,6 @@ Four honest outcomes, and none of them is a fake clean bill of health:
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -81,13 +80,16 @@ class ReviewResult:
 def _git(workspace: Path, *args: str) -> tuple[int, str, str]:
     """Run one git command, capturing bytes and decoding lossily — a diff of a
     latin-1 source file is not a reason to crash. GIT_OPTIONAL_LOCKS=0 keeps even
-    `git diff` from refreshing (writing) the index behind the user's back."""
+    `git diff` from refreshing (writing) the index behind the user's back, and
+    untrusted_read_env keeps it from running a command the repository's own config
+    names -- core.fsmonitor, a filter's clean/process (DREAM-290)."""
+    from .git_safety import untrusted_read_env
     proc = subprocess.run(
         ["git", *args],
         cwd=str(workspace),
         capture_output=True,
         timeout=_GIT_TIMEOUT_S,
-        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        env={**untrusted_read_env(workspace, _GIT_TIMEOUT_S), "GIT_OPTIONAL_LOCKS": "0"},
     )
     return (
         proc.returncode,

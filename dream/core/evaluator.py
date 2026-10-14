@@ -221,12 +221,14 @@ class SDKReviewBackend:
         import types
         from claude_agent_sdk import (AssistantMessage, ResultMessage,
                                       TextBlock, create_sdk_mcp_server, query)
-        from .backends.anthropic import claude_code_options, consult_options
+        from .backends.anthropic import always_load, claude_code_options, consult_options
         names = ['mcp__review__' + tool.name for tool in self.tools]
         # Runs like Claude Code (DREAM-140), or the main Claude path for the optimizer
         # (DREAM-137); the bound review reader stays pre-approved, since the loop
         # downgrades a PASS when a file it read changes.
-        servers = {'review': create_sdk_mcp_server(name='review', tools=self.tools)} if self.tools else None
+        # DREAM-294: the review reader is Dream's own, so it loads whole rather than behind tool search.
+        servers = ({'review': always_load(create_sdk_mcp_server(name='review', tools=self.tools),
+                                          [tool.name for tool in self.tools])} if self.tools else None)
         build = claude_code_options if self.claude_code_posture else consult_options
         opts = build(system_prompt=self.system_prompt, cwd=str(self.cwd), mode=self.settings.mode,
                                model=self.settings.model, effort=None, extra_servers=servers, extra_allowed=names)

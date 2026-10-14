@@ -413,7 +413,7 @@ def select_for_task(prompt: str, skills: Iterable[loader.FileSkill] | None = Non
     The environment is not read here per call: DREAM_DISCOVERY_MODE changed while Dream runs neither turns
     eager workflow bodies back on under a session that announced description mode, nor silences selection in a
     session that started in the default. This function has no session to ask; a caller that built one backend
-    in another mode must pass that mode here itself (the Engine does not today, so it follows the process's).
+    in another mode must pass that mode here itself (the Engine passes its session's, discovery.for_provider).
     """
     from ..core import discovery
     if discovery.resolve(discovery_mode).descriptions:

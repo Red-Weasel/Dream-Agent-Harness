@@ -160,11 +160,12 @@ async def see(args: dict[str, Any]) -> dict[str, Any]:
         provider = vision_helper.helper_provider(helper)
         try:
             text = await vision_helper.describe(blocks, args.get("question"), provider)
-        except Exception as exc:   # a HelperError, or whatever else the transport raised: either way nobody saw the image
+        except Exception as exc:   # a HelperError, or whatever else the transport raised: no description either way
+            # Not "nobody saw the image": an error status or a timeout can come after the pixels were sent.
             why = str(exc) if isinstance(exc, vision_helper.HelperError) else f"{type(exc).__name__}: {exc}"
             return err(f"Vision helper {provider.label} could not describe {', '.join(names)}: {why}. No description "
-                       "was produced and nobody saw the image; report the visual check as unverified or ask the user "
-                       "to look with `visual_check`.")
+                       "was produced (the image may already have reached the helper); report the visual check as "
+                       "unverified or ask the user to look with `visual_check`.")
         return ok(f"Described by {provider.label}: {text}" + (f"\n({pane_note[2:]})" if pane_note else "") + trailer)
     blocks.append({"type": "text", "text": f"(viewing {', '.join(names)}{pane_note})" + trailer})
     return {"content": blocks}

@@ -131,9 +131,9 @@ def test_registry_covers_every_central_declaration_and_retains_defaults():
     import ast
     from dream.environment import NUMERIC_SETTINGS, numeric_environment_errors, read_numeric
     source = ast.parse((Path(__file__).parents[1] / 'dream/config.py').read_text())
-    declarations = [node.args[0].value for node in ast.walk(source)
+    declarations = [node.args[0].value for node in ast.walk(source)   # (apply_saved_numeric parses by a name)
                     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                    and node.func.id == 'read_numeric']
+                    and node.func.id == 'read_numeric' and isinstance(node.args[0], ast.Constant)]
     assert len(declarations) == 28 and set(declarations) == set(NUMERIC_SETTINGS)
     assert numeric_environment_errors(environ={}) == []
     expected = {'DREAM_MEMORY_FILE_MAX': 8000, 'DREAM_CTX_WINDOW': 200000,

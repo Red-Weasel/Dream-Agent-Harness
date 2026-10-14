@@ -52,6 +52,37 @@ _LOG = logging.getLogger(__name__)
 # lead's launch waits in line while `limit` of them run (_AgentSlots). Never refused for count.
 AGENT_ASK_RULES = ("Agent", "Task")
 _SETTINGS = '{"disableAllHooks":true}'
+# The SDK reads the Claude CLI's JSON messages up to max_buffer_size (1 MiB by default) and fails the turn past it
+# ("CLIJSONDecodeError: ... JSON message exceeded maximum buffer size of 1048576 bytes", the owner's Claude session of
+# 2026-10-13, a `see` of a page screenshot). One `see` result carries its images base64 in one message: up to
+# tools/vision._MAX_IMAGES x _MAX_BYTES (6 x 8 MB, 64 MB as base64). This leaves room for that and the text around it;
+# the SDK grows its buffer only as far as a message needs.
+SDK_MAX_BUFFER = 96 * 1024 * 1024
+# DREAM-294: Claude Code's tool search is on (ENABLE_TOOL_SEARCH in sdk_options), so it defers every MCP tool not
+# marked "always load". Dream's own tools carry the mark; an external MCP server's tools (REA's 139 are ~583k
+# characters of schemas, the owner's tools/list of 2026-10-13) wait behind the search until Claude asks for them.
+ALWAYS_LOAD_META = "anthropic/alwaysLoad"
+
+
+def always_load(server: dict, names) -> dict:
+    """Mark `names` of an SDK MCP server for Claude Code to load whole into every request. The bundled CLI (2.1.259)
+    reads the mark from each listed tool's `_meta`; the SDK writes none of its own there, so the server's tools/list
+    answer is stamped. The server's other tools stay deferred."""
+    from mcp import types
+
+    names = frozenset(names)
+    handlers = server["instance"].request_handlers
+    listed = handlers[types.ListToolsRequest]
+
+    async def list_tools(request):
+        result = await listed(request)
+        for tool in result.root.tools:
+            if tool.name in names:
+                tool.meta = {**(tool.meta or {}), ALWAYS_LOAD_META: True}
+        return result
+
+    handlers[types.ListToolsRequest] = list_tools
+    return server
 
 
 class _AgentSlots:
@@ -422,6 +453,7 @@ def sdk_options(*, system_prompt, mcp_servers, preapproved_tool_ids, agents, can
         system_prompt=system_prompt,
         mcp_servers=mcp_servers,
         strict_mcp_config=True,
+        max_buffer_size=SDK_MAX_BUFFER,
         # Only the exempt subset is pre-approved; everything else (Write/Edit/
         # Bash, mutating Dream tools, custom tools) routes through can_use_tool.
         allowed_tools=list(preapproved_tool_ids) + SAFE_BUILTINS,
@@ -444,7 +476,7 @@ def sdk_options(*, system_prompt, mcp_servers, preapproved_tool_ids, agents, can
         effort=effort,
         env={
             "CLAUDE_AGENT_SDK_CLIENT_APP": f"dream/{__version__}",
-            "ENABLE_TOOL_SEARCH": "auto:100",
+            "ENABLE_TOOL_SEARCH": "true",   # DREAM-294: defers the tools always_load did not mark (auto:100 kept all)
             # The lead's decision after the DREAM-212 gate: sub-agents run in the foreground, inside the lead's turn,
             # as a local lead's workers do -- Dream reads a turn up to the SDK's first result, and the bundled CLI
             # would otherwise run them in the background. It also stops background Bash, which this path does not use:
@@ -648,6 +680,7 @@ def claude_code_options(*, system_prompt: str, cwd: str, mode: str | None, model
     from ..cli_review import CLAUDE_SIGN_IN, runner_env
     return ClaudeAgentOptions(
         system_prompt={"type": "preset", "preset": "claude_code", "append": system_prompt},
+        max_buffer_size=SDK_MAX_BUFFER,
         tools={"type": "preset", "preset": "claude_code"},
         setting_sources=["user", "project", "local"] if owner_settings else [],
         mcp_servers=dict(extra_servers or {}),

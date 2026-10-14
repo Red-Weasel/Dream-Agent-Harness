@@ -432,6 +432,10 @@ async def test_a_helper_failure_is_a_tool_error_the_session_survives(borrowed, m
     result = await vision.see.handler({"path": str(borrowed[0])})
     assert result.get("is_error") and "HTTP 500" in result["content"][0]["text"]
     assert "server exploded" in result["content"][0]["text"]
+    # The helper answered 500 after the request carried the pixels: it is not known that nobody saw the image
+    # (the production-readiness review, DREAM-251; fixed 2026-10-12).
+    assert "nobody saw" not in result["content"][0]["text"]
+    assert "may already have reached" in result["content"][0]["text"]
 
 
 @pytest.mark.asyncio

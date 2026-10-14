@@ -45,7 +45,8 @@ def _started_with(monkeypatch, value):
 
 @pytest.fixture(autouse=True)
 def _no_ambient_mode(monkeypatch):
-    _started_with(monkeypatch, None)
+    # Unset is description discovery since 2026-10-13; the tests of the other path name it explicitly.
+    _started_with(monkeypatch, "default")
 
 
 def _catalog_entries(description):
@@ -158,23 +159,27 @@ def _subtype(events):
 
 async def test_the_default_payload_is_the_same_bytes_however_the_default_is_reached(monkeypatch):
     calls: list = []
-    plain = _backend(_toolset(calls))
+    plain = _backend(_toolset(calls))                             # started with DREAM_DISCOVERY_MODE=default
     explicit = _backend(_toolset(calls), mode="default")
-    _started_with(monkeypatch, "descriptons")                     # started with a typo: said, never applied
+    _started_with(monkeypatch, "off")                             # turned off another way
+    off = _backend(_toolset(calls))
+    _started_with(monkeypatch, "descriptons")                     # started with a typo: said; the default stays on
     typo = _backend(_toolset(calls))
-    _started_with(monkeypatch, None)
+    _started_with(monkeypatch, "default")
 
     plain_events = await _run(plain, [_text_round()])
     await _run(explicit, [_text_round()])
+    await _run(off, [_text_round()])
     typo_events = await _run(typo, [_text_round()])
 
     sent = plain._client.payloads[0]
     assert json.dumps(explicit._client.payloads[0], sort_keys=True) == json.dumps(sent, sort_keys=True)
-    assert json.dumps(typo._client.payloads[0], sort_keys=True) == json.dumps(sent, sort_keys=True)
+    assert json.dumps(off._client.payloads[0], sort_keys=True) == json.dumps(sent, sort_keys=True)
     assert INVOKE not in _names(sent)
     assert not any(discovery.MODE_ENV in line for line in _system(plain_events))
-    said = [line for line in _system(typo_events) if discovery.MODE_ENV in line]
-    assert len(said) == 1 and "descriptons" in said[0] and "unchanged" in said[0]
+    assert _names(typo._client.payloads[0]) == [LOOKUP, INVOKE]
+    said = [line for line in _system(typo_events) if "descriptons" in line]
+    assert len(said) == 1 and discovery.MODE_ENV in said[0] and "stays on" in said[0]
     assert not typo.discovery_report()["qualified"] and typo.discovery_report()["within_target"] is None
 
 
@@ -211,7 +216,7 @@ async def test_the_array_is_the_lookup_and_the_wrapper_whatever_the_window_or_to
         assert _names(backend._client.payloads[0]) == [LOOKUP, INVOKE]
     assert payloads["small"] == payloads["wide"], "the window does not size it"
     grown = len(json.dumps(payloads["many"])) - len(json.dumps(payloads["small"]))
-    assert abs(grown) < 400, "a hundred times the tools does not grow it"
+    assert abs(grown) < discovery.CATALOG_CHARS + 400, "a hundred times the tools grows it only up to the catalog's bound"
     catalog = payloads["many"][0]["function"]["description"]
     listed = _catalog_entries(catalog)
     assert listed and set(listed) <= {f"custom_{i:04d}" for i in range(3000)} | {"ext__moon_phase"}
@@ -637,13 +642,13 @@ async def test_the_mode_is_fixed_at_start_and_a_later_change_is_said_not_applied
     _started_with(monkeypatch, "descriptions")
     backend = _backend(_toolset(calls))
     first = await _run(backend, [_text_round()])
-    assert any("Experimental description discovery is on" in line for line in _system(first))
+    assert any("Description discovery is on" in line for line in _system(first))
     start = copy.deepcopy(backend._client.payloads[0])
 
-    monkeypatch.delenv(discovery.MODE_ENV)
+    monkeypatch.setenv(discovery.MODE_ENV, "default")
     second = await _run(backend, [_text_round()])
     said = [line for line in _system(second) if "changed while this session runs" in line]
-    assert len(said) == 1 and "unset" in said[0] and "task skill selection" in said[0] and "Restart" in said[0]
+    assert len(said) == 1 and "'default'" in said[0] and "task skill selection" in said[0] and "Restart" in said[0]
     assert backend._client.payloads[0]["tools"] == start["tools"]
     assert backend._client.payloads[0]["messages"][0] == start["messages"][0]
 
@@ -683,7 +688,7 @@ async def test_a_session_that_announced_descriptions_gets_no_workflow_body_after
     calls: list = []
     _started_with(monkeypatch, "descriptions")
     backend = _backend(_toolset(calls))
-    monkeypatch.delenv(discovery.MODE_ENV)                 # the owner's shell changes it while Dream runs
+    monkeypatch.setenv(discovery.MODE_ENV, "default")      # the owner's shell changes it while Dream runs
 
     guidance = selection.select_for_task("$bigskill please tidy this", [skill], max_chars=4000, used=())
     backend.prepare_turn(guidance.tools)

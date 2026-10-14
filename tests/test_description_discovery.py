@@ -34,7 +34,8 @@ def _started_with(monkeypatch, value):
 
 @pytest.fixture(autouse=True)
 def _no_ambient_mode(monkeypatch):
-    _started_with(monkeypatch, None)
+    # Unset is description discovery since 2026-10-13; the tests of the other path name it explicitly.
+    _started_with(monkeypatch, "default")
 
 
 def _schema(name, description="Does a thing.", props=None):
@@ -55,21 +56,21 @@ def _catalog_names(surface):
 # --- the mode ------------------------------------------------------------------
 
 
-def test_unset_is_the_default_and_says_nothing():
+def test_unset_is_descriptions_and_says_nothing():
     mode = discovery.resolve(None, environ={})
-    assert not mode.descriptions and mode.problem is None
+    assert mode.descriptions and mode.problem is None
 
 
 @pytest.mark.parametrize("value", ["descriptions", "  Descriptions\n"])
-def test_the_one_mode_is_an_explicit_opt_in(value):
+def test_descriptions_is_accepted_explicitly(value):
     assert discovery.resolve(None, environ={discovery.MODE_ENV: value}).descriptions
     assert discovery.resolve(value).descriptions
 
 
 @pytest.mark.parametrize("value", ["description", "1", "true", "lean", "descriptions,full"])
-def test_an_unknown_value_never_enables_and_is_observable(value):
+def test_an_unknown_value_keeps_the_default_and_is_observable(value):
     mode = discovery.resolve(None, environ={discovery.MODE_ENV: value})
-    assert not mode.descriptions
+    assert mode.descriptions
     assert mode.problem and discovery.MODE_ENV in mode.problem
 
 
@@ -79,8 +80,8 @@ def test_an_explicit_off_is_the_default_without_a_complaint():
 
 
 def test_the_process_mode_is_one_startup_decision_and_the_environment_changing_later_is_not_applied(monkeypatch):
-    # started without the opt-in; the variable appears while Dream runs
-    assert discovery.startup() == discovery.Mode() and discovery.drift() is None
+    # started with it turned off (DREAM_DISCOVERY_MODE=default); the variable changes while Dream runs
+    assert not discovery.startup().descriptions and discovery.drift() is None
     monkeypatch.setenv(discovery.MODE_ENV, "descriptions")
     assert not discovery.resolve(None).descriptions, "a caller without a mode gets the startup decision"
     assert discovery.read_environment().descriptions, "the reading sees the change; it is not the mode in force"
@@ -88,18 +89,20 @@ def test_the_process_mode_is_one_startup_decision_and_the_environment_changing_l
     assert said and discovery.MODE_ENV in said and "'default'" in said and "Restart" in said
     assert discovery.resolve("descriptions").descriptions, "an explicit mode is still the caller's own"
     assert discovery.resolve(None, environ={discovery.MODE_ENV: "descriptions"}).descriptions
-
-    # started with the opt-in; the variable is removed (or mistyped) while Dream runs
-    _started_with(monkeypatch, "descriptions")
-    assert discovery.resolve(None).descriptions and discovery.drift() is None
     monkeypatch.delenv(discovery.MODE_ENV)
-    assert discovery.resolve(None).descriptions and "unset" in discovery.drift()
+    assert not discovery.resolve(None).descriptions and "unset" in discovery.drift()
+
+    # started unset (descriptions); the variable is set to default (or mistyped) while Dream runs
+    _started_with(monkeypatch, None)
+    assert discovery.resolve(None).descriptions and discovery.drift() is None
+    monkeypatch.setenv(discovery.MODE_ENV, "default")
+    assert discovery.resolve(None).descriptions and "'default'" in discovery.drift()
     monkeypatch.setenv(discovery.MODE_ENV, "lean")
     assert discovery.resolve(None).descriptions and "'lean'" in discovery.drift()
 
     # an unknown value going away changes nothing, so nothing is reported
     _started_with(monkeypatch, "lean")
-    assert not discovery.resolve(None).descriptions and discovery.resolve(None).problem
+    assert discovery.resolve(None).descriptions and discovery.resolve(None).problem
     monkeypatch.delenv(discovery.MODE_ENV)
     assert discovery.drift() is None
 
@@ -383,9 +386,9 @@ def big_skill(tmp_path, monkeypatch):
 
 def test_outside_the_mode_an_explicit_skill_is_selected_and_read_as_before(big_skill, monkeypatch):
     skill, reads = big_skill
-    for setting in (None, "default", "no-such-mode"):
-        if setting == "no-such-mode":
-            _started_with(monkeypatch, setting)                   # started with an unknown value: it changes nothing
+    for setting in (None, "default", "off"):
+        if setting == "off":
+            _started_with(monkeypatch, setting)                   # started with it turned off another way
             setting = None
         reads.clear()
         guidance = selection.select_for_task("$bigskill please tidy this", [skill], discovery_mode=setting)
@@ -437,8 +440,8 @@ def test_selection_follows_the_startup_mode_whatever_the_environment_says_later(
     assert reads == [] and skill.manifest not in opened, "no SKILL.md was read or opened"
     assert discovery.drift(), "the change is reported, not applied"
 
-    # Started in the default, then the variable is switched on: selection goes on exactly as it started.
-    _started_with(monkeypatch, None)
+    # Started with it turned off, then the variable is switched on: selection goes on exactly as it started.
+    _started_with(monkeypatch, "default")
     before = engine_call()
     monkeypatch.setenv(discovery.MODE_ENV, "descriptions")
     after = engine_call()
@@ -500,14 +503,14 @@ def wake(monkeypatch, tmp_path):
 
 def test_the_default_wake_up_is_the_same_text_however_the_default_is_reached(wake, monkeypatch):
     store, _ = wake
-    unset = system_prompt._wake_context(store, "s1")
-    assert "may be supplied with the task" in unset, "the default framing"
-    assert system_prompt._wake_context(store, "s1", discovery_mode="default") == unset
-    _started_with(monkeypatch, "not-a-mode")                      # started with an unknown value
-    assert system_prompt._wake_context(store, "s1") == unset
-    _started_with(monkeypatch, None)
+    plain = system_prompt._wake_context(store, "s1")             # started with DREAM_DISCOVERY_MODE=default
+    assert "may be supplied with the task" in plain, "the default framing"
+    assert system_prompt._wake_context(store, "s1", discovery_mode="default") == plain
+    _started_with(monkeypatch, "off")                             # turned off another way
+    assert system_prompt._wake_context(store, "s1") == plain
+    _started_with(monkeypatch, "default")
     monkeypatch.setenv(discovery.MODE_ENV, "descriptions")        # switched on while Dream runs: not applied
-    assert system_prompt._wake_context(store, "s1") == unset
+    assert system_prompt._wake_context(store, "s1") == plain
 
 
 def test_the_wake_up_follows_the_startup_mode_when_the_variable_is_removed_later(wake, monkeypatch):
@@ -564,20 +567,20 @@ def _servers(per_server):
 
 def test_the_default_mcp_section_names_every_tool_as_before(monkeypatch):
     servers = _servers(6)
-    unset = mcp_client.prompt_section(servers)
-    assert all(f"`{s}__{t}`" in unset for s, tools in servers.items() for t in tools)
-    assert mcp_client.prompt_section(servers, "default") == unset
-    _started_with(monkeypatch, "bogus")                           # started with an unknown value
-    assert mcp_client.prompt_section(servers) == unset
-    _started_with(monkeypatch, None)
+    plain = mcp_client.prompt_section(servers)                    # started with DREAM_DISCOVERY_MODE=default
+    assert all(f"`{s}__{t}`" in plain for s, tools in servers.items() for t in tools)
+    assert mcp_client.prompt_section(servers, "default") == plain
+    _started_with(monkeypatch, "off")                             # turned off another way
+    assert mcp_client.prompt_section(servers) == plain
+    _started_with(monkeypatch, "default")
     monkeypatch.setenv(discovery.MODE_ENV, "descriptions")        # switched on while Dream runs: not applied
-    assert mcp_client.prompt_section(servers) == unset
+    assert mcp_client.prompt_section(servers) == plain
     assert mcp_client.prompt_section({}, "descriptions") == ""
-    # the inverse: started in the mode, the variable removed later, the section stays the described one
+    # the inverse: started in the mode, the variable set to default later, the section stays the described one
     _started_with(monkeypatch, "descriptions")
     described = mcp_client.prompt_section(servers)
-    assert described == mcp_client.prompt_section(servers, "descriptions") != unset
-    monkeypatch.delenv(discovery.MODE_ENV)
+    assert described == mcp_client.prompt_section(servers, "descriptions") != plain
+    monkeypatch.setenv(discovery.MODE_ENV, "default")
     assert mcp_client.prompt_section(servers) == described
 
 

@@ -44,7 +44,9 @@ async def test_registered_shell_reports_exit_without_losing_diagnostics(
     assert f"(exit {rc})" in text
     assert output.decode() in text
     assert ("[...truncated]" in text) is truncated
-    assert text.startswith("[explicitly approved uncontained execution]") is (not contained)
+    # No shell sandbox since 2026-10-11: every result was labelled "explicitly approved uncontained execution",
+    # an approval Auto never asks for. run_bash's description says once that there is no sandbox.
+    assert "explicitly approved" not in text and "uncontained" not in text
     if not output:
         assert "no output" in text
     assert calls == ["fixture command"]

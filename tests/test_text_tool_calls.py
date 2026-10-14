@@ -289,3 +289,65 @@ async def test_the_recovered_call_is_recorded_as_a_real_tool_call_pair():
     assert "<invoke" not in (assistant[0].get("content") or "")
     ids = {tc["id"]} & {m.get("tool_call_id") for m in b.messages if m.get("role") == "tool"}
     assert ids, "every recovered call needs its matching tool result"
+
+
+# --- Qwen's own form ---------------------------------------------------------
+# Qwen3.8 (Flash-Next, the 27B) writes <tool_call><function=NAME><parameter=K>V</parameter>. MachX parses that
+# form only for a function the request's tools array lists, so a call to a tool Dream deferred came back as text
+# and ended the turn (2026-10-12: all 5 of Flash-Next's "no answer" misses on the 50-task check). This is the
+# reply from one of them, verbatim.
+QWEN_BLOCK = (
+    "<tool_call>\n<function=web_search>\n<parameter=query>\n"
+    'creditcard.csv "StratifiedKFold" credit card fraud detection folds cross-validation n_splits\n'
+    "</parameter>\n<parameter=limit>\n10\n</parameter>\n</function>\n</tool_call>"
+)
+
+
+def _search_schema() -> dict:
+    return {"type": "function", "function": {"name": "web_search", "parameters": {
+        "type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}
+
+
+def test_parses_a_qwen_style_call_typed_by_its_schema():
+    text, calls = _parse_text_tool_calls(QWEN_BLOCK, [_search_schema()])
+    assert text == ""
+    assert [c["name"] for c in calls] == ["web_search"]
+    assert json.loads(calls[0]["args"]) == {
+        "query": 'creditcard.csv "StratifiedKFold" credit card fraud detection folds cross-validation n_splits',
+        "limit": 10,
+    }
+
+
+def test_a_qwen_string_parameter_that_looks_like_a_number_stays_a_string():
+    body = "<tool_call>\n<function=web_search>\n<parameter=query>\n2010\n</parameter>\n</function>\n</tool_call>"
+    _, calls = _parse_text_tool_calls(body, [_search_schema()])
+    assert json.loads(calls[0]["args"]) == {"query": "2010"}
+
+
+def test_a_truncated_qwen_block_is_left_as_prose():
+    body = "<tool_call>\n<function=web_search>\n<parameter=query>\ncredit"
+    text, calls = _parse_text_tool_calls(body, [_search_schema()])
+    assert calls == []
+    assert text == body
+
+
+async def test_a_qwen_text_call_runs_the_tool_and_the_turn_goes_on():
+    seen: list[dict] = []
+
+    async def handler(args):
+        seen.append(args)
+        return {"content": [{"type": "text", "text": "no results"}]}
+
+    tool = SimpleNamespace(name="web_search", description="web_search tool", handler=handler,
+                           input_schema=_search_schema()["function"]["parameters"])
+    b = _backend([tool])
+    b._client = _FakeClient([_text_round(QWEN_BLOCK), _text_round("Computing it from the data instead.")])
+
+    kinds = []
+    async for ev in b.ask("answer the question"):
+        kinds.append((ev.kind, ev.data))
+
+    assert seen and seen[0]["limit"] == 10, "the tool must actually have run, with typed arguments"
+    assert not any(k == "assistant_done" and "<tool_call>" in d for k, d in kinds), \
+        "the raw call must never be shown as the answer"
+    assert any(k == "assistant_done" and d == "Computing it from the data instead." for k, d in kinds)

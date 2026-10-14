@@ -156,9 +156,14 @@
   document.addEventListener('focusin', event => { if (event.target !== input) update(event.target); });
   document.addEventListener('keydown', event => {
     if (menu.hidden || event.target !== input || event.isComposing) return;
-    if (event.key === 'Enter' && !event.shiftKey && commands && !matches.length && query()) {
+    // Nothing to choose: unknown slash text reaches the normal command handler -- and, while the list is still
+    // loading, slash text with a space in it (usually a message; one word may yet name a command, so it waits; a
+    // phrase that would match a command's description once loaded still goes as a message). Not when it failed to
+    // load: the draft stays, as the status says.
+    if (event.key === 'Enter' && !event.shiftKey && !matches.length && query() &&
+        (commands || (!failure && /\s/.test(query())))) {
       close();
-      return; // unknown slash text still reaches the normal command handler
+      return;
     }
     if (['ArrowDown', 'ArrowUp', 'Escape'].includes(event.key) || (event.key === 'Enter' && !event.shiftKey)) {
       event.preventDefault(); event.stopImmediatePropagation();

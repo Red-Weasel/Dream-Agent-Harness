@@ -262,6 +262,10 @@ def build(
             wrapped_tools.append(wrapped)
         tools = wrapped_tools
     server = create_sdk_mcp_server(config.MCP_SERVER_NAME, config.__dict__.get("VERSION", __version__), tools)
+    # DREAM-294: Claude loads Dream's own tools into every request; an external MCP server's (<server>__<tool>, a name
+    # no other tool may take) wait behind Claude Code's tool search.
+    from ..core.backends.anthropic import always_load
+    always_load(server, [t.name for t in tools if not (getattr(t, "_dream_mcp_server", None) or "__" in t.name)])
     # Tools the Claude backend may pre-approve (skip the permission callback):
     # only read-only + own-mind memory tools. Mutating tools and every self-built
     # custom tool are deliberately excluded so the mode policy still gates them.

@@ -246,9 +246,9 @@ def test_the_prompt_section_names_every_tool_and_states_the_routing_rule():
 
 def test_engine_puts_the_section_in_the_stable_tier():
     eng = (Path(__file__).parent.parent / "dream" / "core" / "engine.py").read_text()
-    assert "mcp_prompt_section(self._mcp.servers)" in eng
+    assert "mcp_prompt_section(self._mcp.servers," in eng        # (and the session's discovery mode)
     # appended to `stable` (tier 2), after the servers are connected
-    assert eng.index("await self._mcp.start(") < eng.index("mcp_prompt_section(self._mcp.servers)")
+    assert eng.index("await self._mcp.start(") < eng.index("mcp_prompt_section(self._mcp.servers,")
     assert "stable.append(mcp_section)" in eng
 
 

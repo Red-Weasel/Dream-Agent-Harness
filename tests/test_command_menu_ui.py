@@ -1,4 +1,5 @@
 """Shipped slash menu, isolated browser and command API; no model calls."""
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,8 @@ async def command_page():
         async def route(request):
             if request.request.url.endswith('/api/commands'):
                 state['requests'].append(request.request.headers)
+                if state.get('hold'):
+                    await state['hold'].wait()
                 await request.fulfill(status=503 if state['fail'] else 200, json={'commands': COMMANDS})
             else:
                 await request.fulfill(content_type='text/html', body='''<!doctype html><html><body>
@@ -96,6 +99,46 @@ async def test_written_commands_reach_normal_submit_instead_of_menu_selection(co
     await area.fill(text)
     await area.press('Enter')
     assert await page.evaluate('sent') == [text]
+    assert not state['errors']
+
+
+async def test_enter_on_a_message_sends_while_the_list_is_still_loading(command_page):
+    """2026-10-12: under the full suite's load the command list arrived after Enter, and Enter, with nothing to choose,
+    did nothing ('/loginx hello' stayed in the box). Slash text with a space in it reaches the normal submit while
+    loading. One word may still name a command (gate round 1: '/research' would go to the model before the list loads
+    but choose the skill after), so it waits for the list; so does a bare '/'. Residual (gate round 2): a phrase that
+    matches a command's description once loaded still goes as a message while loading."""
+    page, state = command_page
+    state['hold'] = asyncio.Event()
+    area = page.locator('#input')
+    await area.fill('/loginx hello')
+    await expect(page.get_by_role('status')).to_contain_text('Loading commands')
+    await area.press('Enter')
+    assert await page.evaluate('sent') == ['/loginx hello']
+    for word in ('/research', '/'):
+        await area.fill(word)
+        await area.press('Enter')
+        await expect(area).to_have_value(word)
+    assert await page.evaluate('sent') == ['/loginx hello']
+    state['hold'].set()
+    await area.fill('/research')
+    await expect(page.get_by_role('option')).to_have_count(1)
+    await area.press('Enter')
+    await expect(area).to_have_value('/skill research ')                  # once loaded, the same keys choose it
+    assert await page.evaluate('sent') == ['/loginx hello']
+    assert not state['errors']
+
+
+async def test_enter_keeps_the_draft_when_the_list_could_not_load(command_page):
+    """(gate round 1) The failure state says "Your message is still here": Enter on slash text keeps it unsent."""
+    page, state = command_page
+    state['fail'] = True
+    area = page.locator('#input')
+    await area.fill('/research the topic')
+    await expect(page.get_by_role('status')).to_contain_text('could not load')
+    await area.press('Enter')
+    await expect(area).to_have_value('/research the topic')
+    assert await page.evaluate('sent') == []
     assert not state['errors']
 
 

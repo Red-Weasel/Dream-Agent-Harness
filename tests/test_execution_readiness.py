@@ -106,7 +106,7 @@ async def test_prepared_note_is_bounded_snapshot_without_raw_reason(engine, monk
     monkeypatch.setattr(cli_agent, 'adapter_for', lambda key: SimpleNamespace(mcp_via_argv=True))
     monkeypatch.setattr(engines, 'subagents', lambda: {})
     monkeypatch.setattr(subagent_module, 'local_subagents', lambda: {})
-    monkeypatch.setattr(mcp_client, 'prompt_section', lambda servers: '')
+    monkeypatch.setattr(mcp_client, 'prompt_section', lambda servers, *mode: '')
     monkeypatch.setattr(engines.system_prompt, 'build_system_prompt',
                         lambda *a, stable_sections, **kw: '\n'.join(stable_sections))
     backend = await engine._create_backend()

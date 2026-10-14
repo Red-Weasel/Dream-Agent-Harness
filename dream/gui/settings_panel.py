@@ -28,9 +28,11 @@ import re
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from ..core import settings
-from ..core.profiles import MAX_OVERRIDE_NUMBER, PROFILE_ENVS, read_settings, settings_path, shown_path
+from ..core import profiles, settings
+from ..core.profiles import (MAX_OVERRIDE_NUMBER, PROFILE_ENVS, _FLOAT_OVERRIDES, read_settings, settings_path,
+                             shown_path)
 from ..core.providers import PROVIDERS
+from ..environment import NUMERIC_SETTINGS
 
 # A name part (e.g. "api_key", "client_secret", "token") whose value is never shown; "max_tokens" is not one.
 _SECRET = re.compile(r"(?:^|[_-])(?:api[_-]?key|key|token|secret|password|passwd|credentials?|auth|authorization|"
@@ -60,8 +62,8 @@ SECTIONS = (
     ("media", "Media", "Programs Dream drives for media work."),
     ("output", "Output & reasoning", "How long one answer may be and how many steps a turn may take."),
     ("profile", "Profile & limits",
-     "The runtime profile and the limits it sets. Change them in Runtime → Next session; they apply to new "
-     "sessions."),
+     "The runtime profile and the limits it sets. The limits are saved here; the profile and image input in "
+     "Runtime → Next session. They apply to new sessions."),
     ("context", "Context management",
      "What the main agent and its sub-agents do when their context window fills, and when. The warning comes a few "
      "points before the trigger so the agent can finish its step and save what it learned."),
@@ -69,8 +71,8 @@ SECTIONS = (
     ("memory", "Memory", "How Dream checks its work and files what it learns."),
     ("privacy", "Privacy", "What may leave this machine, and how Studio is reached."),
     ("other", "Other numbers",
-     "Tuning values read from the environment when Dream starts. Set the named variable before starting Dream "
-     "to change one."),
+     "Tuning values Dream reads when it starts: saved here, or set by their DREAM_* variable (a set variable "
+     "wins)."),
 )
 
 # key -> (label, one-line explanation[, text for an empty value])
@@ -107,12 +109,15 @@ _CATALOG: dict[str, tuple[str, ...]] = {
                                 "must wrap up."),
     "numeric.max_tool_rounds": ("Steps per turn", "How many model generations one turn may take before Dream "
                                 "stops it with an error."),
-    "numeric.frequency_penalty": ("Frequency penalty", "Sent with requests to discourage the model from "
-                                  "repeating the same tokens. 0 turns it off."),
-    "numeric.presence_penalty": ("Presence penalty", "Sent with requests to discourage the model from reusing "
-                                 "any token it has used. 0 turns it off."),
-    "numeric.repetition_penalty": ("Repetition penalty", "Sent with requests to discourage loops in the model's "
-                                   "output. 1.0 turns it off."),
+    "numeric.frequency_penalty": ("Frequency penalty", "Sent with requests to API providers (OpenAI, xAI) to "
+                                  "discourage the model from repeating the same tokens. 0 turns it off. Local models "
+                                  "(MachX) use the value on their load screen instead."),
+    "numeric.presence_penalty": ("Presence penalty", "Sent with requests to API providers to discourage the model "
+                                 "from reusing any token it has used. 0 turns it off. Local models use their load "
+                                 "screen's value."),
+    "numeric.repetition_penalty": ("Repetition penalty", "Sent with requests to API providers to discourage loops "
+                                   "in the model's output. 1.0 turns it off. Local models use their load screen's "
+                                   "repeat penalty."),
     "behaviour.response_style": ("Response style", "How Dream words its replies. Default is Dream's own voice; "
                                  "the others add one short style block to the start of each session."),
     "behaviour.context_overflow": ("Main agent: when the context fills", "compact = cut old history into working "
@@ -318,9 +323,17 @@ def _label(key: str) -> tuple[str, str, str]:
     return key, "No description yet.", "Not set"
 
 
+# Owner 2026-10-13: the profile's limits are edited in this tab too (they pointed at Runtime -> Next session, which
+# has only three of them). The global "overrides" section, what that form saves; image input stays in that form.
+_OVERRIDE_EDITS = ("context_limit", "output_tokens", "idle_timeout_s", "max_run_seconds", "max_run_tokens",
+                   "max_run_tools", "max_wall_seconds", "schema_fraction", "subagent_timeout_s", "wake_tokens",
+                   "auto_filer", "vision_helper")
+
+
 def _editable(key: str) -> bool:
     return key in ("output.max_tokens", "behaviour.vitals", settings.STYLE_SETTING, *settings.CONTEXT_SETTINGS,
-                   settings.NESTED_SETTING) or (
+                   settings.NESTED_SETTING) or key in settings.NUMERIC_KEYS or key.removeprefix("overrides.") in (
+        _OVERRIDE_EDITS if key.startswith("overrides.") else ()) or (
         key.startswith("roles.") and key != "roles.main" and not key.endswith(" (in file)")
         and (key.startswith("roles.subagents.") or key.removeprefix("roles.") in settings.ROLES))
 
@@ -423,7 +436,9 @@ def _row(key: str, value: Any, source: str, saved: dict) -> dict:
            "restart_label": ("Restart Dream" if applies.startswith("When Dream starts") else "New session")
            if restart else None, "edit": None, "locked": None}
     env, governing = _env_name(key), _governing_env(key)
-    if _editable(key) and not governing:
+    # a profile limit that an exact model setting or this model's launch decides is not the saved override's to change
+    decided_elsewhere = key.startswith("overrides.") and origin not in ("default", "global") or "models[" in source
+    if _editable(key) and not governing and not decided_elsewhere:
         if key == "output.max_tokens":
             row["edit"] = {"kind": "number", "min": settings.MIN_MAX_TOKENS, "max": MAX_OVERRIDE_NUMBER,
                            "value": value if isinstance(value, int) else None}
@@ -447,6 +462,25 @@ def _row(key: str, value: Any, source: str, saved: dict) -> dict:
             # Max agents: a number; empty (None) is no limit. The Nested view's top-bar field reads and saves this row.
             row["edit"] = {"kind": "number", "min": 1, "max": settings.MAX_AGENTS,
                            "value": value if type(value) is int else None}
+        elif key in settings.NUMERIC_KEYS:
+            spec = NUMERIC_SETTINGS[settings.NUMERIC_KEYS[key]]
+            row["edit"] = {"kind": "number", "step": 1 if spec.kind is int else "any",
+                           "min": 0 if spec.kind is int else None,
+                           "value": value if type(value) in (int, float) else None,
+                           "placeholder": "0 = no limit" if spec.unlimited else None}
+        elif key == "overrides.auto_filer":
+            row["edit"] = {"kind": "switch"}
+        elif key == "overrides.vision_helper":   # off, or a multimodal API provider (core/vision_helper.helper_keys)
+            from ..core.vision_helper import helper_keys
+            row["edit"] = {"kind": "choice", "value": value or "off", "choices": ["off", *helper_keys()],
+                           "labels": {"off": "Off · images stay on this machine",
+                                      **{k: PROVIDERS[k].label for k in helper_keys() if k in PROVIDERS}}}
+        elif key.startswith("overrides."):
+            field = key.removeprefix("overrides.")
+            row["edit"] = {"kind": "number", "step": "any" if field in _FLOAT_OVERRIDES else 1,
+                           "min": 2048 if field == "context_limit" else 0, "max": 0.25 if field == "schema_fraction"
+                           else MAX_OVERRIDE_NUMBER, "value": value if type(value) in (int, float) else None,
+                           "placeholder": "empty = the profile's own value"}
         else:
             path = key.removeprefix("roles.").split(".")
             entry = saved.get("roles", {})
@@ -851,6 +885,11 @@ def save(key: Any, value: Any, scope: Any = "global") -> dict:
                          "not set it.")
     if key == settings.NESTED_SETTING:
         value = _max_agents(value)          # an empty field clears it: no limit
+    if (key in settings.NUMERIC_KEYS or key.startswith("overrides.")) and scope != "global":
+        raise ValueError(f"{key}: this setting is saved on this computer only (the global scope); a project file may "
+                         "not set it.")
+    if key.startswith("overrides."):
+        return _save_override(key, value)
     try:
         # An unusable file is refused before any write: for the project scope either file, for the global scope
         # the global file alone -- a bad project file does not block saves to this computer (gate round 2).
@@ -868,6 +907,8 @@ def save(key: Any, value: Any, scope: Any = "global") -> dict:
             settings.set_value(key, "on" if value else "off", scope=scope)
         elif key == settings.NESTED_SETTING:
             settings.set_value(key, value, scope=scope)
+        elif key in settings.NUMERIC_KEYS:
+            settings.set_value(key, value if isinstance(value, str) else str(value), scope=scope)
         elif key in (settings.STYLE_SETTING, *settings.CONTEXT_SETTINGS):
             if isinstance(value, bool) or not isinstance(value, (str, int)):
                 raise ValueError(f"{key}: choose one of the listed values.")
@@ -889,3 +930,44 @@ def save(key: Any, value: Any, scope: Any = "global") -> dict:
     if scope == "project":
         applies += " In this workspace's project file."
     return {"key": key, "scope": scope, "applies": applies}
+
+
+
+def _save_override(key: str, value: Any) -> dict:
+    """overrides.<field> from this tab: the global file's "overrides" section, the one Runtime -> Next session saves
+    (core/profiles validates it); `value` None removes the field (the profile's own value again). A number field posts
+    text; an empty one removes the override too."""
+    field = key.removeprefix("overrides.")
+    if field == "auto_filer":
+        if value is not None and type(value) is not bool:
+            raise ValueError(f"{key}: choose on or off.")
+    elif field == "vision_helper":
+        value = None if value in (None, "", "off") else value   # off = no override (the profile's: no describer)
+    elif value is not None:
+        text = str(value).strip().replace(",", "").replace("_", "")
+        if text == "":
+            value = None
+        else:
+            try:
+                number = float(text)
+            except ValueError:
+                raise ValueError(f"{key} must be a number, not {text!r}.") from None
+            value = number if field in _FLOAT_OVERRIDES else int(number) if number.is_integer() else number
+
+    def change(saved):
+        overrides = dict(saved.get("overrides", {})) if isinstance(saved.get("overrides", {}), dict) else {}
+        if value is None:
+            overrides.pop(field, None)
+        else:
+            overrides[field] = value
+        return {**saved, "version": 1, "overrides": overrides}
+    try:
+        profiles.update_settings(change)
+    except ValueError as exc:
+        message = str(exc)
+        raise ValueError(message if message.startswith(("overrides.", "Unknown")) else
+                         f"{key} was not saved. " + _file_error(exc)) from None
+    except OSError as exc:
+        raise ValueError(f"{key}: the settings file could not be written ({exc.strerror or 'unknown error'}); "
+                         "nothing was saved.") from None
+    return {"key": key, "scope": "global", "applies": ("Removed. " if value is None else "Saved. ") + _applies(key)[0]}

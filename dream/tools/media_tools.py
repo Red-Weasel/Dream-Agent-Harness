@@ -24,10 +24,9 @@ async def _execute(args, allowed):
                     'read_roots': [str(path) for path in scope.read_roots],
                     'target_roots': [str(path) for path in scope.target_roots],
                     'availability_verified': None,
-                    'evidence_source': 'Configured execution scope, not a sandbox launch or host-access grant.',
+                    'evidence_source': 'Configured execution scope only; nothing was run to check it.',
                 },
-                'next_step': 'Use the selected workspace. Host file reads and sandbox shell commands can '
-                             'have different filesystem views. Check actual tool results before changing '
+                'next_step': 'Use the selected workspace. Check actual tool results before changing '
                              'paths or requesting additional access. Image configuration is not proof that '
                              'the loaded model accepts pixels; do not infer or load a vision sidecar.',
             }

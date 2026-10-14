@@ -8,8 +8,8 @@ terminal, streaming chat, browser, Studio previews, tools, and optional memory.
 
 ![Dream eclipse artwork](dream/gui/static/dream-eclipse.png)
 
-![Dream running DeepSeek-V4.1-Flash locally through the MachX engine](docs/public/images/dream-deepseek-v41.png)
-<sub>Dream running DeepSeek-V4.1-Flash locally through the [MachX inference engine](https://github.com/Red-Weasel/machx-inference-engine) on two Intel Arc Pro B70 cards — reasoning shown, 11.7 tok/s.</sub>
+![Dream running MiMo-V2.6-Flash locally through the MachX engine while building a whiteboard explainer animation](docs/public/images/dream-mimo-v26-whiteboard.png)
+<sub>Dream running MiMo-V2.6-Flash locally through the [MachX inference engine](https://github.com/Red-Weasel/machx-inference-engine) at 20.7 tok/s while building a whiteboard explainer animation of an AI agent harness.</sub>
 
 ![Dream mapping a 952-file project with the Understand-Anything skill](docs/public/images/dream-understand-map.png)
 <sub>Dream mapping a 952-file project with the Understand-Anything skill, run locally on MiMo-V2.6-Flash through MachX — 2,292 nodes and 2,368 edges in seven layers, a guided tour and a domain graph, shown in the Understand dock beside the chat.</sub>

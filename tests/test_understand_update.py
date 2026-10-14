@@ -6,8 +6,8 @@ Owner, 2026-09-24, after the compact map of a 952-file workspace took hours (893
 once this is done for a repo, it doesnt have to be completed again?" -- and "yes" to making the big-repo shortcut part
 of the skill.
 
-Every plugin script and every glue command here runs through the real run_bash sandbox (DREAM-105), the way the model
-runs them; the model's own writes (batch files, layers, tour, domain graph, summaries) are hand-written. Pinned:
+Every plugin script and every glue command here runs through the real run_bash (DREAM-105; on the host, without a
+sandbox, since 2026-10-11), the way the model runs them; the model's own writes (batch files, layers, tour, domain graph, summaries) are hand-written. Pinned:
 (a) a finished map with nothing changed is reported current and nothing is scanned, batched or rewritten;
 (b) one edit, one addition and one deletion redo only those files -- every other node byte-identical -- in a git
     repository with uncommitted edits and in a folder without git;
@@ -41,17 +41,17 @@ FILE_TYPES = ("file", "config", "document", "service", "pipeline", "table", "sch
 pytestmark = pytest.mark.skipif(
     not (UA_SKILLS / "understand" / "scan-project.mjs").is_file()
     or not (UA_PLUGIN / "packages" / "core" / "dist" / "index.js").is_file()
-    or shutil.which("node") is None or shutil.which("bwrap") is None,
-    reason="needs the Understand-Anything clone with its built core, node and bubblewrap")
+    or shutil.which("node") is None,
+    reason="needs the Understand-Anything clone with its built core and node")
 
 
 # ---- running things the way the model does ---------------------------------------------------------------------------
 
 def _sh(command: str, ws: Path) -> tuple[int, str]:
-    """One run_bash command: the policy decides in auto mode, then the real sandbox runs it (DREAM-105)."""
+    """One run_bash command: the policy decides in auto mode, then the host runs it (no sandbox since 2026-10-11)."""
     from dream.core.execution import ExecutionContext, ExecutionScope, execute_bash
     result, contained = asyncio.run(execute_bash(command, ExecutionContext(ExecutionScope(ws), mode="auto"), timeout=300))
-    assert contained
+    assert not contained
     return result.returncode, result.output.decode("utf-8", "replace")
 
 

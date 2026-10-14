@@ -2,13 +2,14 @@
 
 Owner, 2026-09-23: [feedback] The plugin's 58,868-byte
 SKILL.md is written for Claude Code subagents and a shell that can see the plugin folder; in Dream the scripts run
-with run_bash, whose sandbox shows the plugin folder read-only as `$UA_SKILLS` (DREAM-105), and the live MiMo run spent
+with run_bash, which finds the plugin folder as `$UA_SKILLS` (DREAM-105), and the live MiMo run spent
 ~90 tool calls re-deriving its environment.
 
 What is pinned here: (1) the curated package and its size; (2) the four `.ua/` files in the dashboard's shapes, checked
 by the skill's own glue; (3) the curated `understand` outranks the plugin's for the name and the map phrases while the
 plugin's skill stays reachable; (4) a dry run of every deterministic step on a fixture repository through the real
-run_bash sandbox -- the commands come from the SKILL.md itself -- with the model's part hand-written; (5) the suites.
+run_bash (on the host, no sandbox since 2026-10-11) -- the commands come from the SKILL.md itself -- with the model's
+part hand-written; (5) the suites.
 """
 from __future__ import annotations
 
@@ -99,7 +100,7 @@ def test_it_ships_as_a_small_curated_package(curated, skill_text):
     wheel = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["hatch"]["build"]["targets"]["wheel"]
     assert "skills/understand" in wheel["only-include"]
     assert GLUE.is_file() and (SKILL / "references" / "schema.md").is_file()
-    # 2026-10-01: the glue's fallback copies the real file with the shell ($DREAM_SKILLS, readable in the sandbox),
+    # 2026-10-01: the glue's fallback copies the real file with the shell ($DREAM_SKILLS, readable by run_bash),
     # never rebuilt from skill_file's text, which shortens long files
     assert "references/schema.md" in skill_text and 'cp "$DREAM_SKILLS/understand/glue.py"' in skill_text
     # the bundle is what skill_open lists, so the model can fetch the two files it names -- and nothing else is there
@@ -114,7 +115,7 @@ def test_the_pipeline_is_imperative_and_names_every_script_and_result(skill_text
         assert name in body, name
     assert "--exclude-analysis-data" in body and "--exclude" in body
     assert "skill_file(" in body and "ua_run" not in body
-    # DREAM-105: every script runs with run_bash from $UA_SKILLS, the plugin folder the sandbox shows read-only
+    # DREAM-105: every script runs with run_bash from $UA_SKILLS, the plugin folder
     for script in SCRIPTS:
         assert f'"$UA_SKILLS/understand/{script}"' in body, script
     # numbered steps a local model follows in order, and every glue command the dry run uses
@@ -617,7 +618,7 @@ def test_the_draft_sends_each_key_file_to_a_worker(glue):
     assert not re.search(r"^\s+\S+ \(", text, re.M)                      # no line reads as a key file's own line
 
 
-# ---- (4) the dry run: every deterministic step, the SKILL.md's own commands, the real run_bash sandbox --------------
+# ---- (4) the dry run: every deterministic step, the SKILL.md's own commands, the real run_bash -------------------------
 
 FIXTURE = {
     "README.md": "# Rocketlog\n\nA tiny command-line tool that records rocket launches in a JSON file.\n",
@@ -664,10 +665,11 @@ def _git(root: Path, *args: str) -> str:
 
 def _sh(command: str, workspace: Path):
     """One run_bash command exactly as the model's run_bash runs it (DREAM-105): the policy decides first in auto mode
-    (a refusal raises), then the real sandbox runs it with the skills' script folders mounted read-only."""
+    (a refusal raises), then the host runs it (no sandbox since 2026-10-11) with the skills' script folders in its
+    environment."""
     from dream.core.execution import ExecutionContext, ExecutionScope, execute_bash
     result, contained = asyncio.run(execute_bash(command, ExecutionContext(ExecutionScope(Path(workspace)), mode="auto")))
-    assert contained
+    assert not contained
     return result
 
 
@@ -699,9 +701,8 @@ EXTRA_EDGES = (("service:Dockerfile", "file:rocketlog/cli.py", "deploys", 0.7),
 def mapped(tmp_path_factory, skill_text):
     """The whole pipeline on the fixture, the model's steps hand-written. Skipped without the plugin."""
     if not (UA_SKILLS / "understand" / "scan-project.mjs").is_file() or not (
-            UA_PLUGIN / "packages" / "core" / "dist" / "index.js").is_file() or shutil.which("node") is None or (
-            shutil.which("bwrap") is None):
-        pytest.skip("needs the Understand-Anything clone with its built core, node and bubblewrap")
+            UA_PLUGIN / "packages" / "core" / "dist" / "index.js").is_file() or shutil.which("node") is None:
+        pytest.skip("needs the Understand-Anything clone with its built core and node")
     root = tmp_path_factory.mktemp("rocketlog")
     for rel, text in FIXTURE.items():
         p = root / rel
@@ -740,7 +741,7 @@ def mapped(tmp_path_factory, skill_text):
     log.append(batch_listing)
     batches = json.loads((root / ".ua/intermediate/batches.json").read_text())
     # step 4 -- the parser per batch, then the worker tasks. Each worker is simulated (_part writes what its brief
-    # lists); its two run_bash calls, the brief and the check, run in the real sandbox as a `coder` worker's do.
+    # lists); its two run_bash calls, the brief and the check, run through the real run_bash as a `coder` worker's do.
     structure_text = ""
     for b in batches["batches"]:
         i = b["batchIndex"]
@@ -1023,14 +1024,16 @@ def test_a_symlink_inside_a_skill_root_does_not_open_the_allowance(tmp_path, mon
     assert decision == "ask" and reason.startswith("outside workspace")
 
 
-def test_the_plugin_scripts_are_confined_to_the_workspace_whatever_their_inputs_say(tmp_path):
-    """DREAM-105, keeping DREAM-102's round-6 guarantee: build-fingerprints, extract-structure and extract-import-map take
-    their project root from an INPUT file the model writes, and every script writes through any symlink the workspace
-    holds. The scripts run with run_bash inside its sandbox -- the workspace read-write, the skills' script folders and
-    node read-only, nothing else of the host -- so neither can reach outside. The policy lets all three commands run."""
+def test_the_plugin_scripts_follow_their_inputs_outside_the_workspace_without_a_sandbox(tmp_path):
+    """DREAM-105/DREAM-102 round 6, after the owner's 2026-10-11 decision (no shell sandbox): build-fingerprints,
+    extract-structure and extract-import-map take their project root from an INPUT file the model writes, and every
+    script writes through any symlink the workspace holds. Until 2026-10-11 run_bash's sandbox kept both inside the
+    workspace; run_bash now runs on the host with the owner's access, so an input naming another folder is read and
+    written there. Pinned on a stand-in folder under tmp_path, so a returning boundary shows up here. The policy lets
+    all three commands run, and the same scripts inside the workspace still work."""
     if not (UA_SKILLS / "understand" / "build-fingerprints.mjs").is_file() or not (
-            UA_PLUGIN / "packages" / "core" / "dist" / "index.js").is_file() or not shutil.which("node") or not shutil.which("bwrap"):
-        pytest.skip("needs the Understand-Anything clone with its built core, node and bubblewrap")
+            UA_PLUGIN / "packages" / "core" / "dist" / "index.js").is_file() or not shutil.which("node"):
+        pytest.skip("needs the Understand-Anything clone with its built core and node")
     ws, outside = tmp_path / "ws", tmp_path / "outside"
     (ws / ".ua" / "tmp").mkdir(parents=True)
     (ws / "sub").mkdir()
@@ -1049,11 +1052,11 @@ def test_the_plugin_scripts_are_confined_to_the_workspace_whatever_their_inputs_
                     f'node "$UA_SKILLS/understand/extract-structure.mjs" {shlex.quote(str(st_in))} {shlex.quote(str(st_out))}',
                     f'node "$UA_SKILLS/understand/generate-ignore.mjs" {shlex.quote(str(ws / "sub"))}'):
         _sh(command, ws)                                            # the exit may be an error; what it touched counts
-    assert sorted(str(p.relative_to(outside)) for p in outside.rglob("*")) == before   # nothing written outside
-    assert not (outside / ".ua").exists() and not any((outside / "ua-target").iterdir())
+    after = sorted(str(p.relative_to(outside)) for p in outside.rglob("*"))
+    assert set(after) - set(before) == {".ua", ".ua/fingerprints.json", "ua-target/.understandignore"}   # written there
     text = st_out.read_text() if st_out.is_file() else ""
-    assert "outside_function_dp_7731" not in text and "OutsideClassDP" not in text and "DP-7731" not in text   # nor read
-    # the same scripts inside the workspace still work: the boundary is the workspace, not the plugin
+    assert "outside_function_dp_7731" in text and "DP-7731" in text                                    # and read
+    # the same scripts inside the workspace still work
     (ws / "src").mkdir()
     (ws / "src" / "mod.py").write_text("def inside_function():\n    return 1\n")
     st_in.write_text(json.dumps({"projectRoot": str(ws), "batchImportData": {}, "batchFiles": [
@@ -1064,7 +1067,7 @@ def test_the_plugin_scripts_are_confined_to_the_workspace_whatever_their_inputs_
 
 def test_the_plugin_scripts_run_with_run_bash_like_any_command(tmp_path):
     """DREAM-105: no runner tool and no approval step. The plugin's scripts run with run_bash, the way Claude Code runs
-    them with Bash; the sandbox shows the plugin's clone (and node) read-only, and skill_open says so."""
+    them with Bash; run_bash finds the plugin's clone (and node), and skill_open says so."""
     from dream.core import skill_runtime
     from dream.tools import registry
     assert "ua_run" not in {t.name for t in registry._BASE_TOOLS}
@@ -1077,4 +1080,4 @@ def test_the_plugin_scripts_run_with_run_bash_like_any_command(tmp_path):
     found, _ = loader.discover([UA_SKILLS])
     plugin_understand = next(s for s in found if s.name == "understand")
     line = installed_skill_tools.directory_line(plugin_understand, tmp_path)
-    assert "readable in run_bash's sandbox" in line and "cannot see" not in line, line
+    assert "readable by run_bash" in line and "sandbox" not in line, line

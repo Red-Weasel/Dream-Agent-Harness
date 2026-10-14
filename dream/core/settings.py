@@ -92,7 +92,12 @@ EVALUATOR_ENVS = ("DREAM_EVALUATOR_PROVIDER", "DREAM_EVALUATOR_MODEL")   # read 
 _AGENT = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 # Sections of the global file that someone reads; `check` lists any other as unknown (it is still kept).
 _KNOWN_SECTIONS = {"version", "profile", "overrides", "models", "roles", "output", "behaviour", "blender", "studio",
-                   "engine", "nested"}
+                   "engine", "nested", "numeric"}
+# Owner 2026-10-13: the DREAM_* numbers (environment.NUMERIC_SETTINGS) are saved settings too, in the global file's
+# "numeric" section as their text ({"frequency_penalty": "0"}); config.apply_saved_numeric applies them when Dream
+# starts and a set variable still wins. DREAM_MAX_TOKENS is output.max_tokens. Setting key -> variable:
+NUMERIC_KEYS = {"numeric." + name.removeprefix("DREAM_").lower(): name for name in NUMERIC_SETTINGS
+                if name != "DREAM_MAX_TOKENS"}
 # Max agents (the owner's settings plan of 2026-10-01): how many sub-agents run AT THE SAME TIME, with every provider.
 # Past it a sub-agent waits in line and starts when one finishes; none is refused for count. Unset = no limit, the
 # default. On the local engine what runs at once is the smaller of its lanes and this. It replaces DREAM-197's
@@ -290,7 +295,37 @@ def validate(raw: dict) -> dict:
     _validate_output(raw)
     _validate_behaviour(raw)
     _validate_nested(raw)
+    _validate_numeric(raw)
     return raw
+
+
+def numeric_text(key: str, text: object) -> str:
+    """A numeric.* setting's value as it is saved: parsed by the same rule Dream applies at start (an integer or a
+    finite number; the unlimited ones also take none / 0), written back plainly ("none" for no limit)."""
+    name = NUMERIC_KEYS[key]
+    if isinstance(text, bool) or not isinstance(text, (str, int, float)):
+        raise ValueError(f"{key} must be a number")
+    try:
+        value = read_numeric(name, environ={name: str(text).strip()})
+    except ValueError:
+        spec = NUMERIC_SETTINGS[name]
+        kind = "an integer" if spec.kind is int else "a finite number"
+        raise ValueError(f"{key} must be {kind}" + (" (none or 0 for no limit)" if spec.unlimited else "")
+                         + f", not {shown(repr(text))}") from None
+    return "none" if value is None else str(value)
+
+
+def _validate_numeric(raw: dict) -> None:
+    node = raw.get("numeric", {})
+    if not isinstance(node, dict):
+        raise ValueError("numeric must be an object")
+    for name, text in node.items():
+        key = f"numeric.{shown(name)}"
+        if key not in NUMERIC_KEYS:
+            raise ValueError(f"{key} is not a numeric setting")
+        if not isinstance(text, str):
+            raise ValueError(f"{key} must be saved as text, such as \"0.3\"")
+        numeric_text(key, text)
 
 
 def _checked(check, raw: dict, path: Path | None = None) -> Any:
@@ -864,10 +899,18 @@ def effective(*, provider: str = "machx", model: str | None = None, session: dic
             row_key, n = f"{key} ({n})", n + 1
         rows[row_key] = Effective(roles[name], unknown_source)
 
-    for name in NUMERIC_SETTINGS:
-        if name != "DREAM_MAX_TOKENS":    # output.max_tokens above
-            rows["numeric." + name.removeprefix("DREAM_").lower()] = (
-                _env_row(name, read_numeric(name)) if name in env else Effective(read_numeric(name), "default"))
+    numeric = saved.get("numeric", {}) if isinstance(saved.get("numeric", {}), dict) else {}
+    for key, name in NUMERIC_KEYS.items():   # (output.max_tokens above)
+        short = key.removeprefix("numeric.")
+        if name in env:
+            rows[key] = _env_row(name, read_numeric(name))
+        elif isinstance(numeric.get(short), str):
+            try:
+                rows[key] = Effective(read_numeric(name, environ={name: numeric[short]}), "global")
+            except ValueError:            # a hand-edited value: shown as saved, so the tab can replace it
+                rows[key] = Effective(numeric[short], "global")
+        else:
+            rows[key] = Effective(read_numeric(name, environ={}), "default")
     return rows
 
 
@@ -891,14 +934,15 @@ def paths() -> dict[str, str]:
 SETTABLE = ("output.max_tokens", "behaviour.vitals", STYLE_SETTING, *CONTEXT_SETTINGS, "roles.main.model|provider",
             "roles.subagents.<agent>.model|provider",
             "roles.verifier.model|provider", "roles.filer.model|provider", "roles.critic.provider|model",
-            "roles.evaluator.model|provider", "roles.reviewer.model|provider", NESTED_SETTING)
+            "roles.evaluator.model|provider", "roles.reviewer.model|provider", NESTED_SETTING, "numeric.<name>")
 _APPLIES = {"output": "the next Dream start (DREAM_MAX_TOKENS still wins); /maxtokens <n> changes the running one",
             "nested": "new sessions, and the running session from its next reply when set in Studio or with /settings "
                       "(a Claude-led session when it starts)",
             "behaviour": "new sessions, and this one when set with /settings",
             "roles": "the next run of that job: a sub-agent, the verifier or the filer, /critique, the loop's "
                      "evaluator, the prompt optimizer or /review",
-            "roles.main": "the next time Dream attaches to a local endpoint that lists several models"}
+            "roles.main": "the next time Dream attaches to a local endpoint that lists several models",
+            "numeric": "the next Dream start (a set DREAM_* variable still wins)"}
 
 
 def _applies(key: str) -> str:
@@ -970,6 +1014,9 @@ def _parse(key: str, text: str) -> Any:
 
 def _nested_global_only(key: str, scope: str) -> None:
     """nested.max_agents lives in the global file only: a cloned repository's project file may not change it."""
+    if key in NUMERIC_KEYS and scope != "global":
+        raise ValueError(f"{key}: the numeric settings are set on this computer only, in the global file "
+                         f"{shown_path(settings_path())} (run it without --project)")
     if key == NESTED_SETTING and scope != "global":
         raise ValueError(f"{key}: a project file may not set nested.max_agents; it is set on this computer, in the "
                          f"global file {shown_path(settings_path())} (run it without --project)")
@@ -1065,6 +1112,17 @@ def set_value(key: str, text: str, *, scope: str = "global") -> str:
                                  f"object; make it one or remove it, then set {key} again")
             node[name] = value
             return {**saved, "version": 1}
+    elif key in NUMERIC_KEYS:
+        text = numeric_text(key, text)
+
+        def change(saved):
+            saved = copy.deepcopy(saved)
+            node = saved.setdefault("numeric", {})
+            if not isinstance(node, dict):
+                raise ValueError(f"Cannot use runtime settings {shown_path(settings_path())}: numeric must be an "
+                                 f"object; make it one or remove it, then set {key} again")
+            node[key.removeprefix("numeric.")] = text
+            return {**saved, "version": 1}
     elif key.startswith("roles."):
         where, field = _role_key(key)
         if field is None:
@@ -1117,7 +1175,7 @@ def unset_value(key: str, *, scope: str = "global") -> str:
     role goes too. Removing a field the role requires (a sub-agent's, the verifier's or the filer's model; the
     critic's provider) removes the role."""
     _nested_global_only(key, scope)
-    if key in ("output.max_tokens", "behaviour.vitals", STYLE_SETTING, *CONTEXT_SETTINGS, NESTED_SETTING):
+    if key in ("output.max_tokens", "behaviour.vitals", STYLE_SETTING, *CONTEXT_SETTINGS, NESTED_SETTING) or key in NUMERIC_KEYS:
         section, name = key.split(".")
         trail = [(section,), (section, name)]
     elif key.startswith("roles."):

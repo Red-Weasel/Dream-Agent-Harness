@@ -148,7 +148,8 @@ _DELEGATING = {"Task", "Agent", "delegate_local"}  # a subagent can write; not r
 # later to include a name some custom tool already uses.
 _CUSTOM_NAMES: set[str] = set()
 
-_PATH_KEYS = ("file_path", "path", "notebook_path", "save_path", "output_path")
+# `dest`: library_materialize's destination (DREAM-290: it was unchecked, so a write anywhere on the host went free).
+_PATH_KEYS = ("file_path", "path", "notebook_path", "save_path", "output_path", "dest")
 _RM_RE = re.compile(r"(^|[;&|]\s*)rm\s")
 
 # Shell confinement is decided by FAILING SAFE: a command asks unless it can be

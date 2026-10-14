@@ -193,7 +193,8 @@ async def test_profile_numbers_and_next_session_do_not_change_canvas(controls, t
     await page.locator("#dc-idle_timeout_s").fill("90.5")
     await page.get_by_role("button", name="Save for next session").click()
     await expect(page.locator("#dc-feedback")).to_contain_text("This session remains balanced")
-    assert api.calls == READ_ONLY_STARTUP_CALLS + [{"action": "profile", "profile": "lean", "overrides": {"context_limit": 16384, "idle_timeout_s": 90.5}}]
+    assert api.calls == READ_ONLY_STARTUP_CALLS + [{"action": "profile", "profile": "lean", "overrides": {"context_limit": 16384, "idle_timeout_s": 90.5},
+                                                    "replace": ["context_limit", "output_tokens", "idle_timeout_s", "vision"]}]
     assert all(h.get("x-dream-token") == server.token for h in api.headers)
     await no_overflow(page)
     await page.set_viewport_size({"width": 480, "height": 800})
@@ -408,6 +409,8 @@ async def test_stop_remains_visible_and_usable_during_slow_extraction(controls):
 
 @pytest.mark.parametrize("vision", ["auto", "true", "false"])
 async def test_vision_override_has_json_types_and_preserves_other_limits(controls, vision):
+    """Since 2026-10-13 the form sends only its own fields and names them in `replace`; the server merges them into the
+    file as it is then, so max_run_tools stays (test_settings_editable_numbers covers that merge)."""
     _, page, api, url, errors = controls
     api.runtime["settings"]["overrides"] = {"max_run_tools": 75, "vision": True}
     api.runtime["settings"]["models"] = {"openai:fixture-model": {"vision": False}}
@@ -416,10 +419,11 @@ async def test_vision_override_has_json_types_and_preserves_other_limits(control
     await page.locator("#dc-vision").select_option(vision)
     await page.get_by_role("button", name="Save for next session").click()
     await expect(page.locator("#dc-feedback")).to_contain_text("Saved auto for new sessions")
-    expected = {"max_run_tools": 75}
+    expected = {}
     if vision != "auto":
         expected["vision"] = vision == "true"
-    assert api.calls[-1] == {"action": "profile", "profile": "auto", "overrides": expected}
+    assert api.calls[-1] == {"action": "profile", "profile": "auto", "overrides": expected,
+                             "replace": ["context_limit", "output_tokens", "idle_timeout_s", "vision"]}
     assert errors == []
 
 

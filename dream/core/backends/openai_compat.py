@@ -10,6 +10,7 @@ directly via their ``.handler`` — the same tools the Claude backend uses.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import json
 import logging
@@ -1434,19 +1435,37 @@ _PARAM_RE = re.compile(
 )
 _WRAPPER_RE = re.compile(r"</?tool_calls\s*>")
 # A call that was started but never closed — only meaningful once parsing has
-# already come up empty, so anything left is unterminated.
-_OPEN_INVOKE_RE = re.compile(r"<invoke\s+name=")
+# already come up empty, so anything left is unterminated. Either text form: DeepSeek's <invoke> or Qwen's
+# <tool_call><function=...> (2026-10-12; below). An opening quoted in code (a ``` block or `inline`) is prose.
+_OPEN_INVOKE_RE = re.compile(r"<invoke\s+name=|<tool_call>\s*<function=")
+_QUOTED_CODE_RE = re.compile(r"```.*?(?:```|\Z)|`[^`\n]*`", re.DOTALL)
+# What a well-formed tool name looks like; anything else that names no tool is a slip (`run_b=`).
+_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
 
 
-def _parse_text_tool_calls(text: str) -> tuple[str, list[dict[str, str]]]:
+def _open_call(text: str) -> bool:
+    return bool(_OPEN_INVOKE_RE.search(_QUOTED_CODE_RE.sub("", text)))
+# Qwen's own form, <tool_call><function=NAME><parameter=K>V</parameter></function></tool_call>. MachX parses it
+# only for a function the request's tools array lists, so a call to a tool this backend deferred (web_search,
+# browse) arrived as text and ended the turn (2026-10-12, Flash-Next). Its values carry no type marker: the
+# tool's schema types them, as the server's parser does.
+_FUNCTION_CALL_RE = re.compile(
+    r"<tool_call>\s*<function=([^>\s]+)\s*>(.*?)</function\s*>\s*</tool_call\s*>", re.DOTALL
+)
+_FUNCTION_PARAM_RE = re.compile(r"<parameter=([^>\s]+)\s*>(.*?)</parameter\s*>", re.DOTALL)
+
+
+def _parse_text_tool_calls(text: str, schemas: Iterable[dict[str, Any]] = ()
+                           ) -> tuple[str, list[dict[str, str]]]:
     """Split a message body into (prose, calls) — calls in the same shape the
     stream builds, so the loop can't tell where they came from.
 
-    Only complete `<invoke>…</invoke>` blocks count: a body cut off mid-call is
-    left alone as prose rather than half-executed."""
+    Only complete `<invoke>…</invoke>` or `<tool_call>…</tool_call>` blocks
+    count: a body cut off mid-call is left alone as prose rather than
+    half-executed. `schemas` types the Qwen form's values."""
     matches = list(_INVOKE_RE.finditer(text))
     if not matches:
-        return text, []
+        return _parse_function_calls(text, schemas)
     calls = []
     for i, m in enumerate(matches):
         args: dict[str, Any] = {}
@@ -1468,6 +1487,38 @@ def _parse_text_tool_calls(text: str) -> tuple[str, list[dict[str, str]]]:
         })
     rest = _INVOKE_RE.sub("", text)
     return _WRAPPER_RE.sub("", rest).strip(), calls
+
+
+def _parse_function_calls(text: str, schemas: Iterable[dict[str, Any]]) -> tuple[str, list[dict[str, str]]]:
+    """The Qwen form of _parse_text_tool_calls. A parameter the schema says is a
+    string stays one ("2010" is a search, not a number); any other is read as
+    JSON where it parses."""
+    matches = list(_FUNCTION_CALL_RE.finditer(text))
+    if not matches:
+        return text, []
+    props = {s["function"]["name"]: (s["function"].get("parameters") or {}).get("properties") or {}
+             for s in schemas}
+    calls = []
+    for i, m in enumerate(matches):
+        types = props.get(m.group(1), {})
+        args: dict[str, Any] = {}
+        for name, raw in (p.groups() for p in _FUNCTION_PARAM_RE.finditer(m.group(2))):
+            raw = raw[1:] if raw.startswith("\n") else raw     # the form puts the value on its own line
+            raw = raw[:-1] if raw.endswith("\n") else raw
+            kind = (types.get(name) or {}).get("type")
+            if "string" in (kind if isinstance(kind, list) else [kind]):
+                args[name] = raw
+            else:
+                try:
+                    args[name] = json.loads(raw)
+                except json.JSONDecodeError:
+                    args[name] = raw
+        calls.append({
+            "id": f"text_{i}",
+            "name": m.group(1),
+            "args": json.dumps(args, ensure_ascii=False),
+        })
+    return _FUNCTION_CALL_RE.sub("", text).strip(), calls
 
 
 class OpenAICompatBackend(Backend):
@@ -4248,13 +4299,14 @@ class OpenAICompatBackend(Backend):
         the wrapper's name, leaves the mode DEFAULT and is said (logged now, a system line at the first turn):
         never a silent enable, never a silent ignore. The state is this instance's alone.
 
-        Correction 1: with no mode named, this is the mode the PROCESS started in (discovery.startup) -- the same
-        frozen value the system prompt and task skill selection follow -- not the environment as it happens to be
-        when this backend is built. A builder that names a mode gets it for this backend's tools array only: the
-        callers it does not also hand the mode to (the Engine's skill selection today) keep the process's, and a
+        Correction 1: with no mode named, this is the mode the PROCESS started in for this provider
+        (discovery.for_provider: unset, description discovery is for a local model only) -- the same frozen value
+        the Engine's system prompt and task skill selection follow -- not the environment as it happens to be when
+        this backend is built. A builder that names a mode gets it for this backend's tools array only: the
+        callers it does not also hand the mode to keep the process's, and a
         backend built in another mode than the process's says exactly that at its first turn. No per-session
         isolation is claimed."""
-        asked = discovery.resolve(requested)
+        asked = discovery.resolve(requested) if requested is not None else discovery.for_provider(self.provider)
         mode, notes = asked, []
         if asked.problem:
             notes.append(asked.problem)
@@ -4273,10 +4325,11 @@ class OpenAICompatBackend(Backend):
                 _LOG.warning("%s", problem)
             else:
                 notes.append(
-                    f"Experimental description discovery is on ({discovery.MODE_ENV}={discovery.DESCRIPTIONS}): "
-                    "the model starts with tool descriptions, reads a definition with "
-                    f"{tool_budget_schemas.LOOKUP_TOOL_NAME} and runs a tool with {discovery.INVOKE_TOOL_NAME}. "
-                    "Not qualified on any local model; fixed for this session.")
+                    "Description discovery is on (the default; "
+                    f"{discovery.MODE_ENV}={discovery.DEFAULT} turns it off): the model starts with one line per "
+                    f"tool, reads a definition with {tool_budget_schemas.LOOKUP_TOOL_NAME} and runs a tool with "
+                    f"{discovery.INVOKE_TOOL_NAME}. Measured on MiMo-V2.6: the same tasks right as the full tool list, "
+                    "about 3x fewer prompt tokens. Fixed for this session.")
         process = discovery.startup()
         if requested is not None and mode.name != process.name:
             # The builder's mode is this backend's alone. Said rather than left to be discovered: what is not
@@ -5480,7 +5533,18 @@ class OpenAICompatBackend(Backend):
                     "A path or saved screenshot is not visual evidence. Configure the model's vision "
                     "setting through a new session after confirming endpoint image support."), True
         if tool is None:
-            return f"Error: unknown tool '{name}'.", True
+            # A garbled name (live 2026-10-12: `run_b=` for run_bash, a decoding slip) is answered with the closest
+            # tool this call may use, never run in its place. A well-formed name (`task`, `todo_write`) is a tool the
+            # model believes in, not a slip: a near name could point it at a different tool, so it gets no guess.
+            hint = ""
+            if not _TOOL_NAME_RE.fullmatch(name):
+                from ... import extensions
+                usable = [n for n, t in self.tools_by_name.items()
+                          if (allowed is None or n in allowed or n.lower() in allowed)
+                          and (self.tool_scope is None or n in self.tool_scope) and extensions.tool_enabled(t)]
+                near = difflib.get_close_matches(re.sub(r"[^a-z0-9_]", "", name.lower()), usable, n=1, cutoff=0.6)
+                hint = f" Did you mean '{near[0]}'?" if near else ""
+            return f"Error: unknown tool '{name}'.{hint}", True
         from ... import extensions
         if not extensions.tool_enabled(tool):
             return f"Tool '{name}' is disabled in Dream settings.", True
@@ -6786,7 +6850,7 @@ class OpenAICompatBackend(Backend):
                 # acts at the top of the next round; an answer it leaves no room to continue goes back as it is
                 # (full_context). The verifier and the filer keep the result below.
                 text = content if isinstance(content, str) else ""
-                cut_call = bool(calls) or bool(_OPEN_INVOKE_RE.search(text))
+                cut_call = bool(calls) or _open_call(text)
                 answering = bool(text.strip()) and not cut_call
                 if answering:
                     pieces.append(text)
@@ -6840,7 +6904,7 @@ class OpenAICompatBackend(Backend):
                 # Same recovery the lead loop does — without it a subagent on a
                 # model the server can't parse hands its raw XML back to the lead
                 # as if it were the answer.
-                last_content, recovered = _parse_text_tool_calls(last_content)
+                last_content, recovered = _parse_text_tool_calls(last_content, self.tool_schemas)
                 calls = [{"id": c["id"], "type": "function",
                           "function": {"name": c["name"], "arguments": c["args"]}}
                          for c in recovered]
@@ -7599,7 +7663,7 @@ class OpenAICompatBackend(Backend):
             # ends the turn silently, which is the bug this whole path exists
             # to fix.
             if not tool_calls and subtype == 'success':
-                rest, recovered = _parse_text_tool_calls(full)
+                rest, recovered = _parse_text_tool_calls(full, self.tool_schemas)
                 if recovered:
                     full = rest
                     tool_calls = dict(enumerate(recovered))
@@ -7609,8 +7673,12 @@ class OpenAICompatBackend(Backend):
                 # of room mid-call (a big write_file is the usual one). Say so —
                 # otherwise this is indistinguishable from the model choosing to
                 # stop, which is the exact silence this whole path exists to end.
-                cut_call = truncated_call or ("tool" if _OPEN_INVOKE_RE.search(full) else None)
-                if cut_call:
+                cut_call = truncated_call or ("tool" if _open_call(full) else None)
+                if cut_call and subtype != "length" and not truncated_call:
+                    # The server ended the reply ("stop") with a call still open: no limit cut it (2026-10-12).
+                    yield Event("system", "A tool call was left unfinished: the reply ended before the call was "
+                                          "closed, so nothing ran.")
+                elif cut_call:
                     cap = self._max_tokens(self._ctx_fill())
                     why = (f"the {cap:,}-token limit for one generation"
                            if cap < config.MAX_OUTPUT_TOKENS

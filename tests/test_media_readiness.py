@@ -21,6 +21,8 @@ def test_status_presence_does_not_claim_encoder_or_shell_qualification(tmp_path,
     assert report['renderer']['execution_verified'] is None
     assert report['workspace'] == str(tmp_path)
     assert 'host' in report['renderer']['evidence_source'].lower()
+    # Encoding runs on the host and run_bash has no sandbox since 2026-10-11: the renderer block claims none.
+    assert 'sandbox' not in str(report['renderer']).lower()
 
 
 @pytest.mark.parametrize('images', [True, False])
@@ -39,6 +41,8 @@ async def test_tool_status_reports_actual_bound_workspace_and_configured_scope(t
     assert session['shell']['workspace'] == str(tmp_path)
     assert session['shell']['read_roots'] == [str(read_root)]
     assert session['shell']['availability_verified'] is None
+    assert 'sandbox' not in str(session).lower()                 # run_bash has no sandbox since 2026-10-11
+    assert 'sandbox' not in str(report['renderer']).lower()
 
 
 async def test_mismatched_execution_scope_is_not_reported_ready(tmp_path):

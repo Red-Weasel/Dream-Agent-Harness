@@ -7,6 +7,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from mcp.shared.memory import create_connected_server_and_client_session
 from claude_agent_sdk import (AssistantMessage, ResultMessage, TextBlock, ToolResultBlock,
                               ToolUseBlock, UserMessage)
 
@@ -251,6 +252,11 @@ async def test_sdk_reviewer_runs_with_claude_code_posture(mode, tmp_path):
     # The bound review reader stays attached and pre-approved (the loop's changed-file check).
     assert set(options.mcp_servers) == {'review'}
     assert options.allowed_tools == ['mcp__review__read_file', 'mcp__review__list_files']
+    # DREAM-294: the review reader loads whole, not behind Claude Code's tool search.
+    async with create_connected_server_and_client_session(options.mcp_servers['review']['instance']) as client:
+        listed = (await client.list_tools()).tools
+    assert {tool.name: tool.meta for tool in listed} == {name: {'anthropic/alwaysLoad': True}
+                                                          for name in ('read_file', 'list_files')}
     assert await _hook(options, 'mcp__review__read_file', {'path': 'x'}) is None
     decision, _ = await _hook(options, config.tool_id('update_plan'))
     assert decision == 'deny'

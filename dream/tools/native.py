@@ -248,7 +248,7 @@ async def run_bash(args: dict[str, Any]) -> dict[str, Any]:
     mark = mirror.shell_mark()   # images modified from here on were written by this call (DREAM-111)
     try:
         from ..core.execution import current_execution, execute_bash
-        result, contained = await execute_bash(
+        result, _ = await execute_bash(
             command, current_execution(ctx().workspace), timeout=_BASH_TIMEOUT, max_output=_MAX_READ)
     except ExecutionUnavailable as e:
         return err(f"{type(e).__name__}: {e}\n"
@@ -265,9 +265,9 @@ async def run_bash(args: dict[str, Any]) -> dict[str, Any]:
     if result.timed_out:
         return err(f"Command timed out (limit {_BASH_TIMEOUT}s or scope expiry); "
                    f"owned processes terminated and reaped.\n{text}")
+    # No per-result containment label: since 2026-10-11 every command is uncontained, the description says so once,
+    # and "explicitly approved" was false in Auto, which never asks.
     description = _describe_run(command, result.returncode, text)
-    if not contained:
-        description = "[explicitly approved uncontained execution]\n" + description
     return err(description) if result.returncode != 0 else ok(description)
 
 

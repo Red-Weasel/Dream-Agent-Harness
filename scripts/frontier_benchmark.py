@@ -199,6 +199,11 @@ def _tools_for(config_id) -> None:
     for name, on in wanted.items():
         if extensions.is_enabled(f"tool:{name}") != on:
             extensions.set_enabled(f"tool:{name}", on)
+    # Dream's live Blender (DREAM-109) is an MCP server the Engine starts on any computer with Blender and Xephyr: its
+    # blender__* tools (and the tool_schema lookup their number brings) are past the file readers too.
+    from dream.media import blender_live
+    if extensions.is_enabled(f"mcp:{blender_live.SERVER_NAME}"):
+        extensions.set_enabled(f"mcp:{blender_live.SERVER_NAME}", False)
 
 
 def _permission(config_id):

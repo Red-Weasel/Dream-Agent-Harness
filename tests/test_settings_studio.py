@@ -32,7 +32,12 @@ EDITABLE = {"output.max_tokens", "behaviour.vitals", "roles.subagents.default", 
             "behaviour.context_overflow", "behaviour.subagent_overflow",  # context management (DREAM-175)
             "behaviour.context_trigger", "behaviour.context_warning",
             "behaviour.response_style",                                   # response styles (DREAM-181)
-            "nested.max_agents"}                     # max agents (2026-10-01; the engine lanes are the load screen's)
+            "nested.max_agents",                     # max agents (2026-10-01; the engine lanes are the load screen's)
+            # owner 2026-10-13: every DREAM_* number and the profile's limits are saved from the tab too
+            *settings.NUMERIC_KEYS, *(f"overrides.{field}" for field in (
+                "context_limit", "output_tokens", "idle_timeout_s", "max_run_seconds", "max_run_tokens", "max_run_tools",
+                "max_wall_seconds", "schema_fraction", "subagent_timeout_s", "wake_tokens", "auto_filer",
+                "vision_helper"))}
 
 
 @pytest.fixture(autouse=True)
@@ -243,7 +248,7 @@ def test_environment_rows_are_read_only_and_a_save_is_refused(studio, monkeypatc
     ("roles.subagents.Bad Name", {"model": "fixture-small"}, "roles.subagents.Bad Name"),
     ("roles.critic", {"model": "fixture-small"}, "roles.critic"),
     ("profile", "lean", "profile"),
-    ("numeric.subagent_rounds", 40, "numeric.subagent_rounds"),
+    ("numeric.subagent_rounds", "forty", "numeric.subagent_rounds"),   # editable since 2026-10-13: a non-number
     (None, 1, "key"),
 ])
 def test_a_refused_value_names_its_key_and_writes_nothing(studio, key, value, named):
@@ -346,6 +351,15 @@ async def test_settings_tab_renders_sources_edits_round_trip_and_errors_are_inli
     await expect(env_row.locator(".dc-source")).to_have_text("Environment")
     await expect(env_row).to_contain_text("DREAM_SUBAGENT_ROUNDS")
     assert await env_row.locator("input,select,button").count() == 0
+
+    # Owner 2026-10-13: a DREAM_* number without its variable set is edited here, decimals included.
+    penalty = panel.locator('[data-key="numeric.frequency_penalty"]')
+    await expect(penalty.get_by_label("Frequency penalty")).to_have_attribute("step", "any")
+    await penalty.get_by_label("Frequency penalty").fill("0")
+    await penalty.get_by_role("button", name="Save").click()
+    await expect(page.locator("#dc-feedback")).to_contain_text("numeric.frequency_penalty")
+    assert read_settings()["numeric"]["frequency_penalty"] == "0.0"
+    await expect(panel.locator('[data-key="numeric.frequency_penalty"] .dc-source')).to_have_text("Saved")
 
     # An edit round-trips through the file.
     await row.get_by_label("Max output tokens").fill("60000")

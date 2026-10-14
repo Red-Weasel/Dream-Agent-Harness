@@ -401,13 +401,16 @@ class StudioServer:
             for account in accounts:
                 if account['status'] != 'unknown':
                     continue
-                proven = any(r['state'] == 'completed' and time.monotonic() - r.get('_completed_at', 0) < 900
+                # Never-set times are None, not 0: the monotonic clock counts from boot (2026-10-12).
+                proven = any(r['state'] == 'completed' and r.get('_completed_at') is not None
+                    and time.monotonic() - r['_completed_at'] < 900
                     and self._deepsleep.nodes.get(r['target'])
                     and self._deepsleep.nodes[r['target']].provider == account['provider']
                     for r in self._deepsleep.receipts.values())
                 if proven:
                     account.update(status='signed_in', detail='A request completed in this provider’s Dream terminal within the last fifteen minutes.')
-                elif any(n.provider == account['provider'] and time.monotonic() - n.tools_used_at < 900
+                elif any(n.provider == account['provider'] and n.tools_used_at is not None
+                         and time.monotonic() - n.tools_used_at < 900
                          for n in self._deepsleep.nodes.values()):
                     account.update(status='signed_in', detail='Its terminal in DeepSleep used Dream’s tools within the last fifteen minutes.')
         return JSONResponse({'accounts': accounts}, headers={'Cache-Control': 'no-store'})
